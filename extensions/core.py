@@ -36,7 +36,7 @@ async def on_message_create(event: hikari.MessageCreateEvent) -> None:
     message_cache[channel_id].append(time.time())
 
 
-@arc.utils.interval_loop(seconds=30)
+@arc.utils.interval_loop(minutes=1)
 async def update_slowmode(client: arc.GatewayClient, database: Database) -> None:
     try:
         enabled_guilds = await database.get_enabled_guilds()
