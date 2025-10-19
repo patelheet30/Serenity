@@ -2,6 +2,8 @@
 
 A Discord bot that automatically sets slowmode on channels based on message activity.
 
+The bot is still growing and is currently being utilised by 50+ servers across Discord.
+
 [Invite the Bot here](https://discord.com/oauth2/authorize?client_id=1359250509009260604&permissions=3120&integration_type=0&scope=bot+applications.commands)
 
 ## Features
@@ -115,3 +117,4 @@ The bot stores configuration and message data in an SQLite database, which is au
 
 - Built with [Hikari](https://github.com/hikari-py/hikari) and [Hikari-arc](https://github.com/hypergonial/hikari-arc)
 - Uses [UV](https://github.com/astral-sh/uv) for dependency management
+
