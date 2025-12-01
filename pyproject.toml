@@ -1,7 +1,7 @@
 [project]
 name = "serenity"
 version = "0.1.0"
-description = "Add your description here"
+description = "An intelligent Discord bot that automatically manages slowmode based on channel activity"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -14,9 +14,12 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
-    "pytest>=9.0.1",
-    "pytest-asyncio>=1.3.0",
-    "ruff>=0.14.7",
-    "ty>=0.0.1a29",
-]
+dev = ["pytest>=9.0.1", "pytest-asyncio>=1.3.0", "ruff>=0.14.7", "ty>=0.0.1a29"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
