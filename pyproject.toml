@@ -28,5 +28,32 @@ ignore = ["E501", "W293"]
 exclude = ["tests/*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+addopts = ["-v", "--strict-markers", "--tb=short"]
+
+markers = [
+    "asyncio: marks tests as async",
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+    "slow: marks tests as slow running",
+]
+
+[tool.coverage.run]
+source = ["core", "services", "database", "extensions", "utils"]
+omit = ["tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
