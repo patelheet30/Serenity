@@ -1,0 +1,22 @@
+[project]
+name = "serenity"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "hikari[speedups]>=2.5.0",
+    "hikari-arc[cron]>=2.1.1",
+    "aiosqlite>=0.21.0",
+    "hikari-toolbox>=0.1.7",
+    "python-dotenv>=1.2.1",
+    "uvloop>=0.21.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.7",
+    "ty>=0.0.1a29",
+]
