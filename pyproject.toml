@@ -29,11 +29,7 @@ exclude = ["tests/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-asyncio_mode = "auto"
-pythonpath = ["."]
+pythonpath = ["serenity"]
 
 addopts = ["-v", "--strict-markers", "--tb=short"]
 
@@ -45,7 +41,13 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["core", "services", "database", "extensions", "utils"]
+source = [
+    "serenity.core",
+    "serenity.services",
+    "serenity.database",
+    "serenity.extensions",
+    "serenity.utils",
+]
 omit = ["tests/*", "*/migrations/*"]
 
 [tool.coverage.report]
