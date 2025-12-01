@@ -23,3 +23,10 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501", "W293"]
+
+[tool.ty.src]
+exclude = ["tests/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
