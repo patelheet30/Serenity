@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 import aiosqlite
 
-from utils.logging import get_logger
+from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -68,7 +68,7 @@ class MigrationManager:
         """Run a single migration"""
         logger.info(f"Running migration {version}: {migration_file.stem}")
 
-        module = importlib.import_module(f"database.migrations.{migration_file.stem}")
+        module = importlib.import_module(f"serenity.database.migrations.{migration_file.stem}")
 
         # Run migration
         await module.upgrade(db)

@@ -1,10 +1,10 @@
 import math
 import time
 
-from core.constants import SLOWMODE_CONFIG
-from core.types import SlowmodeContext, SlowmodeDecision
-from database.repository import Repository
-from utils.logging import get_logger
+from serenity.core.constants import SLOWMODE_CONFIG
+from serenity.core.types import SlowmodeContext, SlowmodeDecision
+from serenity.database.repository import Repository
+from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
 

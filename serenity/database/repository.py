@@ -3,12 +3,12 @@ from pathlib import Path
 from typing import List, Optional
 
 import aiosqlite
-from core.constants import DATABASE_CONFIG
-from core.types import ChannelConfig, GuildConfig
-from utils.errors import DatabaseError
-from utils.logging import get_logger
 
-from database.migrations import MigrationManager
+from serenity.core.constants import DATABASE_CONFIG
+from serenity.core.types import ChannelConfig, GuildConfig
+from serenity.database.migrations import MigrationManager
+from serenity.utils.errors import DatabaseError
+from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
