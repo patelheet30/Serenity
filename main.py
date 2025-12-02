@@ -6,11 +6,14 @@ import arc
 import hikari
 from dotenv import load_dotenv
 
+from serenity.database.repository import Repository
+from serenity.services.slowmode_engine import SlowmodeEngine
+
 load_dotenv()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 
 logger = logging.getLogger("serenity")
@@ -31,10 +34,20 @@ bot = hikari.GatewayBot(
 
 client = arc.GatewayClient(bot)
 
+repo = Repository()
+engine = SlowmodeEngine(repo)
+
 
 @client.add_startup_hook
 async def on_startup(_: arc.GatewayClient) -> None:
     """Called when the bot starts up."""
+    await repo.init()
+
+    client.set_type_dependency(Repository, repo)
+    client.set_type_dependency(SlowmodeEngine, engine)
+
+    logger.info("Database initialized and dependencies set.")
+
     logger.info(f"Serenity is starting up... {bot.get_me()}")
     logger.info("Bot if ready!")
 
@@ -42,9 +55,13 @@ async def on_startup(_: arc.GatewayClient) -> None:
 @client.add_shutdown_hook
 async def on_shutdown(_: arc.GatewayClient) -> None:
     """Called when the bot is shutting down."""
+    await repo.close()
     logger.info("Serenity is shutting down...")
 
 
 if __name__ == "__main__":
     logger.info("Starting Serenity bot...")
+
+    client.load_extensions_from("serenity/extensions")
+
     bot.run()
