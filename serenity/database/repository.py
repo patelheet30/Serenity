@@ -58,6 +58,7 @@ class Repository:
             """INSERT INTO guild_config (guild_id) VALUES (?)""", (guild_id,)
         )
         await self.connection.commit()
+        logger.info(f"Created default channel config for guild {guild_id}.")
 
         return GuildConfig(
             guild_id=guild_id, is_enabled=True, default_threshold=10, update_interval=30
@@ -120,6 +121,7 @@ class Repository:
             (channel_id, guild_id),
         )
         await self.connection.commit()
+        logger.info(f"Created default channel config for channel {channel_id}.")
 
         return ChannelConfig(
             channel_id=channel_id, guild_id=guild_id, is_enabled=True, threshold=None
