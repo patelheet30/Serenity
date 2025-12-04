@@ -16,6 +16,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 
+
 logger = logging.getLogger("serenity")
 
 if os.name != "nt":
@@ -34,7 +35,8 @@ bot = hikari.GatewayBot(
 
 client = arc.GatewayClient(bot)
 
-repo = Repository()
+db_path = os.getenv("DATABASE_PATH", "data/serenity.db")
+repo = Repository(db_path=db_path)
 engine = SlowmodeEngine(repo)
 
 
