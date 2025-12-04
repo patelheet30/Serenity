@@ -1,5 +1,9 @@
 import asyncio
+import math
 import random
+import time
+from datetime import datetime
+from typing import List
 
 import arc
 import hikari
@@ -90,6 +94,102 @@ async def update_slowmode(
         logger.error(f"Error in update_slowmode task: {e}", exc_info=True)
 
 
+@arc.utils.interval_loop(seconds=3600)
+async def aggregate_historical_patterns(repo: Repository) -> None:
+    """Aggregate message activity into historical patterns.
+
+    This builds up a profile of "normal" activity for each channel at specific days and hours, which the slowmode engine uses to detect anomalies.
+    """
+    logger.info("Starting historical pattern aggregation...")
+
+    try:
+        current_time = int(time.time())
+        hour_timestamp = (current_time // 3600) * 3600
+        completed_hour_start = hour_timestamp - 3600
+
+        hour_dt = datetime.fromtimestamp(completed_hour_start)
+        day_of_week = hour_dt.weekday()
+        hour_of_day = hour_dt.hour
+
+        channels_with_activity = await _get_active_channels(
+            repo, completed_hour_start, hour_timestamp
+        )
+
+        logger.info(f"Found {len(channels_with_activity)} channels with activity in the last hour.")
+
+        updated_count = 0
+        for channel_id in channels_with_activity:
+            try:
+                message_count = await _get_message_count(
+                    repo, channel_id, completed_hour_start, hour_timestamp
+                )
+
+                messages_per_minute = message_count / 60.0
+
+                existing = await repo.get_expected_activity(channel_id, day_of_week, hour_of_day)
+
+                if existing is not None:
+                    new_avg, new_stddev, new_count = await _update_pattern_stats(
+                        repo, channel_id, day_of_week, hour_of_day, messages_per_minute
+                    )
+                else:
+                    new_avg = messages_per_minute
+                    new_stddev = 0.0
+                    new_count = 1
+
+                await repo.update_channel_pattern(
+                    channel_id, day_of_week, hour_of_day, new_avg, new_stddev, new_count
+                )
+
+                updated_count += 1
+            except Exception as e:
+                logger.error(
+                    f"Error updating pattern for channel {channel_id}: {e}",
+                    exc_info=True,
+                )
+        logger.info(
+            f"Historical pattern aggregation complete. Updated {updated_count} channel patterns "
+            f"for day={day_of_week}, hour={hour_of_day}"
+        )
+    except Exception as e:
+        logger.error(f"Error in aggregate_historical_patterns task: {e}", exc_info=True)
+
+
+@arc.utils.interval_loop(seconds=3600)
+async def aggregate_hourly_analytics(repo: Repository) -> None:
+    """Aggrgate message activity into hourly analytics summaries.
+
+    This provides the data for the /stats command and other analytics features.
+    """
+
+    logger.info("Starting hourly analytics aggregation...")
+
+    try:
+        current_time = int(time.time())
+        hour_timestamp = (current_time // 3600) * 3600
+        completed_hour_start = hour_timestamp - 3600
+
+        channels_with_activity = await _get_active_channels(
+            repo, completed_hour_start, hour_timestamp
+        )
+
+        updated_count = 0
+        for channel_id in channels_with_activity:
+            try:
+                await repo.aggregate_hourly_analytics(channel_id)
+                updated_count += 1
+            except Exception as e:
+                logger.error(
+                    f"Error aggregating analytics for channel {channel_id}: {e}",
+                    exc_info=True,
+                )
+        logger.info(
+            f"Hourly analytics aggregation complete. Updated analytics for {updated_count} channels."
+        )
+    except Exception as e:
+        logger.error(f"Error in aggregate_hourly_analytics task: {e}", exc_info=True)
+
+
 @arc.utils.interval_loop(hours=1)
 async def cleanup_old_data(repo: Repository) -> None:
     try:
@@ -99,6 +199,74 @@ async def cleanup_old_data(repo: Repository) -> None:
         logger.info("Old message activity data cleaned up.")
     except Exception as e:
         logger.error(f"Error cleaning up old data: {e}", exc_info=True)
+
+
+async def _get_active_channels(repo: Repository, start_time: int, end_time: int) -> List[int]:
+    if not repo.connection:
+        return []
+
+    async with repo.connection.execute(
+        """SELECT DISTINCT channel_id FROM message_activity
+           WHERE timestamp >= ? AND timestamp < ?""",
+        (start_time, end_time),
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    return [row["channel_id"] for row in rows]
+
+
+async def _get_message_count(
+    repo: Repository, channel_id: int, start_time: int, end_time: int
+) -> int:
+    if not repo.connection:
+        return 0
+
+    async with repo.connection.execute(
+        """SELECT sum(message_count) as total FROM message_activity
+        WHERE channel_id = ? AND timestamp >= ? AND timestamp < ?""",
+        (channel_id, start_time, end_time),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    return row["total"] if row and row["total"] else 0
+
+
+async def _update_pattern_stats(
+    repo: Repository,
+    channel_id: int,
+    day_of_week: int,
+    hour: int,
+    new_value: float,
+) -> tuple[float, float, int]:
+    if not repo.connection:
+        return new_value, 0.0, 1
+
+    async with repo.connection.execute(
+        """SELECT average_rate, stddev_message_rate, sample_count
+        FROM channel_patterns
+        WHERE channel_id = ? AND day_of_week = ? AND hour = ?""",
+        (channel_id, day_of_week, hour),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if not row:
+        return new_value, 0.0, 1
+
+    old_avg = row["average_rate"]
+    old_stddev = row["stddev_message_rate"]
+    old_count = row["sample_count"]
+
+    new_count = old_count + 1
+    new_avg = old_avg + (new_value - old_avg) / new_count
+
+    old_variance = old_stddev**2
+    old_sum_sq = old_variance * old_count
+
+    new_sum_sq = old_sum_sq + (new_value - old_avg) * (new_value - new_avg)
+    new_variance = new_sum_sq / new_count
+    new_stddev = math.sqrt(new_variance)
+
+    return new_avg, new_stddev, new_count
 
 
 @plugin.listen()
@@ -115,9 +283,10 @@ async def on_started(_: hikari.StartedEvent) -> None:
         repo=repo,
         engine=engine,
     )
-    cleanup_old_data.start(
-        repo=repo,
-    )
+    aggregate_historical_patterns.start(repo=repo)
+    aggregate_hourly_analytics.start(repo=repo)
+    cleanup_old_data.start(repo=repo)
+
     logger.info("Background tasks started.")
 
 
