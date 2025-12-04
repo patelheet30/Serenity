@@ -13,3 +13,6 @@ wheels/
 
 tests/
 data/
+local_data/
+
+download_database.sh
