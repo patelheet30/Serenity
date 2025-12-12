@@ -184,6 +184,21 @@ async def about(ctx: arc.GatewayContext) -> None:
         ),
         inline=False,
     )
+    
+    embed.add_field(
+        name="UPDATES",
+        value="We're currently working on new features and improvements! Stay tuned on our [Discord Server](https://discord.gg/SSdKyxwTZu) for updates.",
+    )
+    
+    embed.add_field(
+        name="** **",
+        value="** **",
+    )
+    
+    embed.add_field(
+        name="Support Server",
+        value="[Join Serenity Server](https://discord.gg/SSdKyxwTZu)",
+    )
 
     embed.set_footer(text="Built with Hikari & Hikari-Arc | Developed by patelheet30")
 
