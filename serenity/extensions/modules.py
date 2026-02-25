@@ -101,9 +101,9 @@ async def enable_module(
         arc.StrParams(
             "The module to enable.",
             choices=[
-                "Slowmode",
-                "Moderation",
-                "Logging",
+                hikari.CommandChoice(name="Slowmode", value="slowmode"),
+                hikari.CommandChoice(name="Moderation", value="moderation"),
+                hikari.CommandChoice(name="Logging", value="logging"),
             ],
         ),
     ],
@@ -190,9 +190,9 @@ async def disable_module(
         arc.StrParams(
             "The module to disable.",
             choices=[
-                "Slowmode",
-                "Moderation",
-                "Logging",
+                hikari.CommandChoice(name="Slowmode", value="slowmode"),
+                hikari.CommandChoice(name="Moderation", value="moderation"),
+                hikari.CommandChoice(name="Logging", value="logging"),
             ],
         ),
     ],
