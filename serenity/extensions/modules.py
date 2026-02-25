@@ -179,3 +179,95 @@ async def enable_module(
             "❌ An error occurred while enabling the module. Please try again later.",
             flags=hikari.MessageFlag.EPHEMERAL,
         )
+
+
+@module.include
+@arc.slash_subcommand("disable", "Disable a module for this server.")
+async def disable_module(
+    ctx: arc.GatewayContext,
+    module: arc.Option[
+        str,
+        arc.StrParams(
+            "The module to disable.",
+            choices=[
+                "Slowmode",
+                "Moderation",
+                "Logging",
+            ],
+        ),
+    ],
+    manager: ModuleManager = arc.inject(),
+) -> None:
+    if hikari.Permissions.MANAGE_GUILD not in ctx.member.permissions:  # type: ignore
+        raise SerenityPermissionError(
+            "You need the 'Manage Guild/Server' permission to disable modules."
+        )
+
+    if not ctx.guild_id:
+        await ctx.respond(
+            "❌ This command can only be used in a server.",
+            flags=hikari.MessageFlag.EPHEMERAL,
+        )
+        return
+
+    try:
+        module_type = ModuleType(module)
+
+        if not await manager.is_enabled(ctx.guild_id, module_type):
+            await ctx.respond(
+                f"❌ The module '{module_type.value}' is already disabled.",
+                flags=hikari.MessageFlag.EPHEMERAL,
+            )
+            return
+
+        await manager.disable_module(ctx.guild_id, module_type)
+
+        embed = hikari.Embed(
+            title="✅ Module Disabled",
+            description=f"The **{module}** module has been disabled for this server.",
+            color=0xFF0000,
+        )
+
+        if module_type == ModuleType.SLOWMODE:
+            embed.add_field(
+                name="Next Steps",
+                value="Automatic slowmode adjustments will no longer occur. You may want to manually adjust slowmode settings in your channels if needed.",
+                inline=False,
+            )
+        elif module_type == ModuleType.MODERATION:
+            embed.add_field(
+                name="Next Steps",
+                value="Moderation commands will no longer be available. Make sure to manage any existing moderation settings or roles as needed.",
+                inline=False,
+            )
+        elif module_type == ModuleType.LOGGING:
+            embed.add_field(
+                name="Next Steps",
+                value="Logging will stop. Moderation module will also be disabled as it depends on logging.",
+                inline=False,
+            )
+
+        await ctx.respond(embed=embed)
+        logger.info(f"Disabled module {module} in guild {ctx.guild_id} by user {ctx.user.id}")
+    except ConfigurationError as e:
+        await ctx.respond(f"❌ {str(e)}", flags=hikari.MessageFlag.EPHEMERAL)
+    except Exception as e:
+        logger.error(
+            f"Failed to disable module {module} in guild {ctx.guild_id}: {e}", exc_info=True
+        )
+        await ctx.respond(
+            "❌ An error occurred while disabling the module. Please try again later.",
+            flags=hikari.MessageFlag.EPHEMERAL,
+        )
+
+
+@arc.loader
+def load(client: arc.GatewayClient) -> None:
+    client.add_plugin(plugin)
+    logger.info("Module management commands loaded.")
+
+
+@arc.unloader
+def unload(client: arc.GatewayClient) -> None:
+    client.remove_plugin(plugin)
+    logger.info("Module management commands unloaded.")
