@@ -7,6 +7,8 @@ from serenity.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from serenity.database.repository import Repository
+else:
+    Repository = Any
 
 logger = get_logger(__name__)
 

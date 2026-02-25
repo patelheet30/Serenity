@@ -12,6 +12,9 @@ from serenity.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from serenity.core.modules import ModuleConfig, ModuleType
+else:
+    ModuleConfig = Any
+    ModuleType = Any
 
 logger = get_logger(__name__)
 
