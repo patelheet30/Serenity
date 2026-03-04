@@ -6,6 +6,7 @@ import arc
 import hikari
 from dotenv import load_dotenv
 
+from serenity.core.modules import ModuleManager
 from serenity.database.repository import Repository
 from serenity.services.slowmode_engine import SlowmodeEngine
 
@@ -38,6 +39,7 @@ client = arc.GatewayClient(bot)
 db_path = os.getenv("DATABASE_PATH", "data/serenity.db")
 repo = Repository(db_path=db_path)
 engine = SlowmodeEngine(repo)
+module_manager = ModuleManager(repo)
 
 
 @client.add_startup_hook
@@ -47,6 +49,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
 
     client.set_type_dependency(Repository, repo)
     client.set_type_dependency(SlowmodeEngine, engine)
+    client.set_type_dependency(ModuleManager, module_manager)
 
     logger.info("Database initialized and dependencies set.")
 
