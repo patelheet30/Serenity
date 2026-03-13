@@ -10,6 +10,17 @@ import hikari
 
 from serenity.core.constants import SLOWMODE_CONFIG
 from serenity.database.repository import Repository
+from serenity.services.metrics import (
+    ACTIVE_CHANNELS,
+    ACTIVE_GUILDS,
+    EFFECTIVENESS_SCORE,
+    ENGINE_DECISIONS,
+    MESSAGE_RATE,
+    SLOWMODE_CHANGES,
+    SLOWMODE_CURRENT,
+    TASK_DURATION,
+    TASK_ERRORS,
+)
 from serenity.services.slowmode_engine import SlowmodeEngine
 from serenity.utils.logging import channel_id as ctx_channel_id
 from serenity.utils.logging import get_logger
@@ -27,6 +38,10 @@ async def update_slowmode(
     engine: SlowmodeEngine,
 ) -> None:
     """Periodically update slowmode for all enabled channels."""
+    task_start = time.perf_counter()
+    total_enabled_guilds = 0
+    total_enabled_channels = 0
+
     try:
         guilds = client.app.cache.get_available_guilds_view()
 
@@ -61,12 +76,18 @@ async def update_slowmode(
                         current_slowmode,  # type: ignore
                     )
 
+                    current_rate = await repo.get_message_rate(channel_id, 60)
+                    MESSAGE_RATE.labels(channel_id=str(channel_id), guild_id=str(guild_id)).set(
+                        current_rate
+                    )
+
+                    eff_score = await repo.get_effectiveness_score(channel_id)
+                    EFFECTIVENESS_SCORE.labels(channel_id=str(channel_id)).set(eff_score)
+
                     if decision.slowmode_seconds != current_slowmode:
                         await client.app.rest.edit_channel(
                             channel_id, rate_limit_per_user=decision.slowmode_seconds
                         )
-
-                        current_rate = await repo.get_message_rate(channel_id, 60)
 
                         await repo.record_slowmode_change(
                             channel_id,
@@ -77,21 +98,47 @@ async def update_slowmode(
                             decision.confidence,
                         )
 
+                        if decision.slowmode_seconds > current_slowmode:
+                            direction = "increase"
+                        elif decision.slowmode_seconds == 0:
+                            direction = "reset"
+                        else:
+                            direction = "decrease"
+
+                        SLOWMODE_CHANGES.labels(direction=direction).inc()
+                        SLOWMODE_CURRENT.labels(
+                            channel_id=str(channel_id), guild_id=str(guild_id)
+                        ).set(decision.slowmode_seconds)
+                        ENGINE_DECISIONS.labels(outcome="changed").inc()
+
                         logger.info(
                             f"Updated slowmode: {current_slowmode}s -> {decision.slowmode_seconds}s "
                             f"(rate: {current_rate:.1f} msg/min, confidence: {decision.confidence:.2f})"
                         )
+                    else:
+                        ENGINE_DECISIONS.labels(outcome="unchanged").inc()
+                        SLOWMODE_CURRENT.labels(
+                            channel_id=str(channel_id), guild_id=str(guild_id)
+                        ).set(current_slowmode)
+
                 except Exception as e:
                     logger.error(
                         f"Error updating slowmode for channel {channel_id} in guild {guild_id}: {e}",
                         exc_info=True,
                     )
+                    TASK_ERRORS.labels(task_name="update_slowmode").inc()
                 finally:
                     ctx_channel_id.set(None)
 
             ctx_guild_id.set(None)
+
+        ACTIVE_GUILDS.set(total_enabled_guilds)
+        ACTIVE_CHANNELS.set(total_enabled_channels)
     except Exception as e:
         logger.error(f"Error in update_slowmode task: {e}", exc_info=True)
+        TASK_ERRORS.labels(task_name="update_slowmode").inc()
+    finally:
+        TASK_DURATION.labels(task_name="update_slowmode").observe(time.perf_counter() - task_start)
 
 
 @arc.utils.interval_loop(seconds=3600)
@@ -100,6 +147,7 @@ async def aggregate_historical_patterns(repo: Repository) -> None:
 
     This builds up a profile of "normal" activity for each channel at specific days and hours, which the slowmode engine uses to detect anomalies.
     """
+    task_start = time.perf_counter()
     logger.info("Starting historical pattern aggregation...")
 
     try:
@@ -153,6 +201,11 @@ async def aggregate_historical_patterns(repo: Repository) -> None:
         )
     except Exception as e:
         logger.error(f"Error in aggregate_historical_patterns task: {e}", exc_info=True)
+        TASK_ERRORS.labels(task_name="aggregate_historical_patterns").inc()
+    finally:
+        TASK_DURATION.labels(task_name="aggregate_historical_patterns").observe(
+            time.perf_counter() - task_start
+        )
 
 
 @arc.utils.interval_loop(seconds=3600)
@@ -161,7 +214,7 @@ async def aggregate_hourly_analytics(repo: Repository) -> None:
 
     This provides the data for the /stats command and other analytics features.
     """
-
+    task_start = time.perf_counter()
     logger.info("Starting hourly analytics aggregation...")
 
     try:
@@ -188,10 +241,16 @@ async def aggregate_hourly_analytics(repo: Repository) -> None:
         )
     except Exception as e:
         logger.error(f"Error in aggregate_hourly_analytics task: {e}", exc_info=True)
+        TASK_ERRORS.labels(task_name="aggregate_hourly_analytics").inc()
+    finally:
+        TASK_DURATION.labels(task_name="aggregate_hourly_analytics").observe(
+            time.perf_counter() - task_start
+        )
 
 
 @arc.utils.interval_loop(hours=1)
 async def cleanup_old_data(repo: Repository) -> None:
+    task_start = time.perf_counter()
     try:
         await repo.cleanup_old_message_activity(
             hours=SLOWMODE_CONFIG.MESSAGE_ACTIVITY_RETENTION_HOURS
@@ -199,6 +258,9 @@ async def cleanup_old_data(repo: Repository) -> None:
         logger.info("Old message activity data cleaned up.")
     except Exception as e:
         logger.error(f"Error cleaning up old data: {e}", exc_info=True)
+        TASK_ERRORS.labels(task_name="cleanup_old_data").inc()
+    finally:
+        TASK_DURATION.labels(task_name="cleanup_old_data").observe(time.perf_counter() - task_start)
 
 
 async def _get_active_channels(repo: Repository, start_time: int, end_time: int) -> List[int]:
