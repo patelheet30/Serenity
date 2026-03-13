@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 
+os.environ["PROMETHEUS_DISABLE_CREATED_SERIES"] = "true"
+
 import arc
 import hikari
 from dotenv import load_dotenv
