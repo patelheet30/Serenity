@@ -1,4 +1,4 @@
-name: Deploy to Fly.io
+name: Deploy to Oracle Cloud
 
 on:
   push:
@@ -8,17 +8,31 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to Fly.io
+    name: Deploy to Oracle
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Fly CLI
-        uses: superfly/flyctl-actions/setup-flyctl@master
-      
-      - name: Deploy to Fliy.io
-        run: flyctl deploy --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Copy files to Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          source: "."
+          target: "/home/ubuntu/serenity-bot"
+
+      - name: Build and Restart Docker Container
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/serenity-bot
+            # Pull the latest base images and rebuild the bot with the new code
+            docker compose up -d --build
+            # Clean up old, unused Docker images to save disk space
+            docker image prune -f
