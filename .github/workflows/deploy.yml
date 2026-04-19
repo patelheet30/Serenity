@@ -22,7 +22,7 @@ jobs:
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           source: "."
-          target: "/home/ubuntu/serenity-bot"
+          target: "/home/ubuntu/serenity"
 
       - name: Build and Restart Docker Container
         uses: appleboy/ssh-action@v0.1.10
@@ -31,7 +31,7 @@ jobs:
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           script: |
-            cd /home/ubuntu/serenity-bot
+            cd /home/ubuntu/serenity
             # Pull the latest base images and rebuild the bot with the new code
             docker compose up -d --build
             # Clean up old, unused Docker images to save disk space
