@@ -2,12 +2,16 @@ import asyncio
 import logging
 import os
 
+os.environ["PROMETHEUS_DISABLE_CREATED_SERIES"] = "true"
+
 import arc
 import hikari
 from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
 from serenity.database.repository import Repository
+from serenity.services.metrics import BOT_INFO
+from serenity.services.metrics_server import MetricsServer
 from serenity.services.slowmode_engine import SlowmodeEngine
 
 load_dotenv()
@@ -40,6 +44,7 @@ db_path = os.getenv("DATABASE_PATH", "data/serenity.db")
 repo = Repository(db_path=db_path)
 engine = SlowmodeEngine(repo)
 module_manager = ModuleManager(repo)
+metrics_server = MetricsServer(port=int(os.getenv("METRICS_PORT", "8080")))
 
 
 @client.add_startup_hook
@@ -51,6 +56,10 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(SlowmodeEngine, engine)
     client.set_type_dependency(ModuleManager, module_manager)
 
+    await metrics_server.start()
+
+    BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("FLY_APP_NAME", "local")})
+
     logger.info("Database initialized and dependencies set.")
 
     logger.info(f"Serenity is starting up... {bot.get_me()}")
@@ -60,6 +69,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
 @client.add_shutdown_hook
 async def on_shutdown(_: arc.GatewayClient) -> None:
     """Called when the bot is shutting down."""
+    await metrics_server.stop()
     await repo.close()
     logger.info("Serenity is shutting down...")
 

@@ -1,6 +1,6 @@
 [project]
 name = "serenity"
-version = "0.1.0"
+version = "1.0.0"
 description = "An intelligent Discord bot that automatically manages slowmode based on channel activity"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -11,6 +11,7 @@ dependencies = [
     "hikari-toolbox>=0.1.7",
     "python-dotenv>=1.2.1",
     "uvloop>=0.21.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
+    "prometheus-client>=0.24.1",
 ]
 
 [dependency-groups]

@@ -2,6 +2,7 @@ import arc
 import hikari
 
 from serenity.database.repository import Repository
+from serenity.services.metrics import MESSAGES_PROCESSED
 from serenity.utils.logging import channel_id as ctx_channel_id
 from serenity.utils.logging import get_logger
 
@@ -23,6 +24,8 @@ async def on_message_create(event: hikari.MessageCreateEvent) -> None:
 
     timestamp = int(event.message.timestamp.timestamp())
     await repo.record_message_activity(event.channel_id, timestamp)
+
+    MESSAGES_PROCESSED.labels(guild_id=str(event.message.guild_id)).inc()
 
 
 @plugin.listen()

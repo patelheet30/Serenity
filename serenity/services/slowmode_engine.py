@@ -4,6 +4,11 @@ import time
 from serenity.core.constants import SLOWMODE_CONFIG
 from serenity.core.types import SlowmodeContext, SlowmodeDecision
 from serenity.database.repository import Repository
+from serenity.services.metrics import (
+    ENGINE_CALCULATION_DURATION,
+    ENGINE_CONFIDENCE,
+    ENGINE_URGENCY_SCORE,
+)
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +137,7 @@ class SlowmodeEngine:
 
     async def calculate(self, channel_id: int, guild_id: int) -> SlowmodeDecision:
         """Calculate optimal slowmode for a channel."""
+        start_time = time.perf_counter()
         context = await self._build_context(channel_id, guild_id)
 
         rate_score = self._calculate_rate_score(context)
@@ -150,9 +156,16 @@ class SlowmodeEngine:
 
         final_slowmode = self._apply_hysteresis(target_slowmode, context.current_slowmode)
 
+        confidence = self._calculate_confidence(urgency_score, rate_score)
+
+        elapsed = time.perf_counter() - start_time
+        ENGINE_CALCULATION_DURATION.observe(elapsed)
+        ENGINE_URGENCY_SCORE.observe(urgency_score)
+        ENGINE_CONFIDENCE.observe(confidence)
+
         return SlowmodeDecision(
             slowmode_seconds=final_slowmode,
-            confidence=self._calculate_confidence(urgency_score, rate_score),
+            confidence=confidence,
             reasoning=self._build_reasoning(context, urgency_score, final_slowmode),
             factors={
                 "rate_score": rate_score,
