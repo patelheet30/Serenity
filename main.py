@@ -13,6 +13,8 @@ from serenity.database.repository import Repository
 from serenity.services.metrics import BOT_INFO
 from serenity.services.metrics_server import MetricsServer
 from serenity.services.slowmode_engine import SlowmodeEngine
+from serenity.services.logging_service import LoggingService
+from serenity.database.logging_repository import LoggingRepository
 
 load_dotenv()
 
@@ -35,7 +37,11 @@ if os.name != "nt":
 
 bot = hikari.GatewayBot(
     token=os.environ["TOKEN"],
-    intents=hikari.Intents.GUILD_MESSAGES | hikari.Intents.GUILDS,
+    intents= hikari.Intents.GUILD_MESSAGES
+    | hikari.Intents.GUILDS
+    | hikari.Intents.GUILD_MEMBERS          # Member join/leave/update  (privileged)
+    | hikari.Intents.GUILD_VOICE_STATES     # Voice logging
+    | hikari.Intents.MESSAGE_CONTENT        # Message content for edit/delete logs (privileged)
 )
 
 client = arc.GatewayClient(bot)
@@ -52,9 +58,14 @@ async def on_startup(_: arc.GatewayClient) -> None:
     """Called when the bot starts up."""
     await repo.init()
 
+    logging_repo = LoggingRepository(repo.connection)
+    logging_svc = LoggingService(repo=logging_repo, rest=bot.rest)
+
     client.set_type_dependency(Repository, repo)
     client.set_type_dependency(SlowmodeEngine, engine)
     client.set_type_dependency(ModuleManager, module_manager)
+    client.set_type_dependency(LoggingRepository, logging_repo)
+    client.set_type_dependency(LoggingService, logging_svc)
 
     await metrics_server.start()
 
