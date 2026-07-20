@@ -59,6 +59,33 @@ class ModerationRepository:
         )
         return next_case_number
 
+    async def update_case_reason(
+        self, guild_id: int, case_number: int, new_reason: str
+    ) -> None:
+        """Update the reason for a case"""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.connection.execute(
+            """UPDATE mod_cases
+            SET reason = ?
+            WHERE guild_id = ? AND case_number = ?""",
+            (new_reason, guild_id, case_number),
+        )
+        await self.connection.commit()
+
+    async def deactivate_case(self, guild_id: int, case_number: int) -> None:
+        """Mark a case as inactive."""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.connection.execute(
+            """UPDATE mod_cases SET is_active = 0
+            WHERE guild_id = ? AND case_number = ?""",
+            (guild_id, case_number),
+        )
+        await self.connection.commit()
+
     async def get_case(self, guild_id: int, case_number: int) -> Optional[dict]:
         """Get a moderation case by guild ID and case number"""
         if not self.connection:
@@ -93,6 +120,26 @@ class ModerationRepository:
         async with self.connection.execute(
             "SELECT * FROM mod_cases WHERE guild_id = ? AND action = 'timeout' AND is_active = 1 AND expires_at > ?",
             (guild_id, int(time.time())),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        return [dict(row) for row in rows]
+
+    async def get_all_expired_timeouts(self) -> list[dict]:
+        """Get all timeout cases that have expired but are still marked active.
+
+        Used by the background task to keep is_active in sync with reality.
+        """
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        async with self.connection.execute(
+            """SELECT * FROM mod_cases
+            WHERE action = 'timeout'
+            AND is_active = 1
+            AND expires_at IS NOT NULL
+            AND expires_at < ?""",
+            (int(time.time()),),
         ) as cursor:
             rows = await cursor.fetchall()
 
@@ -149,18 +196,34 @@ class ModerationRepository:
         return row[0] if row else 0
 
     async def clear_warnings(self, guild_id: int, user_id: int) -> int:
-        """Clear all active warnings for a user, returns count cleared"""
+        """Clear all active warnings for a user. Returns count cleared."""
         if not self.connection:
             raise DatabaseError("Database connection is not initialised.")
 
-        count = await self.get_warning_count(guild_id, user_id)
+        async with self.connection.execute(
+            """SELECT case_id FROM warnings
+            WHERE guild_id = ? AND user_id = ? AND is_active = 1 AND case_id IS NOT NULL""",
+            (guild_id, user_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        case_numbers = [row["case_id"] for row in rows]
+        count = len(case_numbers) or await self.get_warning_count(guild_id, user_id)
 
         await self.connection.execute(
-            """UPDATE warnings SET is_active = 0 WHERE guild_id = ? AND user_id = ? AND is_active = 1""",
+            """UPDATE warnings SET is_active = 0
+            WHERE guild_id = ? AND user_id = ? AND is_active = 1""",
             (guild_id, user_id),
         )
-        await self.connection.commit()
 
+        for case_number in case_numbers:
+            await self.connection.execute(
+                """UPDATE mod_cases SET is_active = 0
+                WHERE guild_id = ? AND case_number = ?""",
+                (guild_id, case_number),
+            )
+
+        await self.connection.commit()
         return count
 
     async def get_moderation_stats(self, guild_id: int, days: int = 30) -> dict:
