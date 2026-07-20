@@ -15,6 +15,8 @@ from serenity.services.metrics_server import MetricsServer
 from serenity.services.slowmode_engine import SlowmodeEngine
 from serenity.services.logging_service import LoggingService
 from serenity.database.logging_repository import LoggingRepository
+from serenity.database.moderation_repository import ModerationRepository
+from serenity.services.moderation_service import ModerationService
 
 load_dotenv()
 
@@ -60,12 +62,20 @@ async def on_startup(_: arc.GatewayClient) -> None:
 
     logging_repo = LoggingRepository(repo.connection)
     logging_svc = LoggingService(repo=logging_repo, rest=bot.rest)
+    mod_repo = ModerationRepository(repo.connection)
+    mod_svc = ModerationService(
+        mod_repo=mod_repo,
+        logging_svc=logging_svc,
+        rest=bot.rest,
+    )
 
     client.set_type_dependency(Repository, repo)
     client.set_type_dependency(SlowmodeEngine, engine)
     client.set_type_dependency(ModuleManager, module_manager)
     client.set_type_dependency(LoggingRepository, logging_repo)
     client.set_type_dependency(LoggingService, logging_svc)
+    client.set_type_dependency(ModerationRepository, mod_repo)
+    client.set_type_dependency(ModerationService, mod_svc)
 
     await metrics_server.start()
 
