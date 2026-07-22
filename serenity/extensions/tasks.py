@@ -22,7 +22,6 @@ from serenity.services.metrics import (
     TASK_ERRORS,
 )
 from serenity.services.slowmode_engine import SlowmodeEngine
-from serenity.database.moderation_repository import ModerationRepository
 from serenity.utils.logging import channel_id as ctx_channel_id
 from serenity.utils.logging import get_logger
 from serenity.utils.logging import guild_id as ctx_guild_id
@@ -262,31 +261,6 @@ async def cleanup_old_data(repo: Repository) -> None:
         TASK_ERRORS.labels(task_name="cleanup_old_data").inc()
     finally:
         TASK_DURATION.labels(task_name="cleanup_old_data").observe(time.perf_counter() - task_start)
-
-@arc.utils.interval_loop(minutes=5)
-async def expire_timeouts(mod_repo: ModerationRepository) -> None:
-    """
-    Deactivate mod_cases records for timeouts that have naturally expired.
-
-    Discord removes the timeout automatically — this task just keeps is_active
-    in the database consistent so /case shows the correct status.
-    """
-    try:
-        expired = await mod_repo.get_all_expired_timeouts()
-
-        if not expired:
-            return
-
-        for case in expired:
-            await mod_repo.deactivate_case(case["guild_id"], case["case_number"])
-            logger.info(
-                f"Deactivated expired timeout case #{case['case_number']} "
-                f"for user {case['target_user_id']} in guild {case['guild_id']}"
-            )
-
-        logger.info(f"Timeout expiry task: deactivated {len(expired)} case(s).")
-    except Exception as e:
-        logger.error(f"Error in expire_timeouts task: {e}", exc_info=True)
 
 
 async def _get_active_channels(repo: Repository, start_time: int, end_time: int) -> List[int]:
