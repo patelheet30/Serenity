@@ -14,5 +14,6 @@ wheels/
 tests/
 data/
 local_data/
+bot_data/
 
 download_database.sh
