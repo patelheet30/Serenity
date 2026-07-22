@@ -30,6 +30,12 @@ logger = get_logger(__name__)
 
 plugin = arc.GatewayPlugin("tasks")
 
+# Tracks consecutive permission failures per channel so that a persistently
+# misconfigured channel gets disabled instead of retried every minute forever.
+# In-memory by design: a restart gives every channel a clean slate.
+_PERMISSION_FAILURES: dict[int, int] = {}
+_MAX_PERMISSION_FAILURES = 5
+
 
 @arc.utils.interval_loop(seconds=SLOWMODE_CONFIG.SLOWMODE_CHECK_INTERVAL)
 async def update_slowmode(
@@ -53,7 +59,10 @@ async def update_slowmode(
                 ctx_guild_id.set(None)
                 continue
 
+            total_enabled_guilds += 1
+
             channel_ids = await repo.get_enabled_channels(guild_id)
+            total_enabled_channels += len(channel_ids)
 
             if channel_ids:
                 await asyncio.sleep(random.uniform(0.1, 1.0))
@@ -86,8 +95,13 @@ async def update_slowmode(
 
                     if decision.slowmode_seconds != current_slowmode:
                         await client.app.rest.edit_channel(
-                            channel_id, rate_limit_per_user=decision.slowmode_seconds
+                            channel_id,
+                            rate_limit_per_user=decision.slowmode_seconds,
+                            reason="Automatic slowmode adjustment",
                         )
+
+                        # Success: forget any earlier permission trouble here.
+                        _PERMISSION_FAILURES.pop(channel_id, None)
 
                         await repo.record_slowmode_change(
                             channel_id,
@@ -120,6 +134,36 @@ async def update_slowmode(
                         SLOWMODE_CURRENT.labels(
                             channel_id=str(channel_id), guild_id=str(guild_id)
                         ).set(current_slowmode)
+
+                except hikari.ForbiddenError:
+                    failures = _PERMISSION_FAILURES.get(channel_id, 0) + 1
+                    _PERMISSION_FAILURES[channel_id] = failures
+
+                    if failures >= _MAX_PERMISSION_FAILURES:
+                        await repo.update_channel_config(channel_id, is_enabled=False)
+                        _PERMISSION_FAILURES.pop(channel_id, None)
+                        logger.warning(
+                            f"Disabling automatic slowmode for channel {channel_id} "
+                            f"(guild {guild_id}) after {failures} permission failures. "
+                            "Grant the bot Manage Channel and re-enable with "
+                            "/serenity channel enable."
+                        )
+                    else:
+                        logger.warning(
+                            f"Missing Manage Channel permission in channel {channel_id} "
+                            f"(guild {guild_id}) — attempt {failures}/{_MAX_PERMISSION_FAILURES}"
+                        )
+
+                    TASK_ERRORS.labels(task_name="update_slowmode").inc()
+
+                except hikari.NotFoundError:
+                    await repo.update_channel_config(channel_id, is_enabled=False)
+                    _PERMISSION_FAILURES.pop(channel_id, None)
+                    logger.warning(
+                        f"Channel {channel_id} in guild {guild_id} no longer exists — "
+                        "automatic slowmode disabled."
+                    )
+                    TASK_ERRORS.labels(task_name="update_slowmode").inc()
 
                 except Exception as e:
                     logger.error(
@@ -304,7 +348,7 @@ async def _update_pattern_stats(
         return new_value, 0.0, 1
 
     async with repo.connection.execute(
-        """SELECT average_rate, stddev_message_rate, sample_count
+        """SELECT avg_message_rate, stddev_message_rate, sample_count
         FROM channel_patterns
         WHERE channel_id = ? AND day_of_week = ? AND hour = ?""",
         (channel_id, day_of_week, hour),
@@ -314,7 +358,7 @@ async def _update_pattern_stats(
     if not row:
         return new_value, 0.0, 1
 
-    old_avg = row["average_rate"]
+    old_avg = row["avg_message_rate"]
     old_stddev = row["stddev_message_rate"]
     old_count = row["sample_count"]
 
@@ -360,5 +404,7 @@ def load(client: arc.GatewayClient) -> None:
 @arc.unloader
 def unload(client: arc.GatewayClient) -> None:
     update_slowmode.stop()
+    aggregate_historical_patterns.stop()
+    aggregate_hourly_analytics.stop()
     cleanup_old_data.stop()
     client.remove_plugin(plugin)
