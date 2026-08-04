@@ -147,20 +147,23 @@ async def stats(
 @plugin.include
 @arc.slash_command("about", "Learn about Serenity")
 async def about(ctx: arc.GatewayContext) -> None:
-    """Display information about the bot"""
     embed = hikari.Embed(
         title="🌙 Serenity",
-        description="An intelligent Discord bot that automatically manages slowmode based on channel activity.",
+        description=(
+            "An intelligent Discord bot that automatically manages slowmode based on "
+            "channel activity — now with full moderation and audit logging."
+        ),
         color=hikari.Color(0x5865F2),
     )
 
     embed.add_field(
         name="✨ Features",
         value=(
-            "• **Smart Detection** - Multi-factor analysis of message patterns\n"
-            "• **Automatic Adjustment** - Slowmode adapts to channel activity\n"
-            "• **Customizable** - Per-channel and server-wide settings\n"
-            "• **Historical Learning** - Adapts based on typical channel patterns"
+            "• **Smart Slowmode** — Multi-factor analysis adjusts slowmode automatically\n"
+            "• **Audit Logging** — Member, message, voice, server, and mod logs\n"
+            "• **Moderation** — Ban, kick, timeout, warn with full case tracking\n"
+            "• **Module System** — Enable only the features you need per server\n"
+            "• **Historical Learning** — Adapts to each channel's typical activity patterns"
         ),
         inline=False,
     )
@@ -168,42 +171,57 @@ async def about(ctx: arc.GatewayContext) -> None:
     embed.add_field(
         name="🔧 Getting Started",
         value=(
-            "Admins can use `/serenity guild enable` to enable Serenity\n"
-            "Then use `/serenity channel enable` in specific channels\n"
-            "Customise with `/serenity guild threshold` and other commands"
+            "1. `/module enable slowmode` — enable automatic slowmode\n"
+            "2. `/module enable logging` → `/logging setup` — set up audit logs\n"
+            "3. `/module enable moderation` — enable mod commands\n"
+            "4. `/serenity guild enable` — activate Serenity in your server"
         ),
         inline=False,
     )
 
     embed.add_field(
-        name="📚 Commands",
+        name="📚 Slowmode Commands",
         value=(
-            "`/ping` - Check bot latency\n"
-            "`/stats` - View channel statistics\n"
-            "`/serenity {guild | channel}` - Configuration commands for channels and guilds (servers) (admin only)"
+            "`/stats` — Channel activity stats\n"
+            "`/serenity guild` — Server-wide slowmode settings\n"
+            "`/serenity channel` — Per-channel slowmode settings"
         ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔨 Moderation Commands",
+        value=(
+            "`/ban` `/unban` `/kick`\n"
+            "`/timeout` `/untimeout`\n"
+            "`/warn` `/warnings` `/clearwarns`\n"
+            "`/case` `/cases` `/case-edit`\n"
+            "`/modstats`"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="📋 Logging Commands",
+        value=(
+            "`/logging setup` — Quick setup\n"
+            "`/logging view` — View config\n"
+            "`/logging <type>-log` — Set channels\n"
+            "`/logging enable/disable`\n"
+            "`/logging ignore-channel/user`"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔗 Links",
+        value="[Support Server](https://discord.gg/GSHQdQNszP) • [GitHub](https://github.com/patelheet30/Serenity)",
         inline=False,
     )
 
-    embed.add_field(
-        name="UPDATES",
-        value="We're currently working on new features and improvements! Stay tuned on our [Discord Server](https://discord.gg/GSHQdQNszP) for updates.",
-    )
-
-    embed.add_field(
-        name="** **",
-        value="** **",
-    )
-
-    embed.add_field(
-        name="Support Server",
-        value="[Join Serenity Server](https://discord.gg/GSHQdQNszP)",
-    )
-
-    embed.set_footer(text="Built with Hikari & Hikari-Arc | Developed by patelheet30")
+    embed.set_footer(text="Built with Hikari & Hikari-Arc • Developed by patelheet30")
 
     await ctx.respond(embed=embed)
-
 
 @arc.loader
 def loader(client: arc.GatewayClient) -> None:

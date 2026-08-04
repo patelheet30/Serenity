@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import aiosqlite
 
@@ -9,6 +9,12 @@ from serenity.core.types import ChannelConfig, GuildConfig
 from serenity.database.migrations import MigrationManager
 from serenity.utils.errors import DatabaseError
 from serenity.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from serenity.core.modules import ModuleConfig, ModuleType
+else:
+    ModuleConfig = Any
+    ModuleType = Any
 
 logger = get_logger(__name__)
 
@@ -401,5 +407,103 @@ class Repository:
         )
         await self.connection.execute(
             "DELETE FROM slowmode_effectiveness WHERE applied_at < ?", (cutoff,)
+        )
+        await self.connection.commit()
+
+    async def get_module_config(self, guild_id: int, module_type: ModuleType) -> ModuleConfig:
+        """Get configuration for a module"""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        from serenity.core.modules import ModuleConfig, ModuleType
+
+        async with self.connection.execute(
+            """SELECT * FROM module_config
+            WHERE guild_id = ? AND module_type = ?""",
+            (guild_id, module_type.value),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            import json
+
+            return ModuleConfig(
+                guild_id=row["guild_id"],
+                module_type=ModuleType(row["module_type"]),
+                is_enabled=bool(row["is_enabled"]),
+                settings=json.loads(row["settings"]) if row["settings"] else {},
+                updated_at=row["updated_at"],
+            )
+
+        await self.connection.execute(
+            """INSERT INTO module_config (guild_id, module_type, is_enabled, settings, updated_at)
+            VALUES (?, ?, 0, '{}', ?)""",
+            (guild_id, module_type.value, int(time.time())),
+        )
+        await self.connection.commit()
+
+        return ModuleConfig(
+            guild_id=guild_id,
+            module_type=module_type,
+            is_enabled=False,
+            settings={},
+            updated_at=int(time.time()),
+        )
+
+    async def set_module_enabled(
+        self, guild_id: int, module_type: ModuleType, enabled: bool
+    ) -> None:
+        """Enable or disable a module for a guild"""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.connection.execute(
+            """INSERT INTO module_config (guild_id, module_type, is_enabled, settings, updated_at)
+            VALUES (?, ?, ?, '{}', ?)
+            ON CONFLICT(guild_id, module_type) DO UPDATE SET
+            is_enabled = ?,
+            updated_at = ?""",
+            (
+                guild_id,
+                module_type.value,
+                int(enabled),
+                int(time.time()),
+                int(enabled),
+                int(time.time()),
+            ),
+        )
+
+        await self.connection.commit()
+
+    async def get_enabled_modules(self, guild_id: int) -> List[ModuleType]:
+        """Get all enabled modules for a guild"""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        from serenity.core.modules import ModuleType
+
+        async with self.connection.execute(
+            """SELECT module_type FROM module_config
+            WHERE guild_id = ? AND is_enabled = 1""",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        return [ModuleType(row["module_type"]) for row in rows]
+
+    async def update_module_settings(
+        self, guild_id: int, module_type: ModuleType, settings: Dict[str, Any]
+    ) -> None:
+        """Update settings for a module"""
+        if not self.connection:
+            raise DatabaseError("Database connection is not initialised.")
+
+        import json
+
+        await self.connection.execute(
+            """UPDATE module_config
+            SET settings = ?, updated_at = ?
+            WHERE guild_id = ? AND module_type = ?""",
+            (json.dumps(settings), int(time.time()), guild_id, module_type.value),
         )
         await self.connection.commit()

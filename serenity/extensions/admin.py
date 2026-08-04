@@ -1,6 +1,8 @@
 import arc
 import hikari
 
+from serenity.core.hooks import require_module
+from serenity.core.modules import ModuleNotEnabledError, ModuleType
 from serenity.database.repository import Repository
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -18,6 +20,13 @@ async def on_command_error(ctx: arc.GatewayContext, exc: Exception) -> None:
             flags=hikari.MessageFlag.EPHEMERAL,
         )
         return
+    if isinstance(exc, ModuleNotEnabledError):
+        await ctx.respond(
+            f"❌ The module '{exc.module.value}' is not enabled in this server. "
+            f"Please enable it using `/module enable {exc.module.value}`.",
+            flags=hikari.MessageFlag.EPHEMERAL,
+        )
+        return
     raise exc
 
 
@@ -26,6 +35,7 @@ guild = serenity.include_subgroup("guild", "Guild configuration commands.")
 
 
 @guild.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("enable", "Enable Serenity in this guild.")
 async def enable_serenity(ctx: arc.GatewayContext, repo: Repository = arc.inject()) -> None:
     if hikari.Permissions.MANAGE_GUILD not in ctx.member.permissions:  # type: ignore
@@ -67,6 +77,7 @@ async def enable_serenity(ctx: arc.GatewayContext, repo: Repository = arc.inject
 
 
 @guild.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("disable", "Disable Serenity in this guild.")
 async def disable_serenity(ctx: arc.GatewayContext, repo: Repository = arc.inject()) -> None:
     if hikari.Permissions.MANAGE_GUILD not in ctx.member.permissions:  # type: ignore
@@ -99,6 +110,7 @@ async def disable_serenity(ctx: arc.GatewayContext, repo: Repository = arc.injec
 
 
 @guild.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("threshold", "Set the default message threshold for this server")
 async def set_threshold(
     ctx: arc.GatewayContext,
@@ -137,6 +149,7 @@ async def set_threshold(
 
 
 @guild.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("interval", "Set the update interval for slowmode adjustments.")
 async def set_update_interval(
     ctx: arc.GatewayContext,
@@ -177,6 +190,7 @@ channel = serenity.include_subgroup("channel", "Channel configuration commands."
 
 
 @channel.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("enable", "Enable automatic slowmode for this channel.")
 async def enable_channel(
     ctx: arc.GatewayContext,
@@ -225,6 +239,7 @@ async def enable_channel(
 
 
 @channel.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("disable", "Disable automatic slowmode for this channel.")
 async def disable_channel(
     ctx: arc.GatewayContext,
@@ -273,6 +288,7 @@ async def disable_channel(
 
 
 @channel.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("threshold", "Set the message threshold for this channel.")
 async def set_channel_threshold(
     ctx: arc.GatewayContext,
@@ -342,6 +358,7 @@ async def set_channel_threshold(
 
 
 @serenity.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("config", "View the current configuration for this server")
 async def view_config(
     ctx: arc.GatewayContext,
@@ -395,6 +412,7 @@ async def view_config(
 
 
 @serenity.include
+@arc.with_hook(require_module(ModuleType.SLOWMODE))
 @arc.slash_subcommand("channel-info", "View configuration for a specific channel")
 async def channel_config(
     ctx: arc.GatewayContext,

@@ -8,10 +8,15 @@ import arc
 import hikari
 from dotenv import load_dotenv
 
+from serenity.core.modules import ModuleManager
 from serenity.database.repository import Repository
 from serenity.services.metrics import BOT_INFO
 from serenity.services.metrics_server import MetricsServer
 from serenity.services.slowmode_engine import SlowmodeEngine
+from serenity.services.logging_service import LoggingService
+from serenity.database.logging_repository import LoggingRepository
+from serenity.database.moderation_repository import ModerationRepository
+from serenity.services.moderation_service import ModerationService
 
 load_dotenv()
 
@@ -34,7 +39,11 @@ if os.name != "nt":
 
 bot = hikari.GatewayBot(
     token=os.environ["TOKEN"],
-    intents=hikari.Intents.GUILD_MESSAGES | hikari.Intents.GUILDS,
+    intents= hikari.Intents.GUILD_MESSAGES
+    | hikari.Intents.GUILDS
+    | hikari.Intents.GUILD_MEMBERS          # Member join/leave/update  (privileged)
+    | hikari.Intents.GUILD_VOICE_STATES     # Voice logging
+    | hikari.Intents.MESSAGE_CONTENT        # Message content for edit/delete logs (privileged)
 )
 
 client = arc.GatewayClient(bot)
@@ -42,6 +51,7 @@ client = arc.GatewayClient(bot)
 db_path = os.getenv("DATABASE_PATH", "data/serenity.db")
 repo = Repository(db_path=db_path)
 engine = SlowmodeEngine(repo)
+module_manager = ModuleManager(repo)
 metrics_server = MetricsServer(port=int(os.getenv("METRICS_PORT", "8080")))
 
 
@@ -50,8 +60,22 @@ async def on_startup(_: arc.GatewayClient) -> None:
     """Called when the bot starts up."""
     await repo.init()
 
+    logging_repo = LoggingRepository(repo.connection)
+    logging_svc = LoggingService(repo=logging_repo, rest=bot.rest)
+    mod_repo = ModerationRepository(repo.connection)
+    mod_svc = ModerationService(
+        mod_repo=mod_repo,
+        logging_svc=logging_svc,
+        rest=bot.rest,
+    )
+
     client.set_type_dependency(Repository, repo)
     client.set_type_dependency(SlowmodeEngine, engine)
+    client.set_type_dependency(ModuleManager, module_manager)
+    client.set_type_dependency(LoggingRepository, logging_repo)
+    client.set_type_dependency(LoggingService, logging_svc)
+    client.set_type_dependency(ModerationRepository, mod_repo)
+    client.set_type_dependency(ModerationService, mod_svc)
 
     await metrics_server.start()
 

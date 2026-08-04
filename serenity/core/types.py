@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Dict, Optional
 
 
@@ -66,3 +67,31 @@ class MessageActivity:
     channel_id: int
     timestamp: int
     message_count: int
+
+
+class ModAction(Enum):
+    """Moderation action types"""
+
+    WARN = "warn"
+    KICK = "kick"
+    BAN = "ban"
+    UNBAN = "unban"
+    TIMEOUT = "timeout"
+    UNTIMEOUT = "untimeout"
+
+
+@dataclass
+class ModCase:
+    """Moderation case data"""
+
+    id: int
+    guild_id: int
+    case_number: int
+    target_user_id: int
+    moderator_id: int
+    action: ModAction
+    reason: str
+    duration_seconds: Optional[int]
+    created_at: int
+    expired_at: Optional[int]
+    is_active: bool
