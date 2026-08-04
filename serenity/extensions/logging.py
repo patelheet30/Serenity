@@ -18,6 +18,7 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "voice":   "🔊 Voice",
     "server":  "⚙️ Server",
     "mod":     "🔨 Mod",
+    "all": "*"
 }
 
 CHANNEL_NAMES: dict[str, str] = {
@@ -37,6 +38,70 @@ logging_group = plugin.include_slash_group(
     "logging",
     "Configure audit logging for this server.",
 )
+
+def _scope_label(log_type: str) -> str:
+    return "all log types" if log_type == "*" else f"**{log_type}** logs"
+
+async def _do_ignore(
+    ctx: arc.GatewayContext,
+    repo: LoggingRepository,
+    target_type: str,
+    target_id: int,
+    mention: str,
+    log_type: str,
+) -> None:
+    added = await repo.add_ignore(ctx.guild_id, target_type, target_id, log_type)  # type: ignore[arg-type]
+
+    if not added:
+        await ctx.respond(
+            f"ℹ️ {mention} is already ignored for {_scope_label(log_type)}.",
+            flags=hikari.MessageFlag.EPHEMERAL,
+        )
+        return
+
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="🔇 Ignore Added",
+            description=f"{mention} will no longer appear in {_scope_label(log_type)}.",
+            color=hikari.Color(0x99AAB5),
+        )
+    )
+
+async def _do_unignore(
+    ctx: arc.GatewayContext,
+    repo: LoggingRepository,
+    target_type: str,
+    target_id: int,
+    mention: str,
+    log_type: str,
+) -> None:
+    scope = None if log_type == "*" else log_type
+    removed = await repo.remove_ignore(ctx.guild_id, target_type, target_id, scope)  # type: ignore[arg-type]
+
+    if removed == 0:
+        # Could be a global ignore blocking a per-type unignore — say so plainly.
+        still_ignored = await repo.is_ignored(
+            ctx.guild_id, target_type, target_id, log_type if scope else "member" # type: ignore
+        )
+        hint = (
+            "\nIt's ignored across **all** log types — run this again without the "
+            "`log-type` option to clear it."
+            if still_ignored
+            else ""
+        )
+        await ctx.respond(
+            f"ℹ️ {mention} wasn't ignored for {_scope_label(log_type)}.{hint}",
+            flags=hikari.MessageFlag.EPHEMERAL,
+        )
+        return
+
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="🔊 Ignore Removed",
+            description=f"{mention} will appear in {_scope_label(log_type)} again.",
+            color=hikari.Color(0x57F287),
+        )
+    )
 
 @plugin.set_error_handler
 async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
@@ -385,86 +450,83 @@ async def disable_log(
 
 _LOG_TYPE_OR_ALL = ["all"] + LOG_TYPES
 
-
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
-@arc.slash_subcommand("ignore-channel", "Stop logging events from a specific channel.")
+@arc.slash_subcommand("ignore-channel", "Stop logging events from a channel.")
 async def ignore_channel(
     ctx: arc.GatewayContext,
     channel: arc.Option[
-        hikari.TextableGuildChannel,
-        arc.ChannelParams("The channel to ignore"),
+        hikari.TextableGuildChannel, arc.ChannelParams("The channel to ignore")
     ],
     log_type: arc.Option[
-        str,
-        arc.StrParams(
-            "Which log type to apply to (default: all)",
-            choices=_LOG_TYPE_OR_ALL,
-        ),
-    ] = "all",
+        str, arc.StrParams("Which logs to hide it from", choices=_LOG_TYPE_OR_ALL)
+    ] = "*",
     repo: LoggingRepository = arc.inject(),
 ) -> None:
     if not ctx.guild_id:
         await ctx.respond(
-            "❌ This command can only be used in a guild.",
-            flags=hikari.MessageFlag.EPHEMERAL,
+            "❌ This command can only be used in a guild.", flags=hikari.MessageFlag.EPHEMERAL
         )
         return
-
-    types_to_update = LOG_TYPES if log_type == "all" else [log_type]
-
-    for lt in types_to_update:
-        try:
-            await repo.add_ignored_channel(ctx.guild_id, lt, channel.id)
-        except Exception:
-            # Log type may not be configured yet; skip silently
-            pass
-
-    scope = "all log types" if log_type == "all" else f"**{LOG_TYPE_LABELS[log_type]}** logs"
-    embed = hikari.Embed(
-        title="🔇 Channel Ignored",
-        description=f"{channel.mention} will no longer appear in {scope}.",
-        color=hikari.Color(0x5865F2),
-    )
-    await ctx.respond(embed=embed)
+    await _do_ignore(ctx, repo, "channel", channel.id, f"<#{channel.id}>", log_type)
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
-@arc.slash_subcommand("ignore-user", "Stop logging events involving a specific user.")
+@arc.slash_subcommand("unignore-channel", "Resume logging events from a channel.")
+async def unignore_channel(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[
+        hikari.TextableGuildChannel, arc.ChannelParams("The channel to stop ignoring")
+    ],
+    log_type: arc.Option[
+        str, arc.StrParams("Which logs to restore it to", choices=_LOG_TYPE_OR_ALL)
+    ] = "*",
+    repo: LoggingRepository = arc.inject(),
+) -> None:
+    if not ctx.guild_id:
+        await ctx.respond(
+            "❌ This command can only be used in a guild.", flags=hikari.MessageFlag.EPHEMERAL
+        )
+        return
+    await _do_unignore(ctx, repo, "channel", channel.id, f"<#{channel.id}>", log_type)
+
+
+
+@logging_group.include
+@arc.with_hook(require_module(ModuleType.LOGGING))
+@arc.slash_subcommand("ignore-user", "Stop logging events for a user.")
 async def ignore_user(
     ctx: arc.GatewayContext,
     user: arc.Option[hikari.User, arc.UserParams("The user to ignore")],
     log_type: arc.Option[
-        str,
-        arc.StrParams(
-            "Which log type to apply to (default: all)",
-            choices=_LOG_TYPE_OR_ALL,
-        ),
-    ] = "all",
+        str, arc.StrParams("Which logs to hide them from", choices=_LOG_TYPE_OR_ALL)
+    ] = "*",
     repo: LoggingRepository = arc.inject(),
 ) -> None:
     if not ctx.guild_id:
         await ctx.respond(
-            "❌ This command can only be used in a guild.",
-            flags=hikari.MessageFlag.EPHEMERAL,
+            "❌ This command can only be used in a guild.", flags=hikari.MessageFlag.EPHEMERAL
         )
         return
+    await _do_ignore(ctx, repo, "user", user.id, user.mention, log_type)
 
-    types_to_update = LOG_TYPES if log_type == "all" else [log_type]
-
-    for lt in types_to_update:
-        try:
-            await repo.add_ignored_user(ctx.guild_id, lt, user.id)
-        except Exception:
-            pass
-
-    scope = "all log types" if log_type == "all" else f"**{LOG_TYPE_LABELS[log_type]}** logs"
-    embed = hikari.Embed(
-        title="🔇 User Ignored",
-        description=f"{user.mention} will no longer appear in {scope}.",
-        color=hikari.Color(0x5865F2),
-    )
-    await ctx.respond(embed=embed)
+@logging_group.include
+@arc.with_hook(require_module(ModuleType.LOGGING))
+@arc.slash_subcommand("unignore-user", "Resume logging events for a user.")
+async def unignore_user(
+    ctx: arc.GatewayContext,
+    user: arc.Option[hikari.User, arc.UserParams("The user to stop ignoring")],
+    log_type: arc.Option[
+        str, arc.StrParams("Which logs to restore them to", choices=_LOG_TYPE_OR_ALL)
+    ] = "*",
+    repo: LoggingRepository = arc.inject(),
+) -> None:
+    if not ctx.guild_id:
+        await ctx.respond(
+            "❌ This command can only be used in a guild.", flags=hikari.MessageFlag.EPHEMERAL
+        )
+        return
+    await _do_unignore(ctx, repo, "user", user.id, user.mention, log_type)
 
 @arc.loader
 def load(client: arc.GatewayClient) -> None:
