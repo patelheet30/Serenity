@@ -1,5 +1,6 @@
 import json
 from typing import List, Optional
+import time
 
 import aiosqlite
 
@@ -114,81 +115,100 @@ class LoggingRepository:
 
         return configs
 
-    async def add_ignored_channel(self, guild_id: int, log_type: str, channel_id: int) -> None:
-        """Add a channel to the ignore list for a log type"""
+    async def is_ignored(
+        self,
+        guild_id: int,
+        target_type: str,
+        target_id: int,
+        log_type: str,
+    ) -> bool:
+        """Check whether a user/channel is ignored for this log type (or globally)."""
         if not self.connection:
             raise DatabaseError("Database connection is not initialised.")
 
-        config = await self.get_log_channel(guild_id, log_type)
-        if not config:
-            raise DatabaseError(f"Log type {log_type} not configured for guild {guild_id}")
+        async with self.connection.execute(
+            """SELECT 1 FROM log_ignores
+               WHERE guild_id = ? AND target_type = ? AND target_id = ?
+                 AND log_type IN (?, '*')
+               LIMIT 1""",
+            (guild_id, target_type, target_id, log_type),
+        ) as cursor:
+            return await cursor.fetchone() is not None
 
-        ignored = config["ignored_channels"]
-        if channel_id not in ignored:
-            ignored.append(channel_id)
-            await self.connection.execute(
-                """UPDATE log_channels SET ignored_channels = ?
-                WHERE guild_id = ? AND log_type = ?""",
-                (json.dumps(ignored), guild_id, log_type),
-            )
-            await self.connection.commit()
-
-    async def remove_ignored_channel(self, guild_id: int, log_type: str, channel_id: int) -> None:
-        """Remove a channel from the ignore list for a log type"""
+    async def add_ignore(
+        self,
+        guild_id: int,
+        target_type: str,
+        target_id: int,
+        log_type: str = "*",
+    ) -> bool:
+        """Ignore a user/channel. Returns False if it was already ignored."""
         if not self.connection:
             raise DatabaseError("Database connection is not initialised.")
 
-        config = await self.get_log_channel(guild_id, log_type)
-        if not config:
-            return
+        already = await self.is_ignored(guild_id, target_type, target_id, log_type)
 
-        ignored = config["ignored_channels"]
-        if channel_id in ignored:
-            ignored.remove(channel_id)
+        # A global ignore supersedes any per-type rows for the same target.
+        if log_type == "*":
             await self.connection.execute(
-                """UPDATE log_channels SET ignored_channels = ?
-                WHERE guild_id = ? AND log_type = ?""",
-                (json.dumps(ignored), guild_id, log_type),
+                """DELETE FROM log_ignores
+                   WHERE guild_id = ? AND target_type = ? AND target_id = ?""",
+                (guild_id, target_type, target_id),
             )
-            await self.connection.commit()
 
-    async def add_ignored_user(self, guild_id: int, log_type: str, user_id: int) -> None:
-        """Add a user to the ignore list for a log type"""
+        await self.connection.execute(
+            """INSERT OR IGNORE INTO log_ignores
+               (guild_id, target_type, target_id, log_type, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (guild_id, target_type, target_id, log_type, int(time.time())),
+        )
+        await self.connection.commit()
+        return not already
+
+    async def remove_ignore(
+        self,
+        guild_id: int,
+        target_type: str,
+        target_id: int,
+        log_type: Optional[str] = None,
+    ) -> int:
+        """Un-ignore a user/channel. log_type=None removes every ignore for that target.
+
+        Returns the number of rows removed.
+        """
         if not self.connection:
             raise DatabaseError("Database connection is not initialised.")
 
-        config = await self.get_log_channel(guild_id, log_type)
-        if not config:
-            raise DatabaseError(f"Log type {log_type} not configured for guild {guild_id}")
-
-        ignored = config["ignored_users"]
-        if user_id not in ignored:
-            ignored.append(user_id)
-            await self.connection.execute(
-                """UPDATE log_channels SET ignored_users = ?
-                WHERE guild_id = ? AND log_type = ?""",
-                (json.dumps(ignored), guild_id, log_type),
+        if log_type is None:
+            cursor = await self.connection.execute(
+                """DELETE FROM log_ignores
+                   WHERE guild_id = ? AND target_type = ? AND target_id = ?""",
+                (guild_id, target_type, target_id),
             )
-            await self.connection.commit()
+        else:
+            cursor = await self.connection.execute(
+                """DELETE FROM log_ignores
+                   WHERE guild_id = ? AND target_type = ? AND target_id = ? AND log_type = ?""",
+                (guild_id, target_type, target_id, log_type),
+            )
 
-    async def remove_ignored_user(self, guild_id: int, log_type: str, user_id: int) -> None:
-        """Remove a user from the ignore list for a log type"""
+        await self.connection.commit()
+        return cursor.rowcount
+
+    async def list_ignores(self, guild_id: int) -> list[dict]:
+        """All ignore entries for a guild, for /logging ignores."""
         if not self.connection:
             raise DatabaseError("Database connection is not initialised.")
 
-        config = await self.get_log_channel(guild_id, log_type)
-        if not config:
-            return
+        async with self.connection.execute(
+            """SELECT target_type, target_id, log_type FROM log_ignores
+               WHERE guild_id = ?
+               ORDER BY target_type, log_type, created_at""",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
 
-        ignored = config["ignored_users"]
-        if user_id in ignored:
-            ignored.remove(user_id)
-            await self.connection.execute(
-                """UPDATE log_channels SET ignored_users = ?
-                WHERE guild_id = ? AND log_type = ?""",
-                (json.dumps(ignored), guild_id, log_type),
-            )
-            await self.connection.commit()
+        return [dict(row) for row in rows]
 
     async def should_log_event(
         self,
@@ -197,22 +217,17 @@ class LoggingRepository:
         channel_id: Optional[int] = None,
         user_id: Optional[int] = None,
     ) -> tuple[bool, Optional[int]]:
-        """
-        Check if an event should be logged and return the log channel ID
-
-        Returns: (should_log: bool, log_channel_id: Optional[int])
-        """
         config = await self.get_log_channel(guild_id, log_type)
 
         if not config or not config["is_enabled"] or not config["channel_id"]:
             return False, None
 
-        # Check if channel is ignored
-        if channel_id and channel_id in config["ignored_channels"]:
+        if channel_id is not None and await self.is_ignored(
+            guild_id, "channel", channel_id, log_type
+        ):
             return False, None
 
-        # Check if user is ignored
-        if user_id and user_id in config["ignored_users"]:
+        if user_id is not None and await self.is_ignored(guild_id, "user", user_id, log_type):
             return False, None
 
         return True, config["channel_id"]

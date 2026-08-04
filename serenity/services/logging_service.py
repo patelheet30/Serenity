@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 import hikari
@@ -128,6 +128,7 @@ class LoggingService:
             log_type="message",
             embed=embed,
             channel_id=event.channel_id,
+            user_id=cached.author.id
         )
 
     async def log_message_edit(self, event: hikari.GuildMessageUpdateEvent) -> None:
