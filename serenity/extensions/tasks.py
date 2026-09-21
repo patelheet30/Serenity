@@ -9,6 +9,7 @@ import arc
 import hikari
 
 from serenity.core.constants import SLOWMODE_CONFIG
+from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.metrics import (
     ACTIVE_CHANNELS,
@@ -22,7 +23,6 @@ from serenity.services.metrics import (
     TASK_ERRORS,
 )
 from serenity.services.slowmode_engine import SlowmodeEngine
-from serenity.database.moderation_repository import ModerationRepository
 from serenity.utils.logging import channel_id as ctx_channel_id
 from serenity.utils.logging import get_logger
 from serenity.utils.logging import guild_id as ctx_guild_id

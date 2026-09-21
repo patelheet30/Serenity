@@ -9,14 +9,14 @@ import hikari
 from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
-from serenity.database.repository import Repository
-from serenity.services.metrics import BOT_INFO
-from serenity.services.metrics_server import MetricsServer
-from serenity.services.slowmode_engine import SlowmodeEngine
-from serenity.services.logging_service import LoggingService
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
+from serenity.database.repository import Repository
+from serenity.services.logging_service import LoggingService
+from serenity.services.metrics import BOT_INFO
+from serenity.services.metrics_server import MetricsServer
 from serenity.services.moderation_service import ModerationService
+from serenity.services.slowmode_engine import SlowmodeEngine
 
 load_dotenv()
 

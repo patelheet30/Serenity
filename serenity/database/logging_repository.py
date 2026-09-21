@@ -1,6 +1,6 @@
 import json
-from typing import List, Optional
 import time
+from typing import List, Optional
 
 import aiosqlite
 

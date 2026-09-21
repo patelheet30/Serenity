@@ -25,6 +25,12 @@ target-version = "py313"
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501", "W293"]
 
+[tool.basedpyright]
+# basedpyright defaults to "recommended", which errors on every discarded return
+# value (list.append, embed.add_field, ...). Use pyright's standard rule set.
+typeCheckingMode = "standard"
+reportUnusedCallResult = false
+
 [tool.ty.src]
 exclude = ["tests/*"]
 
