@@ -25,7 +25,7 @@ jobs:
           target: "/home/ubuntu/serenity"
 
       - name: Build and Restart Docker Container
-        uses: appleboy/ssh-action@v0.1.10
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
