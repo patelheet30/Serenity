@@ -43,6 +43,7 @@ bot = hikari.GatewayBot(
     | hikari.Intents.GUILDS
     | hikari.Intents.GUILD_MEMBERS          # Member join/leave/update  (privileged)
     | hikari.Intents.GUILD_VOICE_STATES     # Voice logging
+    | hikari.Intents.GUILD_EMOJIS           # Emoji logging
     | hikari.Intents.MESSAGE_CONTENT        # Message content for edit/delete logs (privileged)
 )
 
