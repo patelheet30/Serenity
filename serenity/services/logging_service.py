@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import hikari
@@ -137,6 +137,13 @@ class LoggingService:
             logger.debug(f"MessageUpdateEvent for message {event.message_id} has no author or guild ID.")
             return
         if event.is_bot:
+            return
+        # Discord also sends MESSAGE_UPDATE for non-edits (embed/media unfurls, CDN URL refreshes).
+        # Never-edited messages have no edited_timestamp; like Discord does for large bots,
+        # ignore updates to messages older than 5 weeks.
+        if not isinstance(event.message.edited_timestamp, datetime):
+            return
+        if _now() - event.message_id.created_at > timedelta(weeks=5):
             return
         before_content = event.old_message.content if event.old_message else None
         after_content = event.content
