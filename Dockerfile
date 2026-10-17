@@ -54,4 +54,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV DATABASE_PATH=/data/auto_slowmode.db
 
 # Run the bot directly using Python, completely eliminating the need for uv in production!
-CMD ["python", "main.py"]
+CMD ["python", "-O", "main.py"]
