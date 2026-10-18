@@ -2,11 +2,13 @@
 
     python -m serenity.database.import_sqlite /data/auto_slowmode.db
 
-The bot runs this automatically at startup (see cutover_if_needed); the CLI is for dry runs.
+The bot runs this automatically at startup (see cutover_if_needed). The CLI commits too,
+so point it at a scratch database for dry runs.
 
 Connects with the PG* env vars (or --dsn), creates the schema if needed, and copies
 every table in one transaction. Refuses to run if any target table already has rows.
 Row counts are compared before commit; any mismatch rolls the whole import back.
+A row in sqlite_import, committed in that same transaction, marks the import as done.
 The SQLite file is opened read-only and left untouched.
 """
 
@@ -15,7 +17,9 @@ import asyncio
 import os
 import sqlite3
 import sys
-from typing import Any, Callable, Dict, List, Optional
+import time
+from contextlib import closing
+from typing import Any, Callable, Dict, Iterator, Optional
 
 import asyncpg
 
@@ -51,53 +55,68 @@ COERCE: Dict[str, Callable[[Any], Any]] = {
 }
 
 
-async def import_sqlite(sqlite_path: str, dsn: Optional[str] = None) -> Dict[str, int]:
-    """Copy every table; returns {table: rows copied}."""
-    src = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+async def import_sqlite(sqlite_path: str, dsn: Optional[str] = None) -> Optional[Dict[str, int]]:
+    """Copy every table; returns {table: rows copied}, or None if already imported."""
+    with closing(sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)) as src:
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+        try:
+            await run_migrations(pool)
+            async with pool.acquire() as conn, conn.transaction():
+                return await _copy_all(src, conn)
+        finally:
+            await pool.close()
 
-    try:
-        await run_migrations(pool)
 
-        async with pool.acquire() as conn, conn.transaction():
-            for table in TABLES:
-                if await conn.fetchval(f"SELECT EXISTS (SELECT 1 FROM {table})"):
-                    raise RuntimeError(f"{table} already has rows; import only into an empty DB")
+async def _copy_all(src: sqlite3.Connection, conn: asyncpg.Connection) -> Optional[Dict[str, int]]:
+    # sqlite_import is only ever created, with its row, in the same transaction as the data
+    if await conn.fetchval("SELECT to_regclass('sqlite_import') IS NOT NULL"):
+        return None
 
-            copied: Dict[str, int] = {}
-            for table in TABLES:
-                columns = await conn.fetch(
-                    """SELECT column_name, data_type FROM information_schema.columns
-                    WHERE table_schema = current_schema() AND table_name = $1
-                    ORDER BY ordinal_position""",
-                    table,
-                )
-                names = [c["column_name"] for c in columns]
-                coerce = [COERCE[c["data_type"]] for c in columns]
+    for table in TABLES:
+        if await conn.fetchval(f"SELECT EXISTS (SELECT 1 FROM {table})"):
+            raise RuntimeError(f"{table} already has rows; import only into an empty DB")
 
-                rows: List[tuple] = [
-                    tuple(None if v is None else f(v) for f, v in zip(coerce, row))
-                    for row in src.execute(f"SELECT {', '.join(names)} FROM {table}")
-                ]
-                await conn.copy_records_to_table(table, records=rows, columns=names)
+    copied: Dict[str, int] = {}
+    for table in TABLES:
+        columns = await conn.fetch(
+            """SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = $1
+            ORDER BY ordinal_position""",
+            table,
+        )
+        names = [c["column_name"] for c in columns]
+        coerce = [COERCE[c["data_type"]] for c in columns]
 
-                if "id" in names:
-                    # Identity columns don't advance on explicit ids; continue after the max.
-                    await conn.execute(
-                        f"""SELECT setval(pg_get_serial_sequence('{table}', 'id'),
-                                          COALESCE(MAX(id), 0) + 1, false) FROM {table}"""
-                    )
+        await conn.copy_records_to_table(
+            table, records=_coerced(src, table, names, coerce), columns=names
+        )
 
-                expected = src.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                actual = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
-                if actual != expected:
-                    raise RuntimeError(f"{table}: SQLite has {expected} rows, Postgres {actual}")
-                copied[table] = actual
+        if "id" in names:
+            # Identity columns don't advance on explicit ids; continue after the max.
+            await conn.execute(
+                f"""SELECT setval(pg_get_serial_sequence('{table}', 'id'),
+                                  COALESCE(MAX(id), 0) + 1, false) FROM {table}"""
+            )
 
-        return copied
-    finally:
-        await pool.close()
-        src.close()
+        expected = src.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        actual = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+        if actual != expected:
+            raise RuntimeError(f"{table}: SQLite has {expected} rows, Postgres {actual}")
+        copied[table] = actual
+
+    await conn.execute(
+        """CREATE TABLE sqlite_import (imported_at BIGINT NOT NULL, rows_copied BIGINT NOT NULL)"""
+    )
+    await conn.execute(
+        "INSERT INTO sqlite_import VALUES ($1, $2)", int(time.time()), sum(copied.values())
+    )
+    return copied
+
+
+def _coerced(src: sqlite3.Connection, table: str, names: list, coerce: list) -> Iterator[tuple]:
+    """Stream rows from SQLite, coerced to the Postgres column types."""
+    for row in src.execute(f"SELECT {', '.join(names)} FROM {table}"):
+        yield tuple(None if v is None else f(v) for f, v in zip(coerce, row))
 
 
 def cutover_if_needed(sqlite_path: Optional[str], dsn: Optional[str] = None) -> bool:
@@ -110,7 +129,12 @@ def cutover_if_needed(sqlite_path: Optional[str], dsn: Optional[str] = None) -> 
         return False
 
     copied = asyncio.run(import_sqlite(sqlite_path, dsn))
+    # Rename even if an earlier run committed the import but stopped before renaming.
     os.rename(sqlite_path, sqlite_path + ".imported")
+    if copied is None:
+        logger.info(f"{sqlite_path} was already imported; renamed it to {sqlite_path}.imported")
+        return False
+
     logger.info(
         f"Imported {sum(copied.values())} rows from {sqlite_path} into Postgres; "
         f"kept the original as {sqlite_path}.imported"
@@ -129,6 +153,10 @@ def main() -> None:
     except Exception as e:
         print(f"Import failed, nothing was committed: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if copied is None:
+        print("This database already holds an import (sqlite_import); nothing to do.")
+        return
 
     for table, count in copied.items():
         print(f"{table:24} {count:>8}")
