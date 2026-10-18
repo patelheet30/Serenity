@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -26,18 +28,67 @@ class Repository:
         self.pool_size = pool_size
         self.pool: Optional[asyncpg.Pool] = None
 
+        # Message counts not yet written: (channel_id, timestamp) -> count.
+        # ponytail: unbounded if the DB stays down; ~1 key per active channel-second.
+        self._activity: Dict[tuple[int, int], int] = {}
+        self._flush_task: Optional[asyncio.Task] = None
+        # Held for the whole write, so a reader that flushes waits for an in-flight batch.
+        self._flush_lock = asyncio.Lock()
+
     async def init(self) -> None:
-        """Create the connection pool and run migrations"""
+        """Create the connection pool, run migrations and start the activity flusher"""
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=self.pool_size)
         await run_migrations(self.pool)
+        self._flush_task = asyncio.create_task(self._flush_loop())
 
         logger.info("Database initialised and connected.")
 
     async def close(self) -> None:
-        """Close the connection pool"""
+        """Flush buffered activity and close the connection pool"""
+        if self._flush_task:
+            self._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush_task
+
         if self.pool:
+            await self.flush_message_activity()
             await self.pool.close()
             logger.info("Database connection closed.")
+
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(DATABASE_CONFIG.ACTIVITY_FLUSH_INTERVAL)
+            try:
+                await self.flush_message_activity()
+            except Exception:
+                logger.exception("Failed to flush message activity; will retry.")
+
+    async def flush_message_activity(self) -> None:
+        """Write buffered message counts in one batched upsert.
+
+        Anything that reads message_activity calls this first, so reads see every message.
+        """
+        async with self._flush_lock:
+            if not self._activity or not self.pool:
+                return
+
+            batch, self._activity = self._activity, {}
+
+            try:
+                await self.pool.execute(
+                    """INSERT INTO message_activity (channel_id, timestamp, message_count)
+                    SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::int[])
+                    ON CONFLICT (channel_id, timestamp) DO UPDATE SET
+                    message_count = message_activity.message_count + EXCLUDED.message_count""",
+                    [channel_id for channel_id, _ in batch],
+                    [timestamp for _, timestamp in batch],
+                    list(batch.values()),
+                )
+            except Exception:
+                # Put the counts back so the next flush retries them.
+                for key, count in batch.items():
+                    self._activity[key] = self._activity.get(key, 0) + count
+                raise
 
     async def get_guild_config(self, guild_id: int) -> GuildConfig:
         """Get the configuration for a guild, creating a default if not found"""
@@ -171,21 +222,15 @@ class Repository:
     async def record_message_activity(
         self, channel_id: int, timestamp: Optional[int] = None
     ) -> None:
-        """Record a message activity for a channel at a given timestamp"""
+        """Count a message for a channel; written to the DB on the next flush"""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         if timestamp is None:
             timestamp = int(time.time())
 
-        await self.pool.execute(
-            """INSERT INTO message_activity (channel_id, timestamp, message_count)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (channel_id, timestamp) DO UPDATE SET
-            message_count = message_activity.message_count + 1""",
-            channel_id,
-            timestamp,
-        )
+        key = (channel_id, timestamp)
+        self._activity[key] = self._activity.get(key, 0) + 1
 
     async def get_message_rate(self, channel_id: int, window_seconds: int = 60) -> float:
         """Get the message rate (messages per minute) for a channel over a time window"""
@@ -194,6 +239,7 @@ class Repository:
 
         cutoff = int(time.time()) - window_seconds
 
+        await self.flush_message_activity()
         total = await self.pool.fetchval(
             """SELECT SUM(message_count) FROM message_activity
             WHERE channel_id = $1 AND timestamp >= $2""",
@@ -210,6 +256,7 @@ class Repository:
 
         cutoff = int(time.time()) - (hours * 3600)
 
+        await self.flush_message_activity()
         await self.pool.execute("DELETE FROM message_activity WHERE timestamp < $1", cutoff)
 
     async def record_slowmode_change(
@@ -339,6 +386,7 @@ class Repository:
         hour_timestamp = int(time.time() // 3600) * 3600
         start_time = hour_timestamp - 3600
 
+        await self.flush_message_activity()
         total = await self.pool.fetchval(
             """SELECT SUM(message_count) FROM message_activity
             WHERE channel_id = $1 AND timestamp >= $2 AND timestamp < $3""",

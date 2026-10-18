@@ -33,6 +33,7 @@ class DatabaseConfig:
     """Database configuration settings."""
 
     POOL_SIZE: int = 5
+    ACTIVITY_FLUSH_INTERVAL: int = 5  # seconds between batched message_activity writes
 
 
 SLOWMODE_CONFIG = SlowmodeConfig()

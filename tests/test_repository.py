@@ -1,7 +1,9 @@
 """Tests for database repository (run against Postgres; see the pg_repo fixture)"""
 
+import os
 import time
 
+import asyncpg
 import pytest
 
 from serenity.core.modules import ModuleType
@@ -131,20 +133,83 @@ async def test_get_enabled_channels(repo: Repository):
 
 @pytest.mark.asyncio
 async def test_record_message_activity(repo: Repository):
-    """Test recording message activity"""
+    """Messages are buffered, then written as one batched upsert"""
     assert repo.pool is not None
     timestamp = int(time.time())
+    query = "SELECT message_count FROM message_activity WHERE channel_id = $1 AND timestamp = $2"
 
     for _ in range(3):
         await repo.record_message_activity(CHANNEL, timestamp)
 
-    count = await repo.pool.fetchval(
-        "SELECT message_count FROM message_activity WHERE channel_id = $1 AND timestamp = $2",
-        CHANNEL,
-        timestamp,
-    )
+    # No per-message DB write
+    assert await repo.pool.fetchval(query, CHANNEL, timestamp) is None
 
-    assert count == 3
+    await repo.flush_message_activity()
+    assert await repo.pool.fetchval(query, CHANNEL, timestamp) == 3
+
+    # A later batch adds to the existing row
+    await repo.record_message_activity(CHANNEL, timestamp)
+    await repo.flush_message_activity()
+    assert await repo.pool.fetchval(query, CHANNEL, timestamp) == 4
+
+
+@pytest.mark.asyncio
+async def test_reads_see_buffered_activity(repo: Repository):
+    """Slowmode decisions and analytics see messages that haven't been flushed yet"""
+    now = int(time.time())
+    for i in range(30):
+        await repo.record_message_activity(CHANNEL, now - i)
+
+    assert await repo.get_message_rate(CHANNEL, window_seconds=60) == 30
+
+
+@pytest.mark.asyncio
+async def test_failed_flush_keeps_counts(repo: Repository):
+    """A flush that fails puts its counts back for the next attempt"""
+    assert repo.pool is not None
+    timestamp = int(time.time())
+    await repo.record_message_activity(CHANNEL, timestamp)
+
+    pool = repo.pool
+    repo.pool = _FailingPool()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await repo.flush_message_activity()
+    await repo.record_message_activity(CHANNEL, timestamp)
+    repo.pool = pool
+
+    await repo.flush_message_activity()
+    count = await repo.pool.fetchval(
+        "SELECT message_count FROM message_activity WHERE channel_id = $1", CHANNEL
+    )
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_close_flushes_buffer():
+    """Buffered counts are written on shutdown"""
+    dsn = os.getenv("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("TEST_DATABASE_URL not set")
+
+    repo = Repository(dsn)
+    await repo.init()
+    await repo.record_message_activity(CHANNEL, 1_700_000_000)
+    await repo.close()
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        count = await conn.fetchval(
+            "SELECT message_count FROM message_activity WHERE timestamp = 1700000000"
+        )
+    finally:
+        await conn.execute("DELETE FROM message_activity WHERE timestamp = 1700000000")
+        await conn.close()
+    assert count == 1
+
+
+class _FailingPool:
+    async def execute(self, *args, **kwargs):
+        raise RuntimeError("database down")
 
 
 @pytest.mark.asyncio

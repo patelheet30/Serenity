@@ -325,6 +325,7 @@ async def _get_active_channels(repo: Repository, start_time: int, end_time: int)
     if not repo.pool:
         return []
 
+    await repo.flush_message_activity()
     rows = await repo.pool.fetch(
         """SELECT DISTINCT channel_id FROM message_activity
            WHERE timestamp >= $1 AND timestamp < $2""",
@@ -341,6 +342,7 @@ async def _get_message_count(
     if not repo.pool:
         return 0
 
+    await repo.flush_message_activity()
     total = await repo.pool.fetchval(
         """SELECT sum(message_count) FROM message_activity
         WHERE channel_id = $1 AND timestamp >= $2 AND timestamp < $3""",
