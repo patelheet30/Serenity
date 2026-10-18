@@ -29,23 +29,25 @@ class ModerationRepository:
         if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
-        # Numbering in the same statement as the insert; UNIQUE(guild_id, case_number)
-        # turns a concurrent duplicate into an error rather than two cases with one number.
-        next_case_number = await self.pool.fetchval(
-            """INSERT INTO mod_cases
-            (guild_id, case_number, target_user_id, moderator_id, action, reason, duration_sections, created_at, expires_at, is_active)
-            SELECT $1, COALESCE(MAX(case_number), 0) + 1, $2, $3, $4, $5, $6, $7, $8, TRUE
-            FROM mod_cases WHERE guild_id = $1
-            RETURNING case_number""",
-            guild_id,
-            target_user_id,
-            moderator_id,
-            action,
-            reason,
-            duration_seconds,
-            int(time.time()),
-            expires_at,
-        )
+        async with self.pool.acquire() as conn, conn.transaction():
+            # Per-guild lock so concurrent cases in one guild get consecutive numbers
+            # instead of colliding on UNIQUE(guild_id, case_number). Released at commit.
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
+            next_case_number = await conn.fetchval(
+                """INSERT INTO mod_cases
+                (guild_id, case_number, target_user_id, moderator_id, action, reason, duration_sections, created_at, expires_at, is_active)
+                SELECT $1, COALESCE(MAX(case_number), 0) + 1, $2, $3, $4, $5, $6, $7, $8, TRUE
+                FROM mod_cases WHERE guild_id = $1
+                RETURNING case_number""",
+                guild_id,
+                target_user_id,
+                moderator_id,
+                action,
+                reason,
+                duration_seconds,
+                int(time.time()),
+                expires_at,
+            )
 
         logger.info(
             f"Created mod case #{next_case_number} for user {target_user_id} in guild {guild_id} with action {action}"

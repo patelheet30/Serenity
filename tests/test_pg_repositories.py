@@ -1,7 +1,9 @@
 """Moderation/logging repositories and task queries against Postgres, with realistic snowflakes."""
 
+import asyncio
 import time
 
+import asyncpg
 import pytest
 
 from serenity.database.logging_repository import LoggingRepository
@@ -41,6 +43,14 @@ async def test_case_numbers_are_per_guild(mod_repo: ModerationRepository):
     assert case["moderator_id"] == MOD
     assert case["duration_sections"] == 3600
     assert case["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cases_get_consecutive_numbers(mod_repo: ModerationRepository):
+    numbers = await asyncio.gather(
+        *(mod_repo.create_case(GUILD, USER, MOD, "warn") for _ in range(10))
+    )
+    assert sorted(numbers) == list(range(1, 11))
 
 
 @pytest.mark.asyncio
@@ -135,6 +145,13 @@ async def test_log_ignores(log_repo: LoggingRepository):
     assert await log_repo.remove_ignore(GUILD, "user", USER, "message") == 1
     assert await log_repo.remove_ignore(GUILD, "channel", CHANNEL) == 1
     assert await log_repo.list_ignores(GUILD) == []
+
+
+@pytest.mark.asyncio
+async def test_log_type_check_rejects_unknown_values(log_repo: LoggingRepository):
+    """The extension must translate the "all" choice to "*"; the schema rejects it."""
+    with pytest.raises(asyncpg.CheckViolationError):
+        await log_repo.add_ignore(GUILD, "user", USER, "all")
 
 
 @pytest.mark.asyncio
