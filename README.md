@@ -29,6 +29,11 @@ Full moderation suite with per-guild case tracking:
 - Case viewing, history, and reason editing
 - Server moderation statistics
 
+### 🧠 AI Automod (preview)
+Screens messages with [TypeSafe's](https://typesafe.ai) Jev model and posts the breakdown — hate, profanity, violence, spam, illegal, sexual, and self-harm probabilities plus a 0–3 severity score. **It reports only; it takes no moderation action.** Off by default, and it runs in one channel at a time so the questions and thresholds can be tuned against real traffic first.
+
+Each message is judged alongside the few before it, so a sentence split across messages ("dont say" / "the n word") reads as one thought and a word with two meanings is resolved by what came before. Each category carries its own thresholds and a severity floor, so swearing with nobody on the receiving end never deletes a message while a slur aimed at someone acts far sooner — see `/automod status` for the table.
+
 ### 🧩 Module System
 Enable only the features you need. Moderation requires logging to be enabled first (it needs somewhere to send mod-log embeds).
 
@@ -59,7 +64,11 @@ Edit `.env` and add your bot token:
 ```
 TOKEN=your-token-here
 LOG_LEVEL=INFO
+
+# Optional — enables the AI automod. Get one at https://console.typesafe.ai/
+TYPESAFE_API_KEY=
 ```
+Without `TYPESAFE_API_KEY` the bot runs normally; the automod commands just report that no key is configured.
 
 ```bash
 uv run main.py
@@ -104,6 +113,15 @@ Requires logging to be enabled first (mod actions are sent to the mod-log channe
 ```
 /module enable moderation
 ```
+
+### 4. AI Automod (preview)
+Requires `TYPESAFE_API_KEY` in your `.env`. Message content from the watched channel is sent to TypeSafe for scoring — see [privacy.md](privacy.md).
+```
+/module enable automod
+/automod watch #channel
+```
+Every message in that channel gets a breakdown embed in reply. Nothing is deleted and nobody is actioned.
+
 
 ---
 
@@ -154,6 +172,16 @@ Requires logging to be enabled first (mod actions are sent to the mod-log channe
 | `/reason <number> <reason>` | Manage Messages | Alias for `/case-edit` |
 | `/modstats [days]` | Manage Messages | Server moderation statistics |
 
+### Automod (`/automod`) — requires Automod module + Manage Guild
+| Command | Description |
+|---|---|
+| `/automod watch <channel>` | Screen every message sent in a channel |
+| `/automod unwatch` | Stop screening messages |
+| `/automod check <message>` | Score a piece of text on demand |
+| `/automod status` | Show the model, thresholds, limits, and categories |
+
+---
+
 ### Modules (`/module`) — requires Manage Guild
 | Command | Description |
 |---|---|
@@ -168,7 +196,7 @@ Requires logging to be enabled first (mod actions are sent to the mod-log channe
 ```
 serenity/
 ├── core/
-│   ├── constants.py        # Slowmode and database config
+│   ├── constants.py        # Slowmode, database, and automod config
 │   ├── hooks.py            # Arc hooks (require_module)
 │   ├── modules.py          # ModuleType enum, ModuleManager
 │   └── types.py            # Shared dataclasses
@@ -180,6 +208,7 @@ serenity/
 │   └── schema.sql
 ├── extensions/
 │   ├── admin.py            # /serenity commands
+│   ├── automod.py          # /automod commands + screening listener
 │   ├── cases.py            # /case, /cases, /warnings etc.
 │   ├── events.py           # Message activity tracking
 │   ├── logging.py          # /logging commands
@@ -189,6 +218,8 @@ serenity/
 │   ├── tasks.py            # Background tasks
 │   └── user.py             # /ping, /stats, /about
 ├── services/
+│   ├── automod_questions.py  # TypeSafe question battery
+│   ├── automod_service.py    # Message screening via TypeSafe
 │   ├── logging_service.py  # Formats and sends log embeds
 │   ├── moderation_service.py # Executes mod actions + cases
 │   └── slowmode_engine.py  # Slowmode calculation
@@ -203,4 +234,5 @@ serenity/
 
 - [Hikari](https://docs.hikari-py.dev/en/stable/)
 - [Hikari-Arc](https://github.com/hypergonial/hikari-arc)
+- [TypeSafe](https://typesafe.ai) — the Jev model behind the AI automod
 - [aiosqlite](https://aiosqlite.omnilib.dev/)

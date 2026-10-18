@@ -12,6 +12,7 @@ from serenity.core.modules import ModuleManager
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
+from serenity.services.automod_service import AutomodService
 from serenity.services.logging_service import LoggingService
 from serenity.services.metrics import BOT_INFO
 from serenity.services.metrics_server import MetricsServer
@@ -54,6 +55,7 @@ repo = Repository(db_path=db_path)
 engine = SlowmodeEngine(repo)
 module_manager = ModuleManager(repo)
 metrics_server = MetricsServer(port=int(os.getenv("METRICS_PORT", "8080")))
+automod_svc = AutomodService.from_env()
 
 
 @client.add_startup_hook
@@ -77,6 +79,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(LoggingService, logging_svc)
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
+    client.set_type_dependency(AutomodService, automod_svc)
 
     await metrics_server.start()
 
@@ -92,6 +95,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
 async def on_shutdown(_: arc.GatewayClient) -> None:
     """Called when the bot is shutting down."""
     await metrics_server.stop()
+    await automod_svc.close()
     await repo.close()
     logger.info("Serenity is shutting down...")
 

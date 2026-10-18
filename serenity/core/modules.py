@@ -19,6 +19,7 @@ class ModuleType(Enum):
     SLOWMODE = "slowmode"
     MODERATION = "moderation"
     LOGGING = "logging"
+    AUTOMOD = "automod"
 
     # Future module types will be added here
 
@@ -38,6 +39,9 @@ MODULE_DEPENDENCIES: Dict[ModuleType, List[ModuleType]] = {
     ModuleType.SLOWMODE: [],
     ModuleType.LOGGING: [],
     ModuleType.MODERATION: [ModuleType.LOGGING],
+    # Read-only for now: it reports what it would do and takes no action, so it
+    # needs nothing else enabled. Add MODERATION here once it starts enforcing.
+    ModuleType.AUTOMOD: [],
     # Future dependencies will be added here
 }
 

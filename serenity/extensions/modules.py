@@ -59,7 +59,12 @@ async def list_modules(
             color=hikari.Color(0x5865F2),
         )
 
-        core_modules = [ModuleType.SLOWMODE, ModuleType.MODERATION, ModuleType.LOGGING]
+        core_modules = [
+            ModuleType.SLOWMODE,
+            ModuleType.MODERATION,
+            ModuleType.LOGGING,
+            ModuleType.AUTOMOD,
+        ]
         core_status = []
 
         for mod in core_modules:
@@ -104,6 +109,7 @@ async def enable_module(
                 hikari.CommandChoice(name="Slowmode", value="slowmode"),
                 hikari.CommandChoice(name="Moderation", value="moderation"),
                 hikari.CommandChoice(name="Logging", value="logging"),
+                hikari.CommandChoice(name="Automod", value="automod"),
             ],
         ),
     ],
@@ -193,6 +199,7 @@ async def disable_module(
                 hikari.CommandChoice(name="Slowmode", value="slowmode"),
                 hikari.CommandChoice(name="Moderation", value="moderation"),
                 hikari.CommandChoice(name="Logging", value="logging"),
+                hikari.CommandChoice(name="Automod", value="automod"),
             ],
         ),
     ],
