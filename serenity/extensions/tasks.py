@@ -217,21 +217,8 @@ async def aggregate_historical_patterns(repo: Repository) -> None:
                     repo, channel_id, completed_hour_start, hour_timestamp
                 )
 
-                messages_per_minute = message_count / 60.0
-
-                existing = await repo.get_expected_activity(channel_id, day_of_week, hour_of_day)
-
-                if existing is not None:
-                    new_avg, new_stddev, new_count = await _update_pattern_stats(
-                        repo, channel_id, day_of_week, hour_of_day, messages_per_minute
-                    )
-                else:
-                    new_avg = messages_per_minute
-                    new_stddev = 0.0
-                    new_count = 1
-
-                await repo.update_channel_pattern(
-                    channel_id, day_of_week, hour_of_day, new_avg, new_stddev, new_count
+                await _record_pattern_sample(
+                    repo, channel_id, day_of_week, hour_of_day, message_count / 60.0, hour_timestamp
                 )
 
                 updated_count += 1
@@ -335,15 +322,16 @@ async def expire_timeouts(mod_repo: ModerationRepository) -> None:
 
 
 async def _get_active_channels(repo: Repository, start_time: int, end_time: int) -> List[int]:
-    if not repo.connection:
+    if not repo.pool:
         return []
 
-    async with repo.connection.execute(
+    await repo.flush_message_activity()
+    rows = await repo.pool.fetch(
         """SELECT DISTINCT channel_id FROM message_activity
-           WHERE timestamp >= ? AND timestamp < ?""",
-        (start_time, end_time),
-    ) as cursor:
-        rows = await cursor.fetchall()
+           WHERE timestamp >= $1 AND timestamp < $2""",
+        start_time,
+        end_time,
+    )
 
     return [row["channel_id"] for row in rows]
 
@@ -351,17 +339,53 @@ async def _get_active_channels(repo: Repository, start_time: int, end_time: int)
 async def _get_message_count(
     repo: Repository, channel_id: int, start_time: int, end_time: int
 ) -> int:
-    if not repo.connection:
+    if not repo.pool:
         return 0
 
-    async with repo.connection.execute(
-        """SELECT sum(message_count) as total FROM message_activity
-        WHERE channel_id = ? AND timestamp >= ? AND timestamp < ?""",
-        (channel_id, start_time, end_time),
-    ) as cursor:
-        row = await cursor.fetchone()
+    await repo.flush_message_activity()
+    total = await repo.pool.fetchval(
+        """SELECT sum(message_count) FROM message_activity
+        WHERE channel_id = $1 AND timestamp >= $2 AND timestamp < $3""",
+        channel_id,
+        start_time,
+        end_time,
+    )
 
-    return row["total"] if row and row["total"] else 0
+    return total or 0
+
+
+async def _record_pattern_sample(
+    repo: Repository,
+    channel_id: int,
+    day_of_week: int,
+    hour: int,
+    messages_per_minute: float,
+    hour_end: int,
+) -> None:
+    """Fold one completed hour's rate into the channel's running pattern for that day/hour."""
+    if not repo.pool:
+        return
+
+    # The task also runs on every startup, so a restart can see the same completed hour again.
+    # last_updated stores the end of the last folded hour, so this skips a repeat exactly.
+    last_updated = await repo.pool.fetchval(
+        """SELECT last_updated FROM channel_patterns
+        WHERE channel_id = $1 AND day_of_week = $2 AND hour = $3""",
+        channel_id,
+        day_of_week,
+        hour,
+    )
+    if last_updated is not None and last_updated >= hour_end:
+        return
+
+    # Not gated on get_expected_activity: that returns None below 10 samples, which used to
+    # reset every pattern to sample_count=1 so it could never reach 10.
+    new_avg, new_stddev, new_count = await _update_pattern_stats(
+        repo, channel_id, day_of_week, hour, messages_per_minute
+    )
+    await repo.update_channel_pattern(
+        channel_id, day_of_week, hour, new_avg, new_stddev, new_count, last_updated=hour_end
+    )
 
 
 async def _update_pattern_stats(
@@ -371,16 +395,17 @@ async def _update_pattern_stats(
     hour: int,
     new_value: float,
 ) -> tuple[float, float, int]:
-    if not repo.connection:
+    if not repo.pool:
         return new_value, 0.0, 1
 
-    async with repo.connection.execute(
+    row = await repo.pool.fetchrow(
         """SELECT avg_message_rate, stddev_message_rate, sample_count
         FROM channel_patterns
-        WHERE channel_id = ? AND day_of_week = ? AND hour = ?""",
-        (channel_id, day_of_week, hour),
-    ) as cursor:
-        row = await cursor.fetchone()
+        WHERE channel_id = $1 AND day_of_week = $2 AND hour = $3""",
+        channel_id,
+        day_of_week,
+        hour,
+    )
 
     if not row:
         return new_value, 0.0, 1

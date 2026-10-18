@@ -32,9 +32,9 @@ class SlowmodeConfig:
 class DatabaseConfig:
     """Database configuration settings."""
 
-    DEFAULT_PATH: str = "data/serenity.db"
     POOL_SIZE: int = 5
-    TIMEOUT: int = 30
+    ACTIVITY_FLUSH_INTERVAL: int = 5  # seconds between batched message_activity writes
+    ACTIVITY_MAX_BUFFERED_KEYS: int = 100_000  # (channel, second) pairs; roughly 15 MB
 
 
 SLOWMODE_CONFIG = SlowmodeConfig()

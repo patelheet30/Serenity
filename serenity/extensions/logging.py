@@ -18,7 +18,6 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "voice":   "🔊 Voice",
     "server":  "⚙️ Server",
     "mod":     "🔨 Mod",
-    "all": "*"
 }
 
 CHANNEL_NAMES: dict[str, str] = {
@@ -448,7 +447,8 @@ async def disable_log(
     )
     await ctx.respond(embed=embed)
 
-_LOG_TYPE_OR_ALL = ["all"] + LOG_TYPES
+# Choice name -> value: picking "all" sends the "*" sentinel that log_ignores stores.
+_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in LOG_TYPES}}
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))

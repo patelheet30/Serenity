@@ -12,6 +12,9 @@ services:
       - PGUSER=${POSTGRES_USER:-serenity}
       - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - PGDATABASE=${POSTGRES_DB:-serenity}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"                    # Exposes your Prometheus metrics port
     volumes:
@@ -26,6 +29,11 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-serenity}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - POSTGRES_DB=${POSTGRES_DB:-serenity}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     # No ports: only reachable from this compose network as postgres:5432
     volumes:
       - pgdata:/var/lib/postgresql     # PG18+ layout; data lives in /var/lib/postgresql/18/docker
