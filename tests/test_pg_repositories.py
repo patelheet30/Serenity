@@ -205,3 +205,8 @@ async def test_pattern_hour_is_folded_once(pg_repo: Repository):
 
     row = await pg_repo.pool.fetchrow("SELECT avg_message_rate, sample_count FROM channel_patterns")
     assert (row["sample_count"], row["avg_message_rate"]) == (1, 2.0)
+
+    # Only the newest completed hour is ever folded; an older hour is ignored, not merged.
+    await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 9.0, hour_end - 7 * 86400)
+    row = await pg_repo.pool.fetchrow("SELECT avg_message_rate, sample_count FROM channel_patterns")
+    assert (row["sample_count"], row["avg_message_rate"]) == (1, 2.0)

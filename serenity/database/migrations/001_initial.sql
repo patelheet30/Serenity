@@ -35,7 +35,7 @@ CREATE TABLE channel_patterns (
     avg_message_rate    DOUBLE PRECISION,
     stddev_message_rate DOUBLE PRECISION,
     sample_count        INTEGER,
-    last_updated        BIGINT,
+    last_updated        BIGINT,  -- end of the last folded hour (unix), not the write time
     PRIMARY KEY (channel_id, day_of_week, hour)
 );
 
