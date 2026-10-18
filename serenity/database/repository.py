@@ -408,6 +408,9 @@ class Repository:
         await self.connection.execute(
             "DELETE FROM slowmode_effectiveness WHERE applied_at < ?", (cutoff,)
         )
+        await self.connection.execute(
+            "DELETE FROM slowmode_changes WHERE timestamp < ?", (cutoff,)
+        )
         await self.connection.commit()
 
     async def get_module_config(self, guild_id: int, module_type: ModuleType) -> ModuleConfig:
