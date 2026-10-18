@@ -15,6 +15,10 @@ KEEP_LOCAL=7
 
 source "$BACKUP_DIR/.env"
 
+# One run at a time (e.g. a manual run overlapping cron)
+exec 9>"$BACKUP_DIR/.lock"
+flock -n 9 || { echo "$(date -u +%FT%TZ) previous run still active, skipping"; exit 0; }
+
 name="serenity-$(date -u +%Y%m%dT%H%M%SZ).dump"
 tmp="$BACKUP_DIR/.$name.partial"
 trap 'rm -f "$tmp"' EXIT
