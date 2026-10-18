@@ -18,7 +18,6 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "voice":   "🔊 Voice",
     "server":  "⚙️ Server",
     "mod":     "🔨 Mod",
-    "all": "*"
 }
 
 CHANNEL_NAMES: dict[str, str] = {
