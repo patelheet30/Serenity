@@ -50,7 +50,6 @@ async def _do_ignore(
     mention: str,
     log_type: str,
 ) -> None:
-    log_type = "*" if log_type == "all" else log_type  # "all" is the choice; "*" is what's stored
     added = await repo.add_ignore(ctx.guild_id, target_type, target_id, log_type)  # type: ignore[arg-type]
 
     if not added:
@@ -76,7 +75,6 @@ async def _do_unignore(
     mention: str,
     log_type: str,
 ) -> None:
-    log_type = "*" if log_type == "all" else log_type  # "all" is the choice; "*" is what's stored
     scope = None if log_type == "*" else log_type
     removed = await repo.remove_ignore(ctx.guild_id, target_type, target_id, scope)  # type: ignore[arg-type]
 
@@ -450,7 +448,8 @@ async def disable_log(
     )
     await ctx.respond(embed=embed)
 
-_LOG_TYPE_OR_ALL = ["all"] + LOG_TYPES
+# Choice name -> value: picking "all" sends the "*" sentinel that log_ignores stores.
+_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in LOG_TYPES}}
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
