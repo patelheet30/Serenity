@@ -266,6 +266,7 @@ class Repository:
         avg_rate: float,
         stddev_rate: float,
         sample_count: int,
+        last_updated: Optional[int] = None,
     ) -> None:
         """Update the channel pattern analytics"""
         if not self.pool:
@@ -286,7 +287,7 @@ class Repository:
             avg_rate,
             stddev_rate,
             sample_count,
-            int(time.time()),
+            last_updated if last_updated is not None else int(time.time()),
         )
 
     async def record_slowmode_effectiveness(
