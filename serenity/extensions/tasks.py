@@ -300,7 +300,8 @@ async def cleanup_old_data(repo: Repository) -> None:
         await repo.cleanup_old_message_activity(
             hours=SLOWMODE_CONFIG.MESSAGE_ACTIVITY_RETENTION_HOURS
         )
-        logger.info("Old message activity data cleaned up.")
+        await repo.cleanup_old_analytics(days=SLOWMODE_CONFIG.ANALYTICS_RETENTION_DAYS)
+        logger.info("Old message activity and analytics data cleaned up.")
     except Exception as e:
         logger.error(f"Error cleaning up old data: {e}", exc_info=True)
         TASK_ERRORS.labels(task_name="cleanup_old_data").inc()
