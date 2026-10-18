@@ -174,8 +174,11 @@ async def test_task_queries(pg_repo: Repository):
 async def test_pattern_samples_accumulate(pg_repo: Repository):
     """Regression: every hourly sample used to reset sample_count to 1."""
     assert pg_repo.pool is not None
-    for rate in (2.0, 4.0, 6.0):
-        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, rate)
+    week = 7 * 86400
+    hour_end = int(time.time()) - 10 * week  # weekly samples for one (day, hour) slot, in the past
+
+    for i, rate in enumerate((2.0, 4.0, 6.0)):
+        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, rate, hour_end + i * week)
 
     row = await pg_repo.pool.fetchrow(
         "SELECT avg_message_rate, stddev_message_rate, sample_count FROM channel_patterns"
@@ -186,6 +189,19 @@ async def test_pattern_samples_accumulate(pg_repo: Repository):
 
     # Engine only trusts patterns from 10 samples on
     assert await pg_repo.get_expected_activity(CHANNEL, 3, 18) is None
-    for _ in range(7):
-        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 4.0)
+    for i in range(3, 10):
+        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 4.0, hour_end + i * week)
     assert await pg_repo.get_expected_activity(CHANNEL, 3, 18) == 4.0
+
+
+@pytest.mark.asyncio
+async def test_pattern_hour_is_folded_once(pg_repo: Repository):
+    """A restart re-runs the task for the same completed hour; it must not count twice."""
+    assert pg_repo.pool is not None
+    hour_end = (int(time.time()) // 3600) * 3600
+
+    await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 2.0, hour_end)
+    await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 9.0, hour_end)
+
+    row = await pg_repo.pool.fetchrow("SELECT avg_message_rate, sample_count FROM channel_patterns")
+    assert (row["sample_count"], row["avg_message_rate"]) == (1, 2.0)
