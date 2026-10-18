@@ -49,8 +49,8 @@ bot = hikari.GatewayBot(
 
 client = arc.GatewayClient(bot)
 
-db_path = os.getenv("DATABASE_PATH", "data/serenity.db")
-repo = Repository(db_path=db_path)
+# Connection settings come from PGHOST/PGUSER/PGPASSWORD/PGDATABASE
+repo = Repository(pool_size=int(os.getenv("DB_POOL_SIZE", "5")))
 engine = SlowmodeEngine(repo)
 module_manager = ModuleManager(repo)
 metrics_server = MetricsServer(port=int(os.getenv("METRICS_PORT", "8080")))
@@ -61,9 +61,9 @@ async def on_startup(_: arc.GatewayClient) -> None:
     """Called when the bot starts up."""
     await repo.init()
 
-    logging_repo = LoggingRepository(repo.connection)
+    logging_repo = LoggingRepository(repo.pool)
     logging_svc = LoggingService(repo=logging_repo, rest=bot.rest)
-    mod_repo = ModerationRepository(repo.connection)
+    mod_repo = ModerationRepository(repo.pool)
     mod_svc = ModerationService(
         mod_repo=mod_repo,
         logging_svc=logging_svc,

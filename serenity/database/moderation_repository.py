@@ -1,7 +1,7 @@
 import time
 from typing import List, Optional
 
-import aiosqlite
+import asyncpg
 
 from serenity.utils.errors import DatabaseError
 from serenity.utils.logging import get_logger
@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 class ModerationRepository:
     """Repository for moderation-related database operations"""
 
-    def __init__(self, connection: aiosqlite.Connection):
-        self.connection = connection
+    def __init__(self, pool: asyncpg.Pool):
+        self.pool = pool
 
     async def create_case(
         self,
@@ -26,33 +26,26 @@ class ModerationRepository:
         expires_at: Optional[int] = None,
     ) -> int:
         """Create a new moderation case and return the case number"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
-        async with self.connection.execute(
-            "SELECT MAX(case_number) FROM mod_cases WHERE guild_id = ?", (guild_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            next_case_number = (row[0] or 0) + 1  # type: ignore
-
-        await self.connection.execute(
+        # Numbering in the same statement as the insert; UNIQUE(guild_id, case_number)
+        # turns a concurrent duplicate into an error rather than two cases with one number.
+        next_case_number = await self.pool.fetchval(
             """INSERT INTO mod_cases
             (guild_id, case_number, target_user_id, moderator_id, action, reason, duration_sections, created_at, expires_at, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-            (
-                guild_id,
-                next_case_number,
-                target_user_id,
-                moderator_id,
-                action,
-                reason,
-                duration_seconds,
-                int(time.time()),
-                expires_at,
-            ),
+            SELECT $1, COALESCE(MAX(case_number), 0) + 1, $2, $3, $4, $5, $6, $7, $8, TRUE
+            FROM mod_cases WHERE guild_id = $1
+            RETURNING case_number""",
+            guild_id,
+            target_user_id,
+            moderator_id,
+            action,
+            reason,
+            duration_seconds,
+            int(time.time()),
+            expires_at,
         )
-
-        await self.connection.commit()
 
         logger.info(
             f"Created mod case #{next_case_number} for user {target_user_id} in guild {guild_id} with action {action}"
@@ -63,65 +56,64 @@ class ModerationRepository:
         self, guild_id: int, case_number: int, new_reason: str
     ) -> None:
         """Update the reason for a case"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        await self.connection.execute(
-            """UPDATE mod_cases
-            SET reason = ?
-            WHERE guild_id = ? AND case_number = ?""",
-            (new_reason, guild_id, case_number),
+        await self.pool.execute(
+            "UPDATE mod_cases SET reason = $1 WHERE guild_id = $2 AND case_number = $3",
+            new_reason,
+            guild_id,
+            case_number,
         )
-        await self.connection.commit()
 
     async def deactivate_case(self, guild_id: int, case_number: int) -> None:
         """Mark a case as inactive."""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        await self.connection.execute(
-            """UPDATE mod_cases SET is_active = 0
-            WHERE guild_id = ? AND case_number = ?""",
-            (guild_id, case_number),
+        await self.pool.execute(
+            "UPDATE mod_cases SET is_active = FALSE WHERE guild_id = $1 AND case_number = $2",
+            guild_id,
+            case_number,
         )
-        await self.connection.commit()
 
     async def get_case(self, guild_id: int, case_number: int) -> Optional[dict]:
         """Get a moderation case by guild ID and case number"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
-        async with self.connection.execute(
-            "SELECT * FROM mod_cases WHERE guild_id = ? AND case_number = ?",
-            (guild_id, case_number),
-        ) as cursor:
-            row = await cursor.fetchone()
+        row = await self.pool.fetchrow(
+            "SELECT * FROM mod_cases WHERE guild_id = $1 AND case_number = $2",
+            guild_id,
+            case_number,
+        )
 
         return dict(row) if row else None
 
     async def get_user_cases(self, guild_id: int, user_id: int, limit: int = 10) -> List[dict]:
         """Get moderation cases for a specific user in a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
-        async with self.connection.execute(
-            "SELECT * FROM mod_cases WHERE guild_id = ? AND target_user_id = ? ORDER BY created_at DESC LIMIT ?",
-            (guild_id, user_id, limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self.pool.fetch(
+            "SELECT * FROM mod_cases WHERE guild_id = $1 AND target_user_id = $2 ORDER BY created_at DESC LIMIT $3",
+            guild_id,
+            user_id,
+            limit,
+        )
 
         return [dict(row) for row in rows]
 
     async def get_active_timeouts(self, guild_id: int) -> List[dict]:
         """Get all active timeouts in a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
-        async with self.connection.execute(
-            "SELECT * FROM mod_cases WHERE guild_id = ? AND action = 'timeout' AND is_active = 1 AND expires_at > ?",
-            (guild_id, int(time.time())),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self.pool.fetch(
+            "SELECT * FROM mod_cases WHERE guild_id = $1 AND action = 'timeout' AND is_active AND expires_at > $2",
+            guild_id,
+            int(time.time()),
+        )
 
         return [dict(row) for row in rows]
 
@@ -130,18 +122,17 @@ class ModerationRepository:
 
         Used by the background task to keep is_active in sync with reality.
         """
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
+        rows = await self.pool.fetch(
             """SELECT * FROM mod_cases
             WHERE action = 'timeout'
-            AND is_active = 1
+            AND is_active
             AND expires_at IS NOT NULL
-            AND expires_at < ?""",
-            (int(time.time()),),
-        ) as cursor:
-            rows = await cursor.fetchall()
+            AND expires_at < $1""",
+            int(time.time()),
+        )
 
         return [dict(row) for row in rows]
 
@@ -154,99 +145,102 @@ class ModerationRepository:
         case_id: Optional[int] = None,
     ) -> int:
         """Add a warning for a user"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        cursor = await self.connection.execute(
+        warning_id = await self.pool.fetchval(
             """INSERT INTO warnings (guild_id, user_id, moderator_id, reason, case_id, created_at, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, 1)""",
-            (guild_id, user_id, moderator_id, reason, case_id, int(time.time())),
+            VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+            RETURNING id""",
+            guild_id,
+            user_id,
+            moderator_id,
+            reason,
+            case_id,
+            int(time.time()),
         )
-        await self.connection.commit()
 
         logger.info(f"Added warning for user {user_id} in guild {guild_id} with reason: {reason}")
 
-        return cursor.lastrowid  # type: ignore
+        return warning_id
 
     async def get_active_warnings(self, guild_id: int, user_id: int) -> List[dict]:
         """Get all active warnings for a user"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            """SELECT * FROM warnings WHERE guild_id = ? AND user_id = ? AND is_active = 1
+        rows = await self.pool.fetch(
+            """SELECT * FROM warnings WHERE guild_id = $1 AND user_id = $2 AND is_active
             ORDER BY created_at DESC""",
-            (guild_id, user_id),
-        ) as cursor:
-            rows = await cursor.fetchall()
+            guild_id,
+            user_id,
+        )
 
         return [dict(row) for row in rows]
 
     async def get_warning_count(self, guild_id: int, user_id: int) -> int:
         """Get count of active warnings for a user"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            """SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND user_id = ? AND is_active = 1""",
-            (guild_id, user_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        return row[0] if row else 0
+        return await self.pool.fetchval(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND user_id = $2 AND is_active",
+            guild_id,
+            user_id,
+        )
 
     async def clear_warnings(self, guild_id: int, user_id: int) -> int:
         """Clear all active warnings for a user. Returns count cleared."""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            """SELECT case_id FROM warnings
-            WHERE guild_id = ? AND user_id = ? AND is_active = 1 AND case_id IS NOT NULL""",
-            (guild_id, user_id),
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-        case_numbers = [row["case_id"] for row in rows]
-        count = len(case_numbers) or await self.get_warning_count(guild_id, user_id)
-
-        await self.connection.execute(
-            """UPDATE warnings SET is_active = 0
-            WHERE guild_id = ? AND user_id = ? AND is_active = 1""",
-            (guild_id, user_id),
-        )
-
-        for case_number in case_numbers:
-            await self.connection.execute(
-                """UPDATE mod_cases SET is_active = 0
-                WHERE guild_id = ? AND case_number = ?""",
-                (guild_id, case_number),
+        async with self.pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """SELECT case_id FROM warnings
+                WHERE guild_id = $1 AND user_id = $2 AND is_active AND case_id IS NOT NULL""",
+                guild_id,
+                user_id,
             )
 
-        await self.connection.commit()
+            case_numbers = [row["case_id"] for row in rows]
+
+            status = await conn.execute(
+                """UPDATE warnings SET is_active = FALSE
+                WHERE guild_id = $1 AND user_id = $2 AND is_active""",
+                guild_id,
+                user_id,
+            )
+            count = len(case_numbers) or int(status.split()[-1])  # status is e.g. "UPDATE 2"
+
+            await conn.execute(
+                """UPDATE mod_cases SET is_active = FALSE
+                WHERE guild_id = $1 AND case_number = ANY($2::int[])""",
+                guild_id,
+                case_numbers,
+            )
+
         return count
 
     async def get_moderation_stats(self, guild_id: int, days: int = 30) -> dict:
         """Get moderation statistics for a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         cutoff = int(time.time()) - (days * 86400)
 
-        async with self.connection.execute(
+        rows = await self.pool.fetch(
             """SELECT action, COUNT(*) as count
-            FROM mod_cases WHERE guild_id = ? AND created_at >= ? GROUP BY action""",
-            (guild_id, cutoff),
-        ) as cursor:
-            rows = await cursor.fetchall()
+            FROM mod_cases WHERE guild_id = $1 AND created_at >= $2 GROUP BY action""",
+            guild_id,
+            cutoff,
+        )
 
         stats = {row["action"]: row["count"] for row in rows}
 
-        async with self.connection.execute(
-            """SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND created_at >= ?""",
-            (guild_id, cutoff),
-        ) as cursor:
-            row = await cursor.fetchone()
-            stats["warnings"] = row[0] if row else 0
+        stats["warnings"] = await self.pool.fetchval(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND created_at >= $2",
+            guild_id,
+            cutoff,
+        )
 
         return stats

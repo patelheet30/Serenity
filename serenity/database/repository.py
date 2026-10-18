@@ -1,12 +1,12 @@
+import json
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import aiosqlite
+import asyncpg
 
 from serenity.core.constants import DATABASE_CONFIG
 from serenity.core.types import ChannelConfig, GuildConfig
-from serenity.database.migrations import MigrationManager
+from serenity.database.migrations import run_migrations
 from serenity.utils.errors import DatabaseError
 from serenity.utils.logging import get_logger
 
@@ -20,50 +20,43 @@ logger = get_logger(__name__)
 
 
 class Repository:
-    def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or DATABASE_CONFIG.DEFAULT_PATH
-        self.connection: Optional[aiosqlite.Connection] = None
-
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, dsn: Optional[str] = None, pool_size: int = DATABASE_CONFIG.POOL_SIZE):
+        # dsn=None makes asyncpg read PGHOST/PGUSER/PGPASSWORD/PGDATABASE from the env
+        self.dsn = dsn
+        self.pool_size = pool_size
+        self.pool: Optional[asyncpg.Pool] = None
 
     async def init(self) -> None:
-        """Initialise the database connection and run migrations"""
-        self.connection = await aiosqlite.connect(self.db_path)
-        self.connection.row_factory = aiosqlite.Row
-
-        migration_manager = MigrationManager(self.db_path)
-        await migration_manager.run_migrations_with_connection(self.connection)
+        """Create the connection pool and run migrations"""
+        self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=self.pool_size)
+        await run_migrations(self.pool)
 
         logger.info("Database initialised and connected.")
 
     async def close(self) -> None:
-        """Close the database connection"""
-        if self.connection:
-            await self.connection.close()
+        """Close the connection pool"""
+        if self.pool:
+            await self.pool.close()
             logger.info("Database connection closed.")
 
     async def get_guild_config(self, guild_id: int) -> GuildConfig:
         """Get the configuration for a guild, creating a default if not found"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            "SELECT * FROM guild_config WHERE guild_id = ?", (guild_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
+        row = await self.pool.fetchrow("SELECT * FROM guild_config WHERE guild_id = $1", guild_id)
 
         if row:
             return GuildConfig(
                 guild_id=row["guild_id"],
-                is_enabled=bool(row["is_enabled"]),
+                is_enabled=row["is_enabled"],
                 default_threshold=row["default_threshold"],
                 update_interval=row["update_interval"],
             )
 
-        await self.connection.execute(
-            """INSERT INTO guild_config (guild_id) VALUES (?)""", (guild_id,)
+        await self.pool.execute(
+            "INSERT INTO guild_config (guild_id) VALUES ($1) ON CONFLICT DO NOTHING", guild_id
         )
-        await self.connection.commit()
         logger.info(f"Created default channel config for guild {guild_id}.")
 
         return GuildConfig(
@@ -78,55 +71,55 @@ class Repository:
         update_interval: Optional[int] = None,
     ) -> None:
         """Update the configuration for a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         updates = []
-        params = []
+        params: List[Any] = []
 
         if is_enabled is not None:
-            updates.append("is_enabled = ?")
-            params.append(int(is_enabled))
+            params.append(is_enabled)
+            updates.append(f"is_enabled = ${len(params)}")
         if default_threshold is not None:
-            updates.append("default_threshold = ?")
             params.append(default_threshold)
+            updates.append(f"default_threshold = ${len(params)}")
         if update_interval is not None:
-            updates.append("update_interval = ?")
             params.append(update_interval)
+            updates.append(f"update_interval = ${len(params)}")
 
         if not updates:
             return
 
         params.append(guild_id)
 
-        await self.connection.execute(
-            f"UPDATE guild_config SET {', '.join(updates)} WHERE guild_id = ?", params
+        await self.pool.execute(
+            f"UPDATE guild_config SET {', '.join(updates)} WHERE guild_id = ${len(params)}",
+            *params,
         )
-        await self.connection.commit()
 
     async def get_channel_config(self, channel_id: int, guild_id: int) -> ChannelConfig:
         """Get the configuration for a channel, creating a default if not found"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            "SELECT * FROM channel_config WHERE channel_id = ?", (channel_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
+        row = await self.pool.fetchrow(
+            "SELECT * FROM channel_config WHERE channel_id = $1", channel_id
+        )
 
         if row:
             return ChannelConfig(
                 channel_id=row["channel_id"],
                 guild_id=row["guild_id"],
-                is_enabled=bool(row["is_enabled"]),
+                is_enabled=row["is_enabled"],
                 threshold=row["threshold"],
             )
 
-        await self.connection.execute(
-            """INSERT INTO channel_config (channel_id, guild_id) VALUES (?, ?)""",
-            (channel_id, guild_id),
+        await self.pool.execute(
+            """INSERT INTO channel_config (channel_id, guild_id) VALUES ($1, $2)
+            ON CONFLICT DO NOTHING""",
+            channel_id,
+            guild_id,
         )
-        await self.connection.commit()
         logger.info(f"Created default channel config for channel {channel_id}.")
 
         return ChannelConfig(
@@ -135,15 +128,13 @@ class Repository:
 
     async def get_enabled_channels(self, guild_id: int) -> List[int]:
         """Get all enabled channels for a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            """SELECT channel_id FROM channel_config
-            WHERE guild_id = ? AND is_enabled = 1""",
-            (guild_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self.pool.fetch(
+            "SELECT channel_id FROM channel_config WHERE guild_id = $1 AND is_enabled",
+            guild_id,
+        )
 
         return [row["channel_id"] for row in rows]
 
@@ -154,74 +145,72 @@ class Repository:
         threshold: Optional[int] = None,
     ) -> None:
         """Update the configuration for a channel"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         updates = []
-        params = []
+        params: List[Any] = []
 
         if is_enabled is not None:
-            updates.append("is_enabled = ?")
-            params.append(int(is_enabled))
+            params.append(is_enabled)
+            updates.append(f"is_enabled = ${len(params)}")
         if threshold is not None:
-            updates.append("threshold = ?")
             params.append(threshold)
+            updates.append(f"threshold = ${len(params)}")
 
         if not updates:
             return
 
         params.append(channel_id)
 
-        await self.connection.execute(
-            f"UPDATE channel_config SET {', '.join(updates)} WHERE channel_id = ?", params
+        await self.pool.execute(
+            f"UPDATE channel_config SET {', '.join(updates)} WHERE channel_id = ${len(params)}",
+            *params,
         )
-        await self.connection.commit()
 
     async def record_message_activity(
         self, channel_id: int, timestamp: Optional[int] = None
     ) -> None:
         """Record a message activity for a channel at a given timestamp"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         if timestamp is None:
             timestamp = int(time.time())
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO message_activity (channel_id, timestamp, message_count)
-            VALUES (?, ?, 1)
-            ON CONFLICT(channel_id, timestamp) DO UPDATE SET
-            message_count = message_count + 1""",
-            (channel_id, timestamp),
+            VALUES ($1, $2, 1)
+            ON CONFLICT (channel_id, timestamp) DO UPDATE SET
+            message_count = message_activity.message_count + 1""",
+            channel_id,
+            timestamp,
         )
-        await self.connection.commit()
 
     async def get_message_rate(self, channel_id: int, window_seconds: int = 60) -> float:
         """Get the message rate (messages per minute) for a channel over a time window"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         cutoff = int(time.time()) - window_seconds
 
-        async with self.connection.execute(
-            """SELECT SUM(message_count) as total FROM message_activity
-            WHERE channel_id = ? AND timestamp >= ?""",
-            (channel_id, cutoff),
-        ) as cursor:
-            row = await cursor.fetchone()
+        total = await self.pool.fetchval(
+            """SELECT SUM(message_count) FROM message_activity
+            WHERE channel_id = $1 AND timestamp >= $2""",
+            channel_id,
+            cutoff,
+        )
 
-        total = row["total"] if row and row["total"] else 0
-        return (total / window_seconds) * 60  # messages per minute
+        return ((total or 0) / window_seconds) * 60  # messages per minute
 
     async def cleanup_old_message_activity(self, hours: int = 24) -> None:
         """Remove message activity records older than specified hours"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         cutoff = int(time.time()) - (hours * 3600)
 
-        await self.connection.execute("DELETE FROM message_activity WHERE timestamp < ?", (cutoff,))
-        await self.connection.commit()
+        await self.pool.execute("DELETE FROM message_activity WHERE timestamp < $1", cutoff)
 
     async def record_slowmode_change(
         self,
@@ -233,30 +222,36 @@ class Repository:
         confidence: float,
     ) -> None:
         """Record a slowmode change event"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO slowmode_changes
             (channel_id, old_value, new_value, reason, message_rate, confidence, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (channel_id, old_value, new_value, reason, message_rate, confidence, int(time.time())),
+            VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            channel_id,
+            old_value,
+            new_value,
+            reason,
+            message_rate,
+            confidence,
+            int(time.time()),
         )
-        await self.connection.commit()
 
     async def get_expected_activity(
         self, channel_id: int, day_of_week: int, hour: int
     ) -> Optional[float]:
         """Get the expected message rate for a channel at a specific day and hour"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
+        row = await self.pool.fetchrow(
             """SELECT avg_message_rate, stddev_message_rate, sample_count FROM channel_patterns
-            WHERE channel_id = ? AND day_of_week = ? AND hour = ?""",
-            (channel_id, day_of_week, hour),
-        ) as cursor:
-            row = await cursor.fetchone()
+            WHERE channel_id = $1 AND day_of_week = $2 AND hour = $3""",
+            channel_id,
+            day_of_week,
+            hour,
+        )
 
         if row and row["sample_count"] >= 10:
             return row["avg_message_rate"]
@@ -273,33 +268,26 @@ class Repository:
         sample_count: int,
     ) -> None:
         """Update the channel pattern analytics"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO channel_patterns
             (channel_id, day_of_week, hour, avg_message_rate, stddev_message_rate, sample_count, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(channel_id, day_of_week, hour) DO UPDATE SET
-            avg_message_rate = ?,
-            stddev_message_rate = ?,
-            sample_count = ?,
-            last_updated = ?""",
-            (
-                channel_id,
-                day_of_week,
-                hour,
-                avg_rate,
-                stddev_rate,
-                sample_count,
-                int(time.time()),
-                avg_rate,
-                stddev_rate,
-                sample_count,
-                int(time.time()),
-            ),
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (channel_id, day_of_week, hour) DO UPDATE SET
+            avg_message_rate = EXCLUDED.avg_message_rate,
+            stddev_message_rate = EXCLUDED.stddev_message_rate,
+            sample_count = EXCLUDED.sample_count,
+            last_updated = EXCLUDED.last_updated""",
+            channel_id,
+            day_of_week,
+            hour,
+            avg_rate,
+            stddev_rate,
+            sample_count,
+            int(time.time()),
         )
-        await self.connection.commit()
 
     async def record_slowmode_effectiveness(
         self,
@@ -310,140 +298,125 @@ class Repository:
         duration: int,
     ) -> None:
         """Record the effectiveness of a slowmode change"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         was_effective = (rate_after < rate_before * 0.8) if rate_before > 0 else False
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO slowmode_effectiveness
             (channel_id, applied_at, slowmode_value, message_rate_before, message_rate_after, duration_seconds, was_effective)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                channel_id,
-                int(time.time()),
-                slowmode_value,
-                rate_before,
-                rate_after,
-                duration,
-                int(was_effective),
-            ),
+            VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            channel_id,
+            int(time.time()),
+            slowmode_value,
+            rate_before,
+            rate_after,
+            duration,
+            was_effective,
         )
-
-        await self.connection.commit()
 
     async def get_effectiveness_score(self, channel_id: int) -> float:
         """Get the effectiveness score of slowmode changes for a channel"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        async with self.connection.execute(
-            """SELECT AVG(CAST(was_effective AS FLOAT)) as score FROM slowmode_effectiveness
-            WHERE channel_id = ? AND applied_at >= ?""",
-            (channel_id, int(time.time()) - (30 * 86400)),
-        ) as cursor:
-            row = await cursor.fetchone()
+        score = await self.pool.fetchval(
+            """SELECT AVG(was_effective::int)::float8 FROM slowmode_effectiveness
+            WHERE channel_id = $1 AND applied_at >= $2""",
+            channel_id,
+            int(time.time()) - (30 * 86400),
+        )
 
-        return row["score"] if row and row["score"] is not None else 0.0
+        return score if score is not None else 0.0
 
     async def aggregate_hourly_analytics(self, channel_id: int) -> None:
         """Aggregate message activity into hourly analytics for a channel"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         hour_timestamp = int(time.time() // 3600) * 3600
         start_time = hour_timestamp - 3600
 
-        async with self.connection.execute(
-            """SELECT SUM(message_count) as total, COUNT(DISTINCT timestamp) as samples
-            FROM message_activity
-            WHERE channel_id = ? AND timestamp >= ? AND timestamp < ?""",
-            (channel_id, start_time, hour_timestamp),
-        ) as cursor:
-            row = await cursor.fetchone()
+        total = await self.pool.fetchval(
+            """SELECT SUM(message_count) FROM message_activity
+            WHERE channel_id = $1 AND timestamp >= $2 AND timestamp < $3""",
+            channel_id,
+            start_time,
+            hour_timestamp,
+        )
 
-        if row and row["total"]:
-            await self.connection.execute(
+        if total:
+            await self.pool.execute(
                 """INSERT INTO channel_analytics
                 (channel_id, hour_timestamp, total_messages, unique_users, avg_slowmode, max_slowmode)
-                VALUES (?, ?, ?, 0, 0, 0)
-                ON CONFLICT(channel_id, hour_timestamp) DO UPDATE SET
-                total_messages = ?""",
-                (
-                    channel_id,
-                    hour_timestamp,
-                    row["total"],
-                    row["total"],
-                ),
+                VALUES ($1, $2, $3, 0, 0, 0)
+                ON CONFLICT (channel_id, hour_timestamp) DO UPDATE SET
+                total_messages = EXCLUDED.total_messages""",
+                channel_id,
+                hour_timestamp,
+                total,
             )
-        await self.connection.commit()
 
     async def get_channel_analytics(self, channel_id: int, hours_back: int = 24) -> List[dict]:
         """Get aggregated analytics for a channel"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database not initialized")
 
         cutoff = int(time.time()) - (hours_back * 3600)
 
-        async with self.connection.execute(
+        rows = await self.pool.fetch(
             """SELECT * FROM channel_analytics
-               WHERE channel_id = ? AND hour_timestamp >= ?
+               WHERE channel_id = $1 AND hour_timestamp >= $2
                ORDER BY hour_timestamp DESC""",
-            (channel_id, cutoff),
-        ) as cursor:
-            rows = await cursor.fetchall()
+            channel_id,
+            cutoff,
+        )
 
         return [dict(row) for row in rows]
 
     async def cleanup_old_analytics(self, days: int = 30) -> None:
         """Remove analytics older than specified days"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database not initialized")
 
         cutoff = int(time.time()) - (days * 86400)
 
-        await self.connection.execute(
-            "DELETE FROM channel_analytics WHERE hour_timestamp < ?", (cutoff,)
-        )
-        await self.connection.execute(
-            "DELETE FROM slowmode_effectiveness WHERE applied_at < ?", (cutoff,)
-        )
-        await self.connection.execute(
-            "DELETE FROM slowmode_changes WHERE timestamp < ?", (cutoff,)
-        )
-        await self.connection.commit()
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM channel_analytics WHERE hour_timestamp < $1", cutoff)
+            await conn.execute("DELETE FROM slowmode_effectiveness WHERE applied_at < $1", cutoff)
+            await conn.execute("DELETE FROM slowmode_changes WHERE timestamp < $1", cutoff)
 
     async def get_module_config(self, guild_id: int, module_type: ModuleType) -> ModuleConfig:
         """Get configuration for a module"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         from serenity.core.modules import ModuleConfig, ModuleType
 
-        async with self.connection.execute(
-            """SELECT * FROM module_config
-            WHERE guild_id = ? AND module_type = ?""",
-            (guild_id, module_type.value),
-        ) as cursor:
-            row = await cursor.fetchone()
+        row = await self.pool.fetchrow(
+            "SELECT * FROM module_config WHERE guild_id = $1 AND module_type = $2",
+            guild_id,
+            module_type.value,
+        )
 
         if row:
-            import json
-
             return ModuleConfig(
                 guild_id=row["guild_id"],
                 module_type=ModuleType(row["module_type"]),
-                is_enabled=bool(row["is_enabled"]),
+                is_enabled=row["is_enabled"],
                 settings=json.loads(row["settings"]) if row["settings"] else {},
                 updated_at=row["updated_at"],
             )
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO module_config (guild_id, module_type, is_enabled, settings, updated_at)
-            VALUES (?, ?, 0, '{}', ?)""",
-            (guild_id, module_type.value, int(time.time())),
+            VALUES ($1, $2, FALSE, '{}', $3)
+            ON CONFLICT DO NOTHING""",
+            guild_id,
+            module_type.value,
+            int(time.time()),
         )
-        await self.connection.commit()
 
         return ModuleConfig(
             guild_id=guild_id,
@@ -457,40 +430,32 @@ class Repository:
         self, guild_id: int, module_type: ModuleType, enabled: bool
     ) -> None:
         """Enable or disable a module for a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        await self.connection.execute(
+        await self.pool.execute(
             """INSERT INTO module_config (guild_id, module_type, is_enabled, settings, updated_at)
-            VALUES (?, ?, ?, '{}', ?)
-            ON CONFLICT(guild_id, module_type) DO UPDATE SET
-            is_enabled = ?,
-            updated_at = ?""",
-            (
-                guild_id,
-                module_type.value,
-                int(enabled),
-                int(time.time()),
-                int(enabled),
-                int(time.time()),
-            ),
+            VALUES ($1, $2, $3, '{}', $4)
+            ON CONFLICT (guild_id, module_type) DO UPDATE SET
+            is_enabled = EXCLUDED.is_enabled,
+            updated_at = EXCLUDED.updated_at""",
+            guild_id,
+            module_type.value,
+            enabled,
+            int(time.time()),
         )
-
-        await self.connection.commit()
 
     async def get_enabled_modules(self, guild_id: int) -> List[ModuleType]:
         """Get all enabled modules for a guild"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         from serenity.core.modules import ModuleType
 
-        async with self.connection.execute(
-            """SELECT module_type FROM module_config
-            WHERE guild_id = ? AND is_enabled = 1""",
-            (guild_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        rows = await self.pool.fetch(
+            "SELECT module_type FROM module_config WHERE guild_id = $1 AND is_enabled",
+            guild_id,
+        )
 
         return [ModuleType(row["module_type"]) for row in rows]
 
@@ -498,15 +463,15 @@ class Repository:
         self, guild_id: int, module_type: ModuleType, settings: Dict[str, Any]
     ) -> None:
         """Update settings for a module"""
-        if not self.connection:
+        if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
-        import json
-
-        await self.connection.execute(
+        await self.pool.execute(
             """UPDATE module_config
-            SET settings = ?, updated_at = ?
-            WHERE guild_id = ? AND module_type = ?""",
-            (json.dumps(settings), int(time.time()), guild_id, module_type.value),
+            SET settings = $1, updated_at = $2
+            WHERE guild_id = $3 AND module_type = $4""",
+            json.dumps(settings),
+            int(time.time()),
+            guild_id,
+            module_type.value,
         )
-        await self.connection.commit()

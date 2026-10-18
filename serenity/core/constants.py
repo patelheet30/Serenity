@@ -32,9 +32,7 @@ class SlowmodeConfig:
 class DatabaseConfig:
     """Database configuration settings."""
 
-    DEFAULT_PATH: str = "data/serenity.db"
     POOL_SIZE: int = 5
-    TIMEOUT: int = 30
 
 
 SLOWMODE_CONFIG = SlowmodeConfig()
