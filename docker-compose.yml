@@ -7,7 +7,11 @@ services:
       - .env                           # Loads your secret Discord Token
     environment:
       - LOG_LEVEL=INFO                 # From your fly.toml
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-serenity}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-serenity}
+      # libpq-style vars; asyncpg and psql read these directly, so the password needs no URL-encoding
+      - PGHOST=postgres
+      - PGUSER=${POSTGRES_USER:-serenity}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - PGDATABASE=${POSTGRES_DB:-serenity}
     ports:
       - "8080:8080"                    # Exposes your Prometheus metrics port
     volumes:
