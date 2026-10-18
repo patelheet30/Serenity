@@ -1,5 +1,6 @@
 """Tests for database repository (run against Postgres; see the pg_repo fixture)"""
 
+import asyncio
 import os
 import time
 
@@ -208,8 +209,59 @@ async def test_close_flushes_buffer():
 
 
 class _FailingPool:
+    closed = False
+
     async def execute(self, *args, **kwargs):
         raise RuntimeError("database down")
+
+    async def close(self):
+        self.closed = True
+
+
+class _HangingPool:
+    async def execute(self, *args, **kwargs):
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_flush_keeps_counts():
+    """close() cancelling the timer mid-write must not lose the in-flight batch"""
+    repo = Repository()
+    repo.pool = _HangingPool()  # type: ignore[assignment]
+    await repo.record_message_activity(CHANNEL, 1_700_000_000)
+
+    flush = asyncio.create_task(repo.flush_message_activity())
+    await asyncio.sleep(0)
+    flush.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush
+
+    assert repo._activity == {(CHANNEL, 1_700_000_000): 1}
+
+
+@pytest.mark.asyncio
+async def test_close_closes_pool_even_if_final_flush_fails():
+    repo = Repository()
+    pool = _FailingPool()
+    repo.pool = pool  # type: ignore[assignment]
+    await repo.record_message_activity(CHANNEL, 1_700_000_000)
+
+    await repo.close()
+
+    assert pool.closed
+
+
+@pytest.mark.asyncio
+async def test_buffer_is_capped():
+    repo = Repository()
+    repo.pool = _FailingPool()  # type: ignore[assignment]
+    repo._activity_max_keys = 3
+
+    for second in range(5):
+        await repo.record_message_activity(CHANNEL, second)
+    await repo.record_message_activity(CHANNEL, 4)  # existing key: no eviction
+
+    assert repo._activity == {(CHANNEL, 2): 1, (CHANNEL, 3): 1, (CHANNEL, 4): 2}
 
 
 @pytest.mark.asyncio

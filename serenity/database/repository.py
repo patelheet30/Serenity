@@ -29,8 +29,9 @@ class Repository:
         self.pool: Optional[asyncpg.Pool] = None
 
         # Message counts not yet written: (channel_id, timestamp) -> count.
-        # ponytail: unbounded if the DB stays down; ~1 key per active channel-second.
+        # Capped so a long DB outage can't exhaust memory; see record_message_activity.
         self._activity: Dict[tuple[int, int], int] = {}
+        self._activity_max_keys = DATABASE_CONFIG.ACTIVITY_MAX_BUFFERED_KEYS
         self._flush_task: Optional[asyncio.Task] = None
         # Held for the whole write, so a reader that flushes waits for an in-flight batch.
         self._flush_lock = asyncio.Lock()
@@ -51,8 +52,14 @@ class Repository:
                 await self._flush_task
 
         if self.pool:
-            await self.flush_message_activity()
-            await self.pool.close()
+            try:
+                await self.flush_message_activity()
+            except Exception:
+                logger.exception(
+                    f"Final message activity flush failed; dropping {len(self._activity)} buffered counts."
+                )
+            finally:
+                await self.pool.close()
             logger.info("Database connection closed.")
 
     async def _flush_loop(self) -> None:
@@ -84,8 +91,9 @@ class Repository:
                     [timestamp for _, timestamp in batch],
                     list(batch.values()),
                 )
-            except Exception:
-                # Put the counts back so the next flush retries them.
+            except BaseException:
+                # Put the counts back so the next flush retries them. BaseException so a
+                # cancelled flush (e.g. close() stopping the timer mid-write) keeps them too.
                 for key, count in batch.items():
                     self._activity[key] = self._activity.get(key, 0) + count
                 raise
@@ -230,6 +238,10 @@ class Repository:
             timestamp = int(time.time())
 
         key = (channel_id, timestamp)
+        if key not in self._activity and len(self._activity) >= self._activity_max_keys:
+            # Only reachable after the DB has been down a while (the flush loop logs that).
+            # Drop the oldest second: slowmode only looks back 15 minutes anyway.
+            del self._activity[next(iter(self._activity))]
         self._activity[key] = self._activity.get(key, 0) + 1
 
     async def get_message_rate(self, channel_id: int, window_seconds: int = 60) -> float:
