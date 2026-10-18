@@ -23,7 +23,9 @@ trap 'rm -f "$tmp"' EXIT
 docker exec serenity-postgres sh -c 'pg_dump --format=custom -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$tmp"
 mv "$tmp" "$BACKUP_DIR/$name"
 
-curl --fail --silent --show-error --retry 3 --upload-file "$BACKUP_DIR/$name" "${BACKUP_PAR_URL}${name}"
-
+# Prune before uploading so local copies stay bounded even if uploads keep failing.
 ls -1t "$BACKUP_DIR"/serenity-*.dump | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm --
+
+curl --fail --silent --show-error --retry 3 --connect-timeout 10 --max-time 600 \
+    --upload-file "$BACKUP_DIR/$name" "${BACKUP_PAR_URL}${name}"
 echo "$(date -u +%FT%TZ) uploaded $name ($(stat -c %s "$BACKUP_DIR/$name") bytes)"
