@@ -168,3 +168,24 @@ async def test_task_queries(pg_repo: Repository):
     await pg_repo.update_channel_pattern(CHANNEL, 1, 14, 4.0, 0.0, 1)
     avg, _, count = await tasks._update_pattern_stats(pg_repo, CHANNEL, 1, 14, 6.0)
     assert (avg, count) == (5.0, 2)
+
+
+@pytest.mark.asyncio
+async def test_pattern_samples_accumulate(pg_repo: Repository):
+    """Regression: every hourly sample used to reset sample_count to 1."""
+    assert pg_repo.pool is not None
+    for rate in (2.0, 4.0, 6.0):
+        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, rate)
+
+    row = await pg_repo.pool.fetchrow(
+        "SELECT avg_message_rate, stddev_message_rate, sample_count FROM channel_patterns"
+    )
+    assert row["sample_count"] == 3
+    assert row["avg_message_rate"] == 4.0
+    assert row["stddev_message_rate"] == pytest.approx((8 / 3) ** 0.5)  # population stddev
+
+    # Engine only trusts patterns from 10 samples on
+    assert await pg_repo.get_expected_activity(CHANNEL, 3, 18) is None
+    for _ in range(7):
+        await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 4.0)
+    assert await pg_repo.get_expected_activity(CHANNEL, 3, 18) == 4.0

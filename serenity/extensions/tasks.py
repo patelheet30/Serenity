@@ -217,21 +217,8 @@ async def aggregate_historical_patterns(repo: Repository) -> None:
                     repo, channel_id, completed_hour_start, hour_timestamp
                 )
 
-                messages_per_minute = message_count / 60.0
-
-                existing = await repo.get_expected_activity(channel_id, day_of_week, hour_of_day)
-
-                if existing is not None:
-                    new_avg, new_stddev, new_count = await _update_pattern_stats(
-                        repo, channel_id, day_of_week, hour_of_day, messages_per_minute
-                    )
-                else:
-                    new_avg = messages_per_minute
-                    new_stddev = 0.0
-                    new_count = 1
-
-                await repo.update_channel_pattern(
-                    channel_id, day_of_week, hour_of_day, new_avg, new_stddev, new_count
+                await _record_pattern_sample(
+                    repo, channel_id, day_of_week, hour_of_day, message_count / 60.0
                 )
 
                 updated_count += 1
@@ -363,6 +350,20 @@ async def _get_message_count(
     )
 
     return total or 0
+
+
+async def _record_pattern_sample(
+    repo: Repository, channel_id: int, day_of_week: int, hour: int, messages_per_minute: float
+) -> None:
+    """Fold one hour's rate into the channel's running pattern for that day/hour."""
+    # Not gated on get_expected_activity: that returns None below 10 samples, which used to
+    # reset every pattern to sample_count=1 so it could never reach 10.
+    new_avg, new_stddev, new_count = await _update_pattern_stats(
+        repo, channel_id, day_of_week, hour, messages_per_minute
+    )
+    await repo.update_channel_pattern(
+        channel_id, day_of_week, hour, new_avg, new_stddev, new_count
+    )
 
 
 async def _update_pattern_stats(
