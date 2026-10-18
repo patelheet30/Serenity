@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "uvloop>=0.21.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
     "prometheus-client>=0.24.1",
+    "typesafe-sdk>=0.7.0",
 ]
 
 [dependency-groups]

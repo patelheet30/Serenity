@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Serenity Discord Bot**  
-Last updated: July 2026
+Last updated: September 2026
 
 ---
 
@@ -28,7 +28,7 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 
 ### Data We Do Not Store
 
-- **Message content** — We never store the text of any message. Message content may be read from Discord's temporary cache at the moment a delete or edit event fires in order to send a log embed to your server's configured log channel, but it is never written to our database.
+- **Message content** — We never store the text of any message. Message content may be read from Discord's temporary cache at the moment a delete or edit event fires in order to send a log embed to your server's configured log channel, but it is never written to our database. If a server administrator enables the optional **Automod** module and points it at a channel, message text from that channel is transmitted to TypeSafe AI to be scored — see the **Third-Party Services** section below. It is still never written to our database.
 - **Usernames, display names, or avatars** — We store user IDs only.
 - **Voice audio** — We only track voice state events (join/leave/move), never audio.
 - **Direct messages** — The bot does not operate in DMs.
@@ -57,6 +57,8 @@ Audit log embeds (member joins, message edits, moderation actions, etc.) are sen
 
 Guild IDs and channel IDs are transmitted to Grafana Cloud as metric labels for performance monitoring purposes. See the **Third-Party Services** section below for details.
 
+If the optional **Automod** module is enabled and pointed at a channel by a server administrator, the text of messages sent in that channel is transmitted to TypeSafe AI for content scoring. This is off by default and applies only to the single channel an administrator selects. See the **Third-Party Services** section below for details.
+
 ---
 
 ## Third-Party Services
@@ -77,6 +79,24 @@ Serenity collects internal performance metrics using the `prometheus_client` lib
 - User IDs
 
 The metrics endpoint is protected with HTTP Basic Auth and is not publicly accessible. Grafana Cloud's Privacy Policy can be found at [grafana.com/legal/privacy-policy](https://grafana.com/legal/privacy-policy).
+
+### TypeSafe AI (Automod)
+Serenity's optional **Automod** module screens message content using TypeSafe's Jev model. The module is **disabled by default**; it only runs after a server administrator enables it with `/module enable automod` and selects a channel with `/automod watch`.
+
+**What is sent to TypeSafe:**
+- The text of messages sent in the single channel an administrator has selected, truncated to the first 1,500 characters
+- Up to 5 preceding messages from that same channel, each truncated to 300 characters and discarded after 5 minutes, sent as context. This is necessary for accuracy: a sentence split across several Discord messages, or a word with more than one meaning, cannot be judged correctly in isolation.
+- A label indicating which messages came from the same person — `user_1`, `user_2`, and so on. These are assigned per request, mean nothing outside it, and cannot be linked back to a Discord account.
+- Text an administrator passes directly to the `/automod check` command
+
+**What is not sent to TypeSafe:**
+- User IDs, usernames, avatars, guild IDs, or channel IDs
+- Messages from any channel other than the one selected
+- Attachments, images, or voice audio
+
+Context messages are held in memory only, capped at 5 per watched channel, and are never written to our database. They are discarded when the bot restarts or when an administrator runs `/automod unwatch`. Scores returned by TypeSafe are shown in the channel and are not stored either. TypeSafe states that it does not train its models on customer requests or responses; its legal terms and Privacy Policy can be found at [docs.typesafe.ai/legal](https://docs.typesafe.ai/legal).
+
+Administrators who do not want message content leaving the bot should leave the Automod module disabled, or run `/automod unwatch` to stop screening.
 
 ---
 

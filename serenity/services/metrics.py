@@ -78,3 +78,26 @@ TASK_ERRORS = Counter(
     "Total background task errors",
     ["task_name"],
 )
+
+AUTOMOD_ASSESSMENTS = Counter(
+    "serenity_automod_assessments_total",
+    "Total messages assessed by the automod model",
+    ["verdict"],  # allow, review, block
+)
+
+AUTOMOD_SKIPPED = Counter(
+    "serenity_automod_skipped_total",
+    "Messages the automod did not assess",
+    ["reason"],  # unavailable, too_short, rate_limited, global_rate_limited, api_error
+)
+
+AUTOMOD_LATENCY = Histogram(
+    "serenity_automod_latency_seconds",
+    "Round-trip time of automod assessments",
+    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+)
+
+AUTOMOD_INPUT_TOKENS = Counter(
+    "serenity_automod_input_tokens_total",
+    "Input tokens billed by the automod model",
+)
