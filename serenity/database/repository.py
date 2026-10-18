@@ -240,7 +240,8 @@ class Repository:
         key = (channel_id, timestamp)
         if key not in self._activity and len(self._activity) >= self._activity_max_keys:
             # Only reachable after the DB has been down a while (the flush loop logs that).
-            # Drop the oldest second: slowmode only looks back 15 minutes anyway.
+            # Drop the first-buffered key (in practice the oldest second): slowmode only looks
+            # back 15 minutes anyway.
             del self._activity[next(iter(self._activity))]
         self._activity[key] = self._activity.get(key, 0) + 1
 
