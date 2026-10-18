@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 
 os.environ["PROMETHEUS_DISABLE_CREATED_SERIES"] = "true"
 
@@ -102,7 +103,15 @@ if __name__ == "__main__":
 
     # One-off SQLite -> Postgres cutover (#16): runs before connecting to Discord, so nothing
     # writes mid-import. A no-op once the old file has been renamed to *.imported.
-    cutover_if_needed(os.getenv("DATABASE_PATH"))
+    try:
+        cutover_if_needed(os.getenv("DATABASE_PATH"))
+    except Exception:
+        logger.exception(
+            "SQLite -> Postgres cutover failed; not starting. The import is all-or-nothing "
+            "and the SQLite file is untouched. If Postgres already holds this data on purpose, "
+            "rename the SQLite file to *.imported."
+        )
+        sys.exit(1)
 
     client.load_extensions_from("serenity/extensions")
 
