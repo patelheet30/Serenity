@@ -7,7 +7,24 @@ services:
       - .env                           # Loads your secret Discord Token
     environment:
       - LOG_LEVEL=INFO                 # From your fly.toml
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-serenity}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-serenity}
     ports:
       - "8080:8080"                    # Exposes your Prometheus metrics port
     volumes:
       - ./bot_data:/data               # Replaces your Fly volume mount
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: serenity-postgres
+    restart: unless-stopped
+    mem_limit: 512m                    # Sizing rationale in issue #12
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-serenity}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-serenity}
+    # No ports: only reachable from this compose network as postgres:5432
+    volumes:
+      - pgdata:/var/lib/postgresql     # PG18+ layout; data lives in /var/lib/postgresql/18/docker
+
+volumes:
+  pgdata:
