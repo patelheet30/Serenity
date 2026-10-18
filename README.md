@@ -72,6 +72,17 @@ The repo includes a `Dockerfile` and `fly.toml` for deployment. The database is 
 flyctl deploy --remote-only
 ```
 
+### Backups
+On the production server, cron runs [`scripts/backup_postgres.sh`](scripts/backup_postgres.sh) nightly at 03:30 UTC. It writes a `pg_dump` (custom format) to `~/serenity-backups/` (last 7 kept) and uploads it to the `serenity-backups` OCI Object Storage bucket through a write-only pre-authenticated request. A bucket lifecycle rule deletes uploads after 30 days. The log is at `~/serenity-backups/backup.log`.
+
+To restore, take the newest dump from `~/serenity-backups/`, or download one from the bucket in the OCI console, then:
+
+```bash
+cd ~/serenity && docker compose stop serenity
+docker exec -i serenity-postgres sh -c 'pg_restore --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < ~/serenity-backups/serenity-YYYYMMDDTHHMMSSZ.dump
+docker compose start serenity
+```
+
 ---
 
 ## Setup in Discord
