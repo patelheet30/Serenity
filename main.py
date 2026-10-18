@@ -9,6 +9,7 @@ import hikari
 from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
+from serenity.database.import_sqlite import cutover_if_needed
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
@@ -98,6 +99,10 @@ async def on_shutdown(_: arc.GatewayClient) -> None:
 
 if __name__ == "__main__":
     logger.info("Starting Serenity bot...")
+
+    # One-off SQLite -> Postgres cutover (#16): runs before connecting to Discord, so nothing
+    # writes mid-import. A no-op once the old file has been renamed to *.imported.
+    cutover_if_needed(os.getenv("DATABASE_PATH"))
 
     client.load_extensions_from("serenity/extensions")
 
