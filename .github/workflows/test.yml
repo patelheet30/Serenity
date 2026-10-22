@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10.3.0  # no moving major tag published
+      - uses: astral-sh/setup-uv@v10.3.2  # no moving major tag published
 
       - name: Install dependencies
         run: uv sync --frozen
