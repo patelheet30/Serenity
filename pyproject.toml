@@ -37,7 +37,7 @@ exclude = ["tests/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["serenity"]
+pythonpath = ["."]
 
 addopts = ["-v", "--strict-markers", "--tb=short"]
 
