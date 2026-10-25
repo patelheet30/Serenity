@@ -18,6 +18,7 @@ from serenity.dashboard import auth
 from serenity.dashboard.api import CHANGES, OAUTH, SESSION_COOKIE, SESSIONS, STATE_COOKIE, build_api
 from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
 from serenity.dashboard.common import ChangeLog
+from serenity.database.moderation_repository import ModerationRepository
 
 REAL_PERMISSIONS = toolbox.calculate_permissions  # before fake_permissions patches it
 
@@ -208,6 +209,8 @@ PLACEHOLDERS = {
     "{channel_id}": str(TEXT_CHANNEL),
     "{module}": "slowmode",
     "{log_type}": "message",
+    "{number}": "1",
+    "{user_id}": str(USER),
 }
 
 
@@ -247,7 +250,11 @@ async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_r
         resp = await denied.request(method, path, headers=origin, cookies={SESSION_COOKIE: "good"})
         assert resp.status == 403, (method, path)
 
-    allowed = await client_for(make_bot(), pg_repo)
+    await ModerationRepository(pg_repo.pool).create_case(GUILD, USER, 999, "warn")  # case #1
+    allowed = await client_for(
+        make_bot(perms=hikari.Permissions.MANAGE_GUILD | hikari.Permissions.MODERATE_MEMBERS),
+        pg_repo,
+    )
     for method, path in guild_routes(allowed):
         resp = await allowed.request(method, path, headers=origin, cookies={SESSION_COOKIE: "good"})
         if method == "GET":
@@ -653,3 +660,93 @@ async def test_change_log_posts_the_oldest_early_when_full(monkeypatch):
     await asyncio.sleep(0.1)
     assert svc.log_dashboard_change.await_count == 3  # each posted once
     assert changes._pending == {}
+
+
+# --- Moderation (#47, #48) -------------------------------------------------------------------
+
+MOD_A, MOD_B = 777, 778
+
+
+@pytest_asyncio.fixture
+async def cases(pg_repo):
+    """60 cases: #1-#60, every 3rd a ban by MOD_B, the rest warnings by MOD_A."""
+    repo = ModerationRepository(pg_repo.pool)
+    for i in range(1, 61):
+        ban = i % 3 == 0
+        await repo.create_case(
+            GUILD, USER + i % 2, MOD_B if ban else MOD_A, "ban" if ban else "warn", f"reason {i}"
+        )
+    await repo.create_case(GUILD + 1, USER, MOD_A, "kick", "another server")
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_case_list_filters_and_pages(settings, cases):
+    status, body = await settings("GET", "/cases")
+    assert (status, body["total"], body["all"]) == (200, 60, 60)
+    assert [c["number"] for c in body["cases"]][:3] == [60, 59, 58] and len(body["cases"]) == 50
+    assert body["facets"]["action"] == {"ban": 20, "warn": 40}
+    assert [(m["id"], m["count"]) for m in body["facets"]["moderator"]] == [
+        (str(MOD_A), 40),
+        (str(MOD_B), 20),
+    ]
+
+    status, body = await settings("GET", "/cases", before=str(body["next"]))
+    assert [c["number"] for c in body["cases"]] == list(range(10, 0, -1)) and body["next"] is None
+
+    async def numbers(**query):
+        return [c["number"] for c in (await settings("GET", "/cases", **query))[1]["cases"]]
+
+    assert await numbers(action="ban", moderator=str(MOD_B), q="reason 1") == [18, 15, 12]
+    assert await numbers(q="#42") == [42]
+    assert await numbers(q="100%") == []  # % is literal, not a wildcard
+    assert await numbers(user=str(USER), action="kick") == []  # other guild's kick stays out
+    assert len(await numbers(active="1")) == 40  # active warnings; bans have no active state
+
+    # Names come from the gateway cache: "aria" is USER, and MOD_B moderated every ban.
+    named = {USER: "aria", MOD_B: "mod-b"}
+    settings.bot.cache.get_members_view_for_guild.return_value = {
+        i: MagicMock(id=i, username=n, display_name=n) for i, n in named.items()
+    }
+    assert len(await numbers(q="mod-b")) == 20
+    assert len(await numbers(q="ARIA")) == 30  # USER is the target of the even-numbered cases
+
+
+@pytest.mark.asyncio
+async def test_reason_edit_matches_the_command(settings, cases):
+    status, body = await settings("PATCH", "/cases/3", {"reason": "  raid  "})
+    assert status == 200 and body["reason"] == "raid"
+    assert (await cases.get_case(GUILD, 3))["reason"] == "raid"
+    assert [c["number"] for c in body["history"]][:2] == [59, 57]  # USER + 1's cases
+    assert ("Case #3 reason", "reason 3", "raid") in settings.changes()
+
+    for bad in ({"reason": ""}, {"reason": "x" * 513}, {"reason": 5}):
+        assert (await settings("PATCH", "/cases/3", bad))[0] == 422
+    assert (await settings("PATCH", "/cases/999", {"reason": "x"}))[0] == 404
+
+
+@pytest.mark.asyncio
+async def test_clearing_warnings_needs_moderate_members(client_for, pg_repo, cases):
+    path = f"/api/guilds/{GUILD}/users/{USER}/clear-warnings"
+    await cases.add_warning(GUILD, USER, MOD_A, "spam", case_id=2)
+
+    plain = await client_for(make_bot(), pg_repo)  # Manage Server only
+    resp = await plain.post(path, cookies=COOKIES, headers=HEADERS)
+    assert resp.status == 403
+
+    perms = hikari.Permissions.MANAGE_GUILD | hikari.Permissions.MODERATE_MEMBERS
+    mod = await client_for(make_bot(perms=perms), pg_repo)
+    resp = await mod.post(path, cookies=COOKIES, headers=HEADERS)
+    assert await resp.json() == {"cleared": 1}
+    assert await cases.get_warning_count(GUILD, USER) == 0
+    assert (await cases.get_case(GUILD, 2))["is_active"] is False  # as /clearwarns does
+
+
+@pytest.mark.asyncio
+async def test_modstats_totals_match_the_command(settings, cases):
+    status, body = await settings("GET", "/modstats", days="7")
+    assert body["totals"] == await cases.get_moderation_stats(GUILD, days=7)
+    assert len(body["daily"]) == 8 and body["daily"][-1]["counts"] == {"ban": 20, "warn": 40}
+    assert [m["id"] for m in body["moderators"]] == [str(MOD_A), str(MOD_B)]
+    assert body["active"] == {"timeouts": 0, "warnings": 0}
+    assert (await settings("GET", "/modstats", days="8"))[0] == 422

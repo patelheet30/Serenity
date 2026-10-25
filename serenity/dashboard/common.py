@@ -27,6 +27,7 @@ MODULES = web.AppKey("modules", ModuleManager)
 CHANGES = web.AppKey("changes", Any)  # ChangeLog
 SESSION = web.RequestKey("session", Session)
 ACCESS_LEVEL = web.RequestKey("access_level", str)
+PERMISSIONS = web.RequestKey("permissions", hikari.Permissions)
 
 TEXT_TYPES = {hikari.ChannelType.GUILD_TEXT, hikari.ChannelType.GUILD_NEWS}
 

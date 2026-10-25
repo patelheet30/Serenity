@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import asyncpg
 
@@ -54,9 +54,7 @@ class ModerationRepository:
         )
         return next_case_number
 
-    async def update_case_reason(
-        self, guild_id: int, case_number: int, new_reason: str
-    ) -> None:
+    async def update_case_reason(self, guild_id: int, case_number: int, new_reason: str) -> None:
         """Update the reason for a case"""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
@@ -98,7 +96,8 @@ class ModerationRepository:
             raise DatabaseError("Database connection is not initialised")
 
         rows = await self.pool.fetch(
-            "SELECT * FROM mod_cases WHERE guild_id = $1 AND target_user_id = $2 ORDER BY created_at DESC LIMIT $3",
+            "SELECT * FROM mod_cases WHERE guild_id = $1 AND target_user_id = $2 "
+            "ORDER BY created_at DESC, case_number DESC LIMIT $3",
             guild_id,
             user_id,
             limit,
@@ -246,3 +245,121 @@ class ModerationRepository:
         )
 
         return stats
+
+    async def search_cases(
+        self,
+        guild_id: int,
+        *,
+        actions: list[str],
+        moderators: list[int],
+        users: list[int],
+        active: bool,
+        text: str,
+        text_user_ids: list[int],
+        before: Optional[int],
+        limit: int,
+    ) -> tuple[list[dict], int]:
+        """One page of a guild's cases, newest first, and how many match in total.
+
+        Empty filter lists mean "any". `text` matches a case number, a user or moderator id, or
+        the reason; `text_user_ids` are users whose names match it (resolved by the caller), as
+        target or moderator.
+        Paged by case number (`before`), which the (guild_id, case_number) unique index serves.
+        """
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        where = ["guild_id = $1"]
+        params: list[Any] = [guild_id]
+
+        def add(clause: str, *values: Any) -> None:
+            for value in values:
+                params.append(value)
+                clause = clause.replace("?", f"${len(params)}", 1)
+            where.append(clause)
+
+        if actions:
+            add("action = ANY(?::text[])", actions)
+        if moderators:
+            add("moderator_id = ANY(?::bigint[])", moderators)
+        if users:
+            add("target_user_id = ANY(?::bigint[])", users)
+        if active:  # warnings not cleared and timeouts not expired; other actions have no state
+            add(
+                "action IN ('warn', 'timeout') AND is_active AND (expires_at IS NULL OR expires_at > ?)",
+                int(time.time()),
+            )
+        if text:
+            number = int(text) if text.isdigit() and len(text) < 10 else -1
+            snowflake = int(text) if text.isdigit() else -1
+            add(
+                "(case_number = ? OR target_user_id = ? OR moderator_id = ?"
+                " OR target_user_id = ANY(?::bigint[]) OR moderator_id = ANY(?::bigint[])"
+                " OR reason ILIKE ?)",
+                number,
+                snowflake,
+                snowflake,
+                text_user_ids,
+                text_user_ids,
+                "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
+            )
+
+        filters = " AND ".join(where)
+        total = await self.pool.fetchval(f"SELECT COUNT(*) FROM mod_cases WHERE {filters}", *params)
+        if before is not None:
+            add("case_number < ?", before)
+        params.append(limit)
+        rows = await self.pool.fetch(
+            f"""SELECT * FROM mod_cases WHERE {" AND ".join(where)}
+            ORDER BY case_number DESC LIMIT ${len(params)}""",
+            *params,
+        )
+        return [dict(row) for row in rows], total
+
+    async def case_facets(self, guild_id: int) -> dict[str, dict[Any, int]]:
+        """Case counts per action and per moderator, for the filter chips."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        actions = await self.pool.fetch(
+            "SELECT action, COUNT(*) AS n FROM mod_cases WHERE guild_id = $1 GROUP BY action",
+            guild_id,
+        )
+        moderators = await self.pool.fetch(
+            """SELECT moderator_id, COUNT(*) AS n FROM mod_cases WHERE guild_id = $1
+            GROUP BY moderator_id ORDER BY n DESC""",
+            guild_id,
+        )
+        return {
+            "action": {r["action"]: r["n"] for r in actions},
+            "moderator": {r["moderator_id"]: r["n"] for r in moderators},
+        }
+
+    async def case_breakdown(self, guild_id: int, days: int) -> list[dict]:
+        """Cases per UTC day, action and moderator over the last `days` days, for /modstats charts."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        rows = await self.pool.fetch(
+            """SELECT created_at / 86400 AS day, action, moderator_id, COUNT(*) AS n
+            FROM mod_cases WHERE guild_id = $1 AND created_at >= $2
+            GROUP BY day, action, moderator_id""",
+            guild_id,
+            int(time.time()) - days * 86400,
+        )
+        return [dict(row) for row in rows]
+
+    async def count_active(self, guild_id: int) -> dict[str, int]:
+        """Active timeouts and active warnings right now."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        row = await self.pool.fetchrow(
+            """SELECT
+                (SELECT COUNT(*) FROM mod_cases WHERE guild_id = $1 AND action = 'timeout'
+                    AND is_active AND expires_at > $2) AS timeouts,
+                (SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND is_active) AS warnings""",
+            guild_id,
+            int(time.time()),
+        )
+        return dict(row)

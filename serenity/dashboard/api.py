@@ -16,8 +16,15 @@ from aiohttp import web
 from yarl import URL
 
 from serenity.core.modules import ModuleManager
-from serenity.dashboard import settings
-from serenity.dashboard.auth import DiscordOAuth, GuildAccess, NotInstalledError, Session, Sessions
+from serenity.dashboard import moderation, settings
+from serenity.dashboard.auth import (
+    DiscordOAuth,
+    GuildAccess,
+    NotInstalledError,
+    Session,
+    Sessions,
+    access_level,
+)
 from serenity.dashboard.common import (
     ACCESS,
     ACCESS_LEVEL,
@@ -29,6 +36,7 @@ from serenity.dashboard.common import (
     MODULES,
     OAUTH,
     ORIGIN,
+    PERMISSIONS,
     REPO,
     SECURE,
     SESSION,
@@ -104,7 +112,7 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     if "guild_id" in request.match_info:
         guild_id = int(request.match_info["guild_id"])
         try:
-            level = await request.app[ACCESS].level(session.user_id, guild_id)
+            perms = await request.app[ACCESS].permissions(session.user_id, guild_id)
         except NotInstalledError:
             raise ApiError(
                 404,
@@ -112,9 +120,11 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
                 "Serenity isn't in this server.",
                 invite=f"/api/auth/invite?guild_id={guild_id}",
             ) from None
+        level = access_level(perms)
         if level is None:
             raise ApiError(403, "forbidden", "You need Manage Server in this server.")
         request[ACCESS_LEVEL] = level
+        request[PERMISSIONS] = perms  # type: ignore[assignment]  # not None when level is set
 
     return await handler(request)
 
@@ -364,6 +374,7 @@ def build_api(bot: hikari.GatewayBot, repo: Repository) -> web.Application:
     app.router.add_get(r"/guilds/{guild_id:\d+}/roles", roles)
     app.router.add_get(r"/guilds/{guild_id:\d+}/members", members)
     app.add_routes(settings.routes)
+    app.add_routes(moderation.routes)
     return app
 
 
