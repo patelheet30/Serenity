@@ -5,6 +5,7 @@ the Server log by ChangeLog (#42). The bot reads all of this from Postgres on us
 apply on the next slowmode tick or log event without a restart.
 """
 
+import time
 from typing import Any, Optional
 
 import hikari
@@ -216,7 +217,9 @@ async def slowmode_live(request: web.Request) -> web.Response:
             "channels": [
                 {
                     "id": str(i),
-                    "rate": round(await repo.get_message_rate(i, 60), 2),
+                    # The newest bucket is get_message_rate(i, 60)'s window: a 60 s count is
+                    # messages per minute, so no extra query per channel.
+                    "rate": counts[i][-1],
                     "history": counts[i],
                     "slowmode": _current_slowmode(bot, i),
                 }
@@ -252,12 +255,17 @@ async def slowmode_history(request: web.Request) -> web.Response:
 
 @routes.get(f"{GUILD}/slowmode/analytics")
 async def slowmode_analytics(request: web.Request) -> web.Response:
-    """Per hour over 24 h (messages, users, avg/max slowmode), and the rate before/after
-    slowmode raises over 30 days."""
-    repo, ids = request.app[REPO], _guild_channel_ids(request)
+    """Per hour over 24 h (messages, users, avg/max slowmode), change counts, and the rate
+    before/after slowmode raises over 30 days."""
+    repo, ids, now = request.app[REPO], _guild_channel_ids(request), int(time.time())
     return web.json_response(
         {
             "hourly": await repo.get_hourly_analytics(ids, 24),
+            # Counted in SQL: the history list is capped at HISTORY_LIMIT rows.
+            "changes": {
+                "6h": await repo.count_slowmode_changes(ids, now - 6 * 3600),
+                "24h": await repo.count_slowmode_changes(ids, now - 24 * 3600),
+            },
             "effectiveness": [
                 {
                     "channel_id": str(r["channel_id"]),

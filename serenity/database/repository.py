@@ -347,6 +347,18 @@ class Repository:
         )
         return [dict(row) for row in rows]
 
+    async def count_slowmode_changes(self, channel_ids: List[int], since: int) -> int:
+        """How many slowmode changes these channels had since a unix time."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        return await self.pool.fetchval(
+            """SELECT COUNT(*) FROM slowmode_changes
+            WHERE channel_id = ANY($1::bigint[]) AND timestamp >= $2""",
+            channel_ids,
+            since,
+        )
+
     async def get_hourly_analytics(self, channel_ids: List[int], hours: int = 24) -> List[dict]:
         """Per hour across these channels, oldest first: messages, users (unique per channel,
         summed over channels), and the average and highest slowmode. Hours with no row are 0."""
