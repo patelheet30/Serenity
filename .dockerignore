@@ -57,4 +57,5 @@ build/
 Thumbs.db
 
 download_database.sh
-local_data/dashboard/
+local_data/
+dashboard/

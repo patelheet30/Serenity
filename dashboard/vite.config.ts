@@ -1,8 +1,8 @@
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
 	plugins: [
 		sveltekit({
 			compilerOptions: {
@@ -17,7 +17,8 @@ export default defineConfig({
 		})
 	],
 	server: {
-		// The API runs inside the bot (uv run main.py) on METRICS_PORT.
-		proxy: { '/api': 'http://localhost:8080' }
+		// The API runs inside the bot (uv run main.py) on METRICS_PORT, read from the shell or the
+		// repo's .env like the bot does.
+		proxy: { '/api': `http://localhost:${loadEnv(mode, '..', '').METRICS_PORT || 8080}` }
 	}
-});
+}));

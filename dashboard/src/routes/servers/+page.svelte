@@ -9,7 +9,7 @@
 	import Mark from '#lib/components/Mark.svelte';
 	import UserMenu from '#lib/components/UserMenu.svelte';
 	import { registerCommands } from '#lib/palette.svelte.ts';
-	import { loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
+	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
 	import { MOD } from '#lib/util.ts';
 
 	let error = $state('');
@@ -18,23 +18,22 @@
 
 	async function refresh() {
 		try {
+			if (!(await requireMe())) return;
 			await loadGuilds(true);
 			error = '';
 		} catch (e) {
-			error = (e as Error).message;
+			if (!handleUnauthorized(e)) error = (e as Error).message;
 		}
 	}
 
-	onMount(() => {
-		requireMe().then((me) => me && refresh());
-	});
+	onMount(refresh);
 	$effect(() => registerCommands(serverCommands(session.guilds ?? [])));
 
 	const all = $derived(session.guilds ?? []);
 	const match = (g: Guild) => g.name.toLowerCase().includes(q.trim().toLowerCase());
 	const ready = $derived(all.filter((g) => g.manageable && g.installed && match(g)));
 	const invite = $derived(all.filter((g) => g.manageable && !g.installed && match(g)));
-	const noPerm = $derived(all.filter((g) => !g.manageable));
+	const noPerm = $derived(all.filter((g) => !g.manageable && match(g)));
 	const rows = $derived([...ready, ...invite]);
 	$effect(() => {
 		sel = Math.min(sel, Math.max(0, rows.length - 1));

@@ -6,16 +6,22 @@ export const session = $state({
 	guilds: null as Guild[] | null
 });
 
-/** The logged-in user, or a redirect to the landing page. */
+/** If `e` says the session is gone (expired, logged out elsewhere), forget it and go home. */
+export function handleUnauthorized(e: unknown): boolean {
+	if (!(e instanceof ApiError && e.status === 401)) return false;
+	session.me = null;
+	session.guilds = null;
+	goto('/');
+	return true;
+}
+
+/** The logged-in user, or a redirect to the landing page. Other failures throw. */
 export async function requireMe(): Promise<Me | null> {
 	if (session.me) return session.me;
 	try {
 		session.me = await api<Me>('/me');
 	} catch (e) {
-		if (e instanceof ApiError && e.status === 401) {
-			goto('/');
-			return null;
-		}
+		if (handleUnauthorized(e)) return null;
 		throw e;
 	}
 	return session.me;

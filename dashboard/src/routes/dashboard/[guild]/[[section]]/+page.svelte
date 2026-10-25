@@ -7,7 +7,7 @@
 	import DataTable from '#lib/components/DataTable.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import Icon from '#lib/components/Icon.svelte';
-	import { loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
+	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
 
 	type Channel = { id: string; name: string; type: string; parent_id: string | null; position: number };
 
@@ -19,20 +19,29 @@
 
 	let channels: Channel[] | null = $state(null);
 	let error: ApiError | null = $state(null);
+	let loadError = $state('');
 
 	onMount(() => {
-		requireMe().then((me) => me && loadGuilds().catch(() => {}));
+		requireMe().then(
+			(me) => me && loadGuilds().catch(() => {}),
+			(e) => (loadError = (e as Error).message)
+		);
 	});
 
 	// Every guild route is authorised server-side; this request doubles as the access check.
 	$effect(() => {
 		const id = guildId;
+		let stale = false; // a slower response for the previous server must not land here
 		channels = null;
 		error = null;
 		api<Channel[]>(`/guilds/${id}/channels`).then(
-			(c) => (channels = c),
-			(e) => (error = e instanceof ApiError ? e : new ApiError(0, 'network', String(e)))
+			(c) => !stale && (channels = c),
+			(e) => {
+				if (stale || handleUnauthorized(e)) return;
+				error = e instanceof ApiError ? e : new ApiError(0, 'network', String(e));
+			}
 		);
+		return () => (stale = true);
 	});
 </script>
 
@@ -77,4 +86,13 @@
 			</section>
 		{/if}
 	</AppShell>
+{:else if loadError}
+	<main id="main" class="picker-wrap">
+		<section class="pane">
+			<EmptyState icon="warn">
+				Couldn’t load your account: {loadError}
+				<button class="linkish" onclick={() => location.reload()}>Try again</button>
+			</EmptyState>
+		</section>
+	</main>
 {/if}
