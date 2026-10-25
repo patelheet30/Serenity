@@ -6,7 +6,8 @@ services:
     env_file:
       - .env                           # Loads your secret Discord Token
     environment:
-      - LOG_LEVEL=INFO                 # From your fly.toml
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=production         # label on the serenity_bot_info metric
       - METRICS_PORT=${METRICS_PORT:-8080}  # pinned here so the app, port mapping and healthcheck always agree
       # libpq-style vars; asyncpg and psql read these directly, so the password needs no URL-encoding
       - PGHOST=postgres
@@ -25,7 +26,7 @@ services:
     ports:
       - "${METRICS_PORT:-8080}:${METRICS_PORT:-8080}"  # Prometheus metrics + /health (main.py reads METRICS_PORT)
     volumes:
-      - ./bot_data:/data               # Replaces your Fly volume mount
+      - ./bot_data:/data               # holds the old SQLite file (rollback copy from the Postgres move)
 
   postgres:
     image: postgres:18-alpine

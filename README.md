@@ -61,16 +61,14 @@ TOKEN=your-token-here
 LOG_LEVEL=INFO
 ```
 
+The bot stores everything in Postgres and connects using the standard `PGHOST` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` environment variables. For a local run, point those at any Postgres you have (the schema is created on first start), then:
+
 ```bash
 uv run main.py
 ```
 
-### Docker / Fly.io
-The repo includes a `Dockerfile` and `fly.toml` for deployment. The database is stored on a mounted volume at `/data`.
-
-```bash
-flyctl deploy --remote-only
-```
+### Deployment
+Production runs with `docker compose` (the bot plus a `postgres` container; see `docker-compose.yml`). Every merge to `main` deploys automatically through `.github/workflows/deploy.yml`, which copies the repo to the server and rebuilds the bot.
 
 ### Backups
 On the production server, cron runs [`scripts/backup_postgres.sh`](scripts/backup_postgres.sh) nightly at 03:30 UTC. It writes a `pg_dump` (custom format) to `~/serenity-backups/` (last 7 kept) and uploads it to the `serenity-backups` OCI Object Storage bucket through a write-only pre-authenticated request. A bucket lifecycle rule deletes uploads after 30 days. The log is at `~/serenity-backups/backup.log`.
@@ -214,4 +212,4 @@ serenity/
 
 - [Hikari](https://docs.hikari-py.dev/en/stable/)
 - [Hikari-Arc](https://github.com/hypergonial/hikari-arc)
-- [aiosqlite](https://aiosqlite.omnilib.dev/)
+- [asyncpg](https://github.com/MagicStack/asyncpg)
