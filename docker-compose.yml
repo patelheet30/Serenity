@@ -7,6 +7,7 @@ services:
       - .env                           # Loads your secret Discord Token
     environment:
       - LOG_LEVEL=INFO                 # From your fly.toml
+      - METRICS_PORT=${METRICS_PORT:-8080}  # pinned here so the app, port mapping and healthcheck always agree
       # libpq-style vars; asyncpg and psql read these directly, so the password needs no URL-encoding
       - PGHOST=postgres
       - PGUSER=${POSTGRES_USER:-serenity}
@@ -15,8 +16,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:                       # /health only answers once startup (Discord, DB, migrations) is done
+      test: ["CMD", "curl", "-fsS", "http://localhost:${METRICS_PORT:-8080}/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
     ports:
-      - "8080:8080"                    # Exposes your Prometheus metrics port
+      - "${METRICS_PORT:-8080}:${METRICS_PORT:-8080}"  # Prometheus metrics + /health (main.py reads METRICS_PORT)
     volumes:
       - ./bot_data:/data               # Replaces your Fly volume mount
 
