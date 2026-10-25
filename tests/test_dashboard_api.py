@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.fernet import Fernet
 
 from serenity.dashboard import auth
-from serenity.dashboard.api import OAUTH, SESSION_COOKIE, SESSIONS, build_api
+from serenity.dashboard.api import OAUTH, SESSION_COOKIE, SESSIONS, STATE_COOKIE, build_api
 from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
 
 REAL_PERMISSIONS = toolbox.calculate_permissions  # before fake_permissions patches it
@@ -228,23 +228,32 @@ async def test_me(client_for):
 @pytest.mark.asyncio
 async def test_login_falls_back_to_consent_screen(client_for):
     client = await client_for(make_bot())
+
+    async def callback(state=None):
+        """Discord's error redirect, echoing the state cookie unless told otherwise."""
+        cookies = client.session.cookie_jar.filter_cookies(client.make_url("/"))
+        state = state or cookies[STATE_COOKIE].value
+        resp = await client.get(
+            f"/api/auth/callback?error=consent_required&state={state}", allow_redirects=False
+        )
+        return resp.headers["Location"]
+
     resp = await client.get("/api/auth/login", allow_redirects=False)
     assert resp.headers["Location"] == "https://discord/none"
 
-    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
-    assert resp.headers["Location"].endswith("/api/auth/login?prompt=consent")
+    # A forged callback is rejected before it can use up the retry.
+    assert (await callback(state="forged")).endswith("/?login=failed")
+    assert (await callback()).endswith("/api/auth/login?prompt=consent")
 
     resp = await client.get("/api/auth/login?prompt=consent", allow_redirects=False)
     assert resp.headers["Location"] == "https://discord/consent"
 
     # Already retried once (consent cookie set by that login): give up instead of looping.
-    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
-    assert resp.headers["Location"].endswith("/?login=failed")
+    assert (await callback()).endswith("/?login=failed")
 
     # Logging in again by hand starts over, so that attempt gets its own retry.
     await client.get("/api/auth/login", allow_redirects=False)
-    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
-    assert resp.headers["Location"].endswith("/api/auth/login?prompt=consent")
+    assert (await callback()).endswith("/api/auth/login?prompt=consent")
 
 
 @pytest.mark.asyncio

@@ -161,12 +161,14 @@ async def callback(request: web.Request) -> web.Response:
     state = request.query.get("state", "")
     code = request.query.get("code")
 
+    # Discord echoes state on error redirects too, so check it before acting on anything.
+    if not expected or not secrets.compare_digest(state, expected):
+        raise web.HTTPFound(f"{base}/?login=failed")  # forged or stale callback
     if request.query.get("error") == "consent_required" and CONSENT_COOKIE not in request.cookies:
         # prompt=none and the user hasn't authorised the app (yet): show Discord's screen, once.
         raise web.HTTPFound(f"{base}/api/auth/login?prompt=consent")
-    if not code or not expected or not secrets.compare_digest(state, expected):
-        # Cancelled on Discord's screen, or a forged/stale callback.
-        raise web.HTTPFound(f"{base}/?login=failed")
+    if not code:
+        raise web.HTTPFound(f"{base}/?login=failed")  # cancelled on Discord's screen
 
     try:
         tokens = await oauth.exchange(code)
