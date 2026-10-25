@@ -7,6 +7,7 @@ import time
 import asyncpg
 import pytest
 
+from serenity.core.constants import DatabaseConfig
 from serenity.core.modules import ModuleType
 from serenity.database.repository import Repository
 from serenity.utils.errors import DatabaseError
@@ -424,6 +425,39 @@ async def test_aggregate_hourly_analytics(repo: Repository):
 
 
 @pytest.mark.asyncio
+async def test_hourly_unique_users_and_slowmode(repo: Repository):
+    last_hour = (int(time.time()) // 3600) * 3600 - 3600
+    for user in (1, 2, 2, 3):
+        await repo.record_message_activity(CHANNEL, last_hour + 10, user_id=user)
+    await repo.record_message_activity(CHANNEL, last_hour + 3600, user_id=9)  # this hour
+    for seconds in (0, 10, 20):
+        repo.record_slowmode_sample(CHANNEL, seconds, last_hour + 60)
+    repo.record_slowmode_sample(CHANNEL, 99, last_hour - 3600)  # too old to aggregate
+
+    await repo.aggregate_hourly_analytics(CHANNEL)
+    [row] = await repo.get_channel_analytics(CHANNEL, hours_back=2)
+    assert (row["unique_users"], row["avg_slowmode"], row["max_slowmode"]) == (3, 10, 20)
+    assert list(repo._hour_users) == [(CHANNEL, last_hour + 3600)]  # written and stale ones go
+    assert repo._hour_slowmode == {} and repo._hour_user_count == 1
+
+    # Re-running for the same hour (startup after a restart) keeps what was written.
+    await repo.aggregate_hourly_analytics(CHANNEL)
+    [row] = await repo.get_channel_analytics(CHANNEL, hours_back=2)
+    assert (row["unique_users"], row["avg_slowmode"], row["max_slowmode"]) == (3, 10, 20)
+
+
+@pytest.mark.asyncio
+async def test_hourly_users_are_capped(repo: Repository, monkeypatch):
+    monkeypatch.setattr(
+        "serenity.database.repository.DATABASE_CONFIG",
+        DatabaseConfig(HOURLY_USERS_MAX=2),
+    )
+    for user in (1, 2, 3, 1):
+        await repo.record_message_activity(CHANNEL, 1_700_000_000, user_id=user)
+    assert repo._hour_users[(CHANNEL, 1_700_000_000 // 3600 * 3600)] == {1, 2}
+
+
+@pytest.mark.asyncio
 async def test_cleanup_old_analytics(repo: Repository):
     """Test cleanup of old analytics data"""
     assert repo.pool is not None
@@ -508,16 +542,17 @@ async def test_slowmode_history_and_analytics(repo: Repository):
     assert repo.pool is not None
     await repo.pool.execute(
         """INSERT INTO channel_analytics (channel_id, hour_timestamp, total_messages,
-        unique_users, avg_slowmode, max_slowmode) VALUES ($1, $2, 10, 0, 0, 0),
-        ($3, $2, 5, 0, 0, 0), ($1, $4, 7, 0, 0, 0), ($1, $5, 99, 0, 0, 0)""",
+        unique_users, avg_slowmode, max_slowmode) VALUES ($1, $2, 10, 4, 10, 30),
+        ($3, $2, 5, 2, 20, 20), ($1, $4, 7, 1, 0, 0), ($1, $5, 99, 9, 0, 0)""",
         a,
         hour,
         b,
         hour - 3600,
         hour - 24 * 3600,
     )
-    hourly = await repo.get_hourly_messages([a, b], hours=24)
-    assert hourly[-1] == 15 and hourly[-2] == 7 and sum(hourly) == 22
+    hourly = await repo.get_hourly_analytics([a, b], hours=24)
+    assert hourly[-1] == {"messages": 15, "users": 6, "avg_slowmode": 15, "max_slowmode": 30}
+    assert hourly[-2]["messages"] == 7 and sum(h["messages"] for h in hourly) == 22
 
     await repo.record_slowmode_effectiveness(a, 10, 40.0, 20.0, 300)
     await repo.record_slowmode_effectiveness(a, 10, 60.0, 30.0, 300)
