@@ -5,11 +5,11 @@ description = "An intelligent Discord bot that automatically manages slowmode ba
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "hikari[speedups]>=2.5.0",
+    "hikari[speedups]>=2.7.0",
     "hikari-arc[cron]>=2.3.2",
     "hikari-toolbox>=0.1.7",
     "python-dotenv>=1.2.1",
-    "uvloop>=0.21.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
+    "uvloop>=0.23.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
     "prometheus-client>=0.24.1",
     "asyncpg>=0.32.0",
 ]
