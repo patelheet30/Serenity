@@ -1,4 +1,4 @@
-"""Dashboard routes for modules (#43), slowmode settings (#44) and logging (#46).
+"""Dashboard routes for modules (#43), slowmode settings and activity (#44, #45), logging (#46).
 
 Each write does what the matching slash command does, with the same limits, and is posted to
 the Server log by ChangeLog (#42). The bot reads all of this from Postgres on use, so changes
@@ -199,6 +199,82 @@ async def delete_slowmode_channel(request: web.Request) -> web.Response:
         await request.app[REPO].delete_channel_config(channel_id)
         _record(request, f"Auto slowmode in <#{channel_id}>", "managed", "removed")
     return web.json_response(await _slowmode_json(request))
+
+
+# --- Slowmode activity (#45) ----------------------------------------------------------------
+
+SPARK_MINUTES = 24
+HISTORY_LIMIT = 100
+
+
+@routes.get(f"{GUILD}/slowmode/live")
+async def slowmode_live(request: web.Request) -> web.Response:
+    """Polled by the Slowmode page: per configured channel, the 1-minute rate (what /stats
+    shows), messages per minute for the sparkline, and the slowmode Discord has now."""
+    repo, bot = request.app[REPO], request.app[BOT]
+    ids = [
+        c.channel_id
+        for c in await repo.get_channel_configs(guild_id(request))
+        if bot.cache.get_guild_channel(c.channel_id)
+    ]
+    counts = await repo.get_minute_counts(ids, SPARK_MINUTES)
+    return web.json_response(
+        {
+            "channels": [
+                {
+                    "id": str(i),
+                    "rate": round(await repo.get_message_rate(i, 60), 2),
+                    "history": counts[i],
+                    "slowmode": _current_slowmode(bot, i),
+                }
+                for i in ids
+            ]
+        }
+    )
+
+
+def _guild_channel_ids(request: web.Request) -> list[int]:
+    return list(request.app[BOT].cache.get_guild_channels_view_for_guild(guild_id(request)))
+
+
+@routes.get(f"{GUILD}/slowmode/history")
+async def slowmode_history(request: web.Request) -> web.Response:
+    """Recent automatic changes (old -> new, reason, rate, confidence), newest first."""
+    rows = await request.app[REPO].get_slowmode_changes(_guild_channel_ids(request), HISTORY_LIMIT)
+    return web.json_response(
+        [
+            {
+                "channel_id": str(r["channel_id"]),
+                "old": r["old_value"],
+                "new": r["new_value"],
+                "reason": r["reason"],
+                "rate": r["message_rate"],
+                "confidence": r["confidence"],
+                "at": r["timestamp"],
+            }
+            for r in rows
+        ]
+    )
+
+
+@routes.get(f"{GUILD}/slowmode/analytics")
+async def slowmode_analytics(request: web.Request) -> web.Response:
+    """Messages per hour over 24 h, and the rate before/after slowmode over 30 days."""
+    repo, ids = request.app[REPO], _guild_channel_ids(request)
+    return web.json_response(
+        {
+            "hourly": await repo.get_hourly_messages(ids, 24),
+            "effectiveness": [
+                {
+                    "channel_id": str(r["channel_id"]),
+                    "before": r["before"],
+                    "after": r["after"],
+                    "samples": r["samples"],
+                }
+                for r in await repo.get_effectiveness(ids)
+            ],
+        }
+    )
 
 
 # --- Logging -------------------------------------------------------------------------------
