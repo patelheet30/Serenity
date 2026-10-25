@@ -54,14 +54,18 @@ async def _record_due_effectiveness(repo: Repository, now: int) -> None:
     Feeds slowmode_effectiveness, which the engine's effectiveness factor and the dashboard's
     before/after chart read.
     """
-    for channel_id, (applied_at, seconds, before) in list(_PENDING_EFFECT.items()):
+    for channel_id, entry in list(_PENDING_EFFECT.items()):
+        applied_at, seconds, before = entry
         if now - applied_at < EFFECT_WINDOW:
             continue
-        del _PENDING_EFFECT[channel_id]
         after = await repo.get_message_rate(channel_id, EFFECT_WINDOW)
         await repo.record_slowmode_effectiveness(
             channel_id, seconds, before, after, now - applied_at
         )
+        # Only once recorded (a failure or cancellation leaves it for the next check), and
+        # only if a newer raise didn't replace it while we were writing.
+        if _PENDING_EFFECT.get(channel_id) == entry:
+            del _PENDING_EFFECT[channel_id]
 
 
 def _due(guild_id: int, interval_seconds: int, now: float) -> bool:
@@ -302,9 +306,10 @@ async def aggregate_hourly_analytics(repo: Repository) -> None:
         hour_timestamp = (current_time // 3600) * 3600
         completed_hour_start = hour_timestamp - 3600
 
-        channels_with_activity = await _get_active_channels(
-            repo, completed_hour_start, hour_timestamp
-        )
+        # Channels held in slowmode without messages still get their hour's slowmode written.
+        channels_with_activity = set(
+            await _get_active_channels(repo, completed_hour_start, hour_timestamp)
+        ) | repo.sampled_channels(completed_hour_start)
 
         updated_count = 0
         for channel_id in channels_with_activity:
@@ -343,6 +348,7 @@ async def cleanup_old_data(repo: Repository) -> None:
         TASK_ERRORS.labels(task_name="cleanup_old_data").inc()
     finally:
         TASK_DURATION.labels(task_name="cleanup_old_data").observe(time.perf_counter() - task_start)
+
 
 @arc.utils.interval_loop(minutes=5)
 async def expire_timeouts(mod_repo: ModerationRepository) -> None:
