@@ -95,6 +95,11 @@ def _current_slowmode(bot: hikari.GatewayBot, channel_id: int) -> Optional[int]:
     return None
 
 
+def _minutes(update_interval: int) -> int:
+    """Stored seconds as the 1-5 minutes the dashboard shows (the table default is 30 s)."""
+    return min(max(update_interval // 60, INTERVAL_MINUTES[0]), INTERVAL_MINUTES[1])
+
+
 async def _slowmode_json(request: web.Request) -> dict[str, Any]:
     gid = guild_id(request)
     repo, bot = request.app[REPO], request.app[BOT]
@@ -102,10 +107,7 @@ async def _slowmode_json(request: web.Request) -> dict[str, Any]:
     return {
         "enabled": config.is_enabled,
         "default_threshold": config.default_threshold,
-        # Stored in seconds; the table default (30) predates the 1-5 minute command.
-        "interval": min(
-            max(config.update_interval // 60, INTERVAL_MINUTES[0]), INTERVAL_MINUTES[1]
-        ),
+        "interval": _minutes(config.update_interval),
         "channels": [
             {
                 "id": str(c.channel_id),
@@ -148,8 +150,8 @@ async def patch_slowmode(request: web.Request) -> web.Response:
         _record(
             request,
             "Update interval",
-            f"{old.update_interval // 60} min",
-            f"{changes['update_interval'] // 60} min",
+            f"{_minutes(old.update_interval)} min",
+            f"{_minutes(changes['update_interval'])} min",
         )
     return web.json_response(await _slowmode_json(request))
 
