@@ -280,6 +280,10 @@ class Repository:
                 users.add(user_id)
                 self._hour_user_count += 1
 
+    def sampled_channels(self, hour: int) -> set[int]:
+        """Channels with slowmode samples for the hour starting at `hour`."""
+        return {channel_id for channel_id, h in self._hour_slowmode if h == hour}
+
     def record_slowmode_sample(
         self, channel_id: int, seconds: int, timestamp: Optional[int] = None
     ) -> None:
@@ -371,7 +375,8 @@ class Repository:
             """SELECT hour_timestamp, SUM(total_messages) AS messages, SUM(unique_users) AS users,
                 ROUND(AVG(avg_slowmode))::int AS avg_slowmode, MAX(max_slowmode) AS max_slowmode
             FROM channel_analytics
-            WHERE channel_id = ANY($1::bigint[]) AND hour_timestamp > $2 - $3 * 3600
+            WHERE channel_id = ANY($1::bigint[])
+            AND hour_timestamp > $2 - $3 * 3600 AND hour_timestamp <= $2
             GROUP BY hour_timestamp""",
             channel_ids,
             end,
@@ -566,7 +571,7 @@ class Repository:
                 if buffer is self._hour_users:
                     self._hour_user_count -= len(stale)
 
-        if total:
+        if total or samples:
             await self.pool.execute(
                 """INSERT INTO channel_analytics
                 (channel_id, hour_timestamp, total_messages, unique_users, avg_slowmode, max_slowmode)
@@ -579,7 +584,7 @@ class Repository:
                 max_slowmode = GREATEST(channel_analytics.max_slowmode, EXCLUDED.max_slowmode)""",
                 channel_id,
                 hour_timestamp,
-                total,
+                total or 0,
                 len(users),
                 round(slowmode_sum / samples) if samples else 0,
                 slowmode_max,

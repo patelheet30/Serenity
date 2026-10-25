@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
@@ -233,6 +234,14 @@ async def test_slowmode_raises_are_measured_after_five_minutes(pg_repo: Reposito
 
     await tasks._record_due_effectiveness(pg_repo, now)  # window not over yet
     assert await pg_repo.get_effectiveness([CHANNEL]) == []
+
+    failing = MagicMock(
+        get_message_rate=AsyncMock(return_value=1.0),
+        record_slowmode_effectiveness=AsyncMock(side_effect=asyncpg.PostgresError()),
+    )
+    with pytest.raises(asyncpg.PostgresError):
+        await tasks._record_due_effectiveness(failing, now + 200)
+    assert CHANNEL in tasks._PENDING_EFFECT  # kept for the next check
 
     await tasks._record_due_effectiveness(pg_repo, now + 200)
     [row] = await pg_repo.get_effectiveness([CHANNEL])
