@@ -197,13 +197,30 @@ class Repository:
 
         return [row["channel_id"] for row in rows]
 
+    async def get_channel_configs(self, guild_id: int) -> List[ChannelConfig]:
+        """Every configured channel in a guild, enabled or not"""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        rows = await self.pool.fetch(
+            "SELECT * FROM channel_config WHERE guild_id = $1 ORDER BY channel_id", guild_id
+        )
+        return [ChannelConfig(**dict(row)) for row in rows]
+
+    async def delete_channel_config(self, channel_id: int) -> None:
+        """Forget a channel's configuration (it stops being managed)"""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.pool.execute("DELETE FROM channel_config WHERE channel_id = $1", channel_id)
+
     async def update_channel_config(
         self,
         channel_id: int,
         is_enabled: Optional[bool] = None,
         threshold: Optional[int] = None,
     ) -> None:
-        """Update the configuration for a channel"""
+        """Update the configuration for a channel. threshold=0 clears it (use the server default)."""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
@@ -214,7 +231,7 @@ class Repository:
             params.append(is_enabled)
             updates.append(f"is_enabled = ${len(params)}")
         if threshold is not None:
-            params.append(threshold)
+            params.append(threshold or None)
             updates.append(f"threshold = ${len(params)}")
 
         if not updates:

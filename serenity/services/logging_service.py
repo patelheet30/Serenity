@@ -18,6 +18,82 @@ _BLUE = hikari.Color(0x5865F2)
 _ORANGE = hikari.Color(0xE67E22)
 _GREY = hikari.Color(0x99AAB5)
 
+LOG_TYPES = ["member", "message", "voice", "server", "mod"]
+CHANNEL_NAMES: dict[str, str] = {t: f"{t}-log" for t in LOG_TYPES}
+LOGS_CATEGORY = "📋 Serenity Logs"
+
+
+async def setup_log_channels(
+    rest: hikari.api.RESTClient,
+    cache: hikari.api.Cache,
+    repo: LoggingRepository,
+    guild_id: int,
+    bot_id: Optional[int],
+) -> tuple[dict[str, hikari.GuildChannel], list[str]]:
+    """Give every log type a channel under the Serenity Logs category (/logging setup).
+
+    Idempotent: log types whose channel still exists are left alone, and the category and
+    channels are reused by name before anything new is created. Returns each log type's channel
+    and the names that failed. Raises hikari.ForbiddenError without Manage Channels.
+    """
+    channels = cache.get_guild_channels_view_for_guild(guild_id)
+    configured = {
+        c["log_type"]: channels.get(c["channel_id"])
+        for c in await repo.get_all_log_channels(guild_id)
+        if c["channel_id"]
+    }
+    result = {t: ch for t, ch in configured.items() if ch is not None}
+    missing = [t for t in LOG_TYPES if t not in result]
+    if not missing:
+        return result, []
+
+    # @everyone can't see or post; the bot can.
+    overwrites = [
+        hikari.PermissionOverwrite(
+            id=hikari.Snowflake(guild_id),  # @everyone
+            type=hikari.PermissionOverwriteType.ROLE,
+            deny=hikari.Permissions.SEND_MESSAGES | hikari.Permissions.VIEW_CHANNEL,
+        ),
+    ]
+    if bot_id:
+        overwrites.append(
+            hikari.PermissionOverwrite(
+                id=hikari.Snowflake(bot_id),
+                type=hikari.PermissionOverwriteType.MEMBER,
+                allow=hikari.Permissions.SEND_MESSAGES
+                | hikari.Permissions.VIEW_CHANNEL
+                | hikari.Permissions.READ_MESSAGE_HISTORY
+                | hikari.Permissions.EMBED_LINKS,
+            )
+        )
+
+    category = next(
+        (
+            c
+            for c in channels.values()
+            if c.type == hikari.ChannelType.GUILD_CATEGORY and c.name == LOGS_CATEGORY
+        ),
+        None,
+    ) or await rest.create_guild_category(guild_id, name=LOGS_CATEGORY)
+
+    failed: list[str] = []
+    for log_type in missing:
+        name = CHANNEL_NAMES[log_type]
+        try:
+            channel = next(
+                (c for c in channels.values() if c.parent_id == category.id and c.name == name),
+                None,
+            ) or await rest.create_guild_text_channel(
+                guild_id, name=name, category=category, permission_overwrites=overwrites
+            )
+            await repo.set_log_channel(guild_id, log_type, channel.id)
+            result[log_type] = channel
+        except Exception as exc:
+            logger.error(f"Failed to create {name} in guild {guild_id}: {exc}", exc_info=True)
+            failed.append(name)
+    return result, failed
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -655,4 +731,21 @@ class LoggingService:
             reason=reason,
             case_number=case_number,
             duration=duration,
+        )
+
+    async def log_dashboard_change(
+        self, *, guild_id: int, user_id: int, setting: str, old: str, new: str
+    ) -> None:
+        """A setting changed from the web dashboard, posted to the Server log."""
+        embed = hikari.Embed(title="🖥️ Changed from the dashboard", color=_BLUE, timestamp=_now())
+        embed.add_field("User", f"<@{user_id}>", inline=True)
+        embed.add_field("Setting", _truncate(setting, 256), inline=True)
+        embed.add_field("Change", _truncate(f"{old} → {new}", 1024), inline=False)
+        embed.set_footer(text=f"User ID: {user_id}")
+        await self._send(
+            log_event="dashboard_change",
+            guild_id=guild_id,
+            log_type="server",
+            embed=embed,
+            user_id=user_id,
         )

@@ -1,15 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { api, ApiError, inviteUrl } from '#lib/api.ts';
+	import { api, ApiError, errorMessage, inviteUrl, type Channel } from '#lib/api.ts';
+	import { autosave } from '#lib/autosave.svelte.ts';
 	import { SECTIONS } from '#lib/commands.ts';
 	import AppShell from '#lib/components/AppShell.svelte';
+	import AutosaveIndicator from '#lib/components/AutosaveIndicator.svelte';
 	import DataTable from '#lib/components/DataTable.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import Logging from '#lib/sections/Logging.svelte';
+	import Modules from '#lib/sections/Modules.svelte';
+	import Slowmode from '#lib/sections/Slowmode.svelte';
 	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
-
-	type Channel = { id: string; name: string; type: string; parent_id: string | null; position: number };
 
 	const guildId = $derived(page.params.guild!);
 	const section = $derived(SECTIONS.find((s) => s.k === page.params.section) ?? SECTIONS[0]);
@@ -24,7 +27,7 @@
 	onMount(() => {
 		requireMe().then(
 			(me) => me && loadGuilds().catch(() => {}),
-			(e) => (loadError = e instanceof Error ? e.message : String(e))
+			(e) => (loadError = errorMessage(e))
 		);
 	});
 
@@ -37,25 +40,42 @@
 		error = null;
 		api<Channel[]>(`/guilds/${id}/channels`).then(
 			(c) => !stale && (channels = c),
-			(e) => {
-				if (stale || handleUnauthorized(e)) return;
-				error = e instanceof ApiError ? e : new ApiError(0, 'network', String(e));
-			}
+			(e) => !stale && fail(e)
 		);
 		return () => (stale = true);
 	});
+
+	/** After the bot creates channels (logging setup), so pickers show them by name. */
+	async function reloadChannels() {
+		const id = guildId;
+		try {
+			const c = await api<Channel[]>(`/guilds/${id}/channels`);
+			if (id === guildId) channels = c;
+		} catch (e) {
+			fail(e);
+		}
+	}
+
+	/** A section's own load failed: same states as the access check above. */
+	function fail(e: unknown) {
+		if (handleUnauthorized(e)) return;
+		error = e instanceof ApiError ? e : new ApiError(0, 'network', errorMessage(e));
+	}
 </script>
 
 <svelte:head><title>{section.name} · {guild.name} · Serenity</title></svelte:head>
 
 {#if session.me}
 	<AppShell me={session.me} {guild} guilds={session.guilds ?? []} section={section.k}>
-		<div class="phead">
-			<div>
-				<h1>{section.name}</h1>
-				<p>{guild.name}</p>
+		{#snippet status()}<AutosaveIndicator status={autosave.status} savedAt={autosave.savedAt} />{/snippet}
+		{#if error || !channels || section.k === 'overview' || section.k === 'cases' || section.k === 'stats'}
+			<div class="phead">
+				<div>
+					<h1>{section.name}</h1>
+					<p>{guild.name}</p>
+				</div>
 			</div>
-		</div>
+		{/if}
 		{#if error?.status === 403}
 			<section class="pane">
 				<EmptyState icon="lock">You need <span class="mono">Manage Server</span> in this server to configure it.</EmptyState>
@@ -81,9 +101,15 @@
 					columns={[{ key: 'name', label: 'Channel' }, { key: 'type', label: 'Type' }, { key: 'position', label: 'Position', align: 'right' }]}
 				/>
 			</section>
+		{:else if section.k === 'slowmode'}
+			<Slowmode {guildId} {channels} onerror={fail} />
+		{:else if section.k === 'logging'}
+			<Logging {guildId} {channels} onerror={fail} onchannels={reloadChannels} />
+		{:else if section.k === 'modules'}
+			<Modules {guildId} onerror={fail} />
 		{:else}
 			<section class="pane">
-				<EmptyState icon={section.k}>{section.name} settings arrive with the Dashboard configuration milestone.</EmptyState>
+				<EmptyState icon={section.k}>{section.name} arrives later in the Dashboard configuration milestone.</EmptyState>
 			</section>
 		{/if}
 	</AppShell>

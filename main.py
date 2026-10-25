@@ -88,7 +88,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
 
-    await metrics_server.start(api=build_api(bot, repo.pool))
+    await metrics_server.start(api=build_api(bot, repo))
 
     BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("ENVIRONMENT", "local")})
 
