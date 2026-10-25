@@ -99,7 +99,8 @@ class ChangeLog:
     def __init__(self, logging_svc: LoggingService):
         self.logging_svc = logging_svc
         self._pending: dict[tuple[int, int, str], list[str]] = {}
-        self._tasks: set[asyncio.Task] = set()
+        self._timers: dict[tuple[int, int, str], asyncio.Task] = {}  # one per pending key
+        self._posting: set[asyncio.Task] = set()  # early posts, done as soon as they're sent
 
     def record(self, guild_id: int, user_id: int, setting: str, old: Any, new: Any) -> None:
         key = (guild_id, user_id, setting)
@@ -108,22 +109,20 @@ class ChangeLog:
             return
         if len(self._pending) >= self.PENDING_MAX:
             # A burst of distinct settings (e.g. ignoring hundreds of users) mustn't grow this
-            # without bound: post the oldest now instead of waiting out its debounce.
+            # without bound: post the oldest now and cancel its timer.
             oldest = next(iter(self._pending))
-            self._spawn(self._post(oldest, self._pending.pop(oldest)))
+            self._timers.pop(oldest).cancel()
+            task = asyncio.create_task(self._post(oldest, self._pending.pop(oldest)))
+            self._posting.add(task)
+            task.add_done_callback(self._posting.discard)
         self._pending[key] = [str(old), str(new)]
         # ponytail: entries still waiting when the bot stops are lost; fine for an audit nicety.
-        self._spawn(self._post_later(key))
-
-    def _spawn(self, coro: Any) -> None:
-        task = asyncio.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._timers[key] = asyncio.create_task(self._post_later(key))
 
     async def _post_later(self, key: tuple[int, int, str]) -> None:
         await asyncio.sleep(self.DEBOUNCE)
-        if key in self._pending:  # not already posted early by PENDING_MAX
-            await self._post(key, self._pending.pop(key))
+        del self._timers[key]
+        await self._post(key, self._pending.pop(key))
 
     async def _post(self, key: tuple[int, int, str], change: list[str]) -> None:
         old, new = change

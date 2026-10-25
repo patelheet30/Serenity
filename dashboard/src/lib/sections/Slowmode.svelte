@@ -245,7 +245,8 @@
 						bind:value={data.interval}
 						options={[1, 2, 3, 4, 5].map((v) => ({ value: v, label: `${v}m` }))}
 						onchange={async (v, previous) => {
-							if (!(await patch({ interval: v }))) data!.interval = previous;
+							// Only undo our own value: a later click may already have saved another.
+							if (!(await patch({ interval: v })) && data!.interval === v) data!.interval = previous;
 						}}
 					/>
 					<p class="hint">How often Serenity re-scores each channel.</p>
