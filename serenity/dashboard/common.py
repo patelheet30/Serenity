@@ -108,6 +108,8 @@ class ChangeLog:
 
     def record(self, guild_id: int, user_id: int, setting: str, old: Any, new: Any) -> None:
         key = (guild_id, user_id, setting)
+        # Invariant: key in _pending <=> key in _timers. Both are added and removed together
+        # with no await in between, so a repeat edit never replaces a live timer.
         if key in self._pending:
             self._pending[key][1] = str(new)
             return
