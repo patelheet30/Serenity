@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read  # checkout only; nothing here writes to the repo
+
 jobs:
   test:
     name: Lint and test
