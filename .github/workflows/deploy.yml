@@ -30,7 +30,7 @@ jobs:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
-          command_timeout: 30m  # cold build + up to 2 x (180 s health wait + 30 s stability)
+          command_timeout: 30m  # cold build + up to 3 health windows (180 s wait + 30 s stability each)
           # Builds, waits for /health, and rolls back to the previous image if the new one
           # never gets healthy (the step then fails). See scripts/deploy.sh.
           script: bash /home/ubuntu/serenity/scripts/deploy.sh

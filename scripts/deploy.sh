@@ -7,7 +7,8 @@
 #   (the workflow goes red).
 # - Healthy and stable -> save this image and compose file as the new last-good, exit 0.
 #
-# Database migrations are not rolled back; keep them backwards-compatible.
+# Not rolled back: database migrations, and changes to other services (e.g. the postgres image),
+# since only $SERVICE is recreated. Keep both backwards-compatible.
 # The overrides below exist so the rollback path can be tested against a dummy service.
 set -euo pipefail
 
@@ -49,8 +50,9 @@ docker compose build "$SERVICE"
 
 if docker compose up -d; then
     if wait_healthy; then
+        # Compose file first, then the tag, so a failed copy can't pair a new image with old config.
+        cp docker-compose.yml "$STATE/docker-compose.yml.tmp" && mv "$STATE/docker-compose.yml.tmp" "$STATE/docker-compose.yml"
         docker tag "$IMAGE:latest" "$IMAGE:last-good"
-        cp docker-compose.yml "$STATE/docker-compose.yml"
         docker image prune -f >/dev/null
         echo "Deploy healthy."
         exit 0
@@ -60,6 +62,8 @@ if docker compose up -d; then
 else
     echo "docker compose up failed."
     # Compose often fails before touching anything; if the old version is still serving, leave it.
+    # (Only $CONTAINER is checked: if the bot came up on the new image but another service failed,
+    # this falls through to a rollback. Conservative on purpose for a failed deploy.)
     if [[ -n $prev && $(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null) == "$prev" ]] && wait_healthy; then
         echo "The previous version is still running and healthy; nothing to roll back. The new version was NOT deployed."
         exit 1
@@ -84,8 +88,7 @@ fi
 
 echo "Rolling back to $IMAGE:$target..."
 docker tag "$IMAGE:$target" "$IMAGE:latest"
-"${compose[@]}" up -d --no-build --force-recreate "$SERVICE"
-if wait_healthy; then
+if "${compose[@]}" up -d --no-build --force-recreate "$SERVICE" && wait_healthy; then
     echo "Rolled back: the previous version is serving. The new version was NOT deployed."
 else
     echo "Rollback is not healthy either. Check the server."
