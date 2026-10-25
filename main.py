@@ -82,7 +82,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
 
     await metrics_server.start()
 
-    BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("FLY_APP_NAME", "local")})
+    BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("ENVIRONMENT", "local")})
 
     logger.info("Database initialized and dependencies set.")
 

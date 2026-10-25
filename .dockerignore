@@ -56,7 +56,5 @@ build/
 .DS_Store
 Thumbs.db
 
-# Fly.io
-fly.toml.backup
 download_database.sh
 local_data/
