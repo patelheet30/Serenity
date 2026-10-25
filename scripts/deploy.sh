@@ -6,6 +6,7 @@
 #   healthy for STABLE_SECONDS -> restore the last good image *and* compose file, exit 1
 #   (the workflow goes red).
 # - Healthy and stable -> save this image and compose file as the new last-good, exit 0.
+#   If the dashboard then doesn't become healthy, the new bot stays but the script exits 1.
 #
 # Not rolled back: database migrations, and changes to other services (e.g. the postgres image or
 # the dashboard), since only $SERVICE is recreated. Keep both backwards-compatible.
@@ -15,6 +16,7 @@ set -euo pipefail
 DIR=${DEPLOY_DIR:-/home/ubuntu/serenity}
 SERVICE=${DEPLOY_SERVICE:-serenity}
 CONTAINER=${DEPLOY_CONTAINER:-serenity}
+DASHBOARD=${DEPLOY_DASHBOARD:-serenity-dashboard}
 IMAGE=${DEPLOY_IMAGE:-serenity-serenity}
 STATE=${DEPLOY_STATE:-/home/ubuntu/.serenity-deploy}  # outside $DIR: the copy step overwrites $DIR
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-180}
@@ -54,6 +56,12 @@ if docker compose up -d; then
         cp docker-compose.yml "$STATE/docker-compose.yml.tmp" && mv "$STATE/docker-compose.yml.tmp" "$STATE/docker-compose.yml"
         docker tag "$IMAGE:latest" "$IMAGE:last-good"
         docker image prune -f >/dev/null
+        # The bot is fine, so it stays; a broken dashboard still turns the workflow red.
+        if [[ -n $DASHBOARD ]] && ! CONTAINER=$DASHBOARD wait_healthy; then
+            echo "Bot deployed, but the dashboard isn't healthy. Last logs:"
+            docker logs --tail 40 "$DASHBOARD" 2>&1 || true
+            exit 1
+        fi
         echo "Deploy healthy."
         exit 0
     fi

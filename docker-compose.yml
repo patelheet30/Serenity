@@ -39,6 +39,12 @@ services:
     restart: unless-stopped
     environment:
       - METRICS_PORT=${METRICS_PORT:-8080}
+    healthcheck:                       # deploy.sh waits for this too
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     ports:
       # Nginx Proxy Manager (owns 80/443, does HTTPS) forwards the dashboard domain to 172.17.0.1:8090
       - "172.17.0.1:8090:80"
