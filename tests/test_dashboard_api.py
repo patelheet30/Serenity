@@ -464,7 +464,7 @@ async def test_slowmode_settings_match_the_command_limits(settings):
     assert settings.changes() == [
         ("Auto slowmode", "on", "off"),
         ("Default threshold", 10, 25),
-        ("Update interval", "0 min", "3 min"),
+        ("Update interval", "1 min", "3 min"),  # the 30 s table default reads as 1 min
     ]
 
 
@@ -639,6 +639,7 @@ def test_dashboard_limits_match_the_slash_commands():
 @pytest.mark.asyncio
 async def test_missing_fields_are_422_not_500(settings):
     assert (await settings("PUT", "/modules/logging", {}))[0] == 422
+    assert (await settings("PATCH", "/slowmode", {"interval": None}))[0] == 422  # int_field
     assert (await settings("PUT", f"/slowmode/channels/{TEXT_CHANNEL}", {"enabled": None}))[
         0
     ] == 422
