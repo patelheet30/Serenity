@@ -41,6 +41,8 @@ def test_log_types_match_the_schema_and_setup_channel_names():
         "mod": "mod-log",
     }
     schema = Path("serenity/database/migrations/001_initial.sql").read_text()
-    check = re.search(r"CHECK \(log_type IN \(([^)]*)\)\)", schema)  # log_channels' CHECK
+    table = re.search(r"CREATE TABLE log_channels \((.*?)\n\);", schema, re.S)
+    assert table is not None
+    check = re.search(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1))
     assert check is not None
     assert [t.strip(" '") for t in check.group(1).split(",")] == LOG_TYPES
