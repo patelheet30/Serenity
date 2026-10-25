@@ -101,6 +101,11 @@ def _minutes(update_interval: int) -> int:
     return min(max(update_interval // 60, INTERVAL_MINUTES[0]), INTERVAL_MINUTES[1])
 
 
+def _interval_text(seconds: int) -> str:
+    """The stored value as-is for the Server log, so 30 s -> 1 min still reads as a change."""
+    return f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"
+
+
 async def _slowmode_json(request: web.Request) -> dict[str, Any]:
     gid = guild_id(request)
     repo, bot = request.app[REPO], request.app[BOT]
@@ -151,8 +156,8 @@ async def patch_slowmode(request: web.Request) -> web.Response:
         _record(
             request,
             "Update interval",
-            f"{_minutes(old.update_interval)} min",
-            f"{_minutes(changes['update_interval'])} min",
+            _interval_text(old.update_interval),
+            _interval_text(changes["update_interval"]),
         )
     return web.json_response(await _slowmode_json(request))
 
