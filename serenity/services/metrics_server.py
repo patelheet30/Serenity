@@ -36,6 +36,8 @@ def _check_basic_auth(request: web.Request) -> bool:
 async def _metrics_handler(request: web.Request) -> web.Response:
     """Serve Prometheus metrics (behind basic auth in production)."""
     if _AUTH_ENABLED and not _check_basic_auth(request):
+        # The access log is off (see MetricsServer.start), so record failures explicitly.
+        logger.warning(f"Metrics auth failure from {request.remote}")
         return web.Response(
             status=401,
             text="Unauthorized",
@@ -67,7 +69,8 @@ class MetricsServer:
         app.router.add_get("/health", _health_handler)
         app.router.add_get("/", _health_handler)
 
-        self._runner = web.AppRunner(app)
+        # No access log: Docker probes /health every 10 s and Prometheus scrapes every 15 s.
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
 
         site = web.TCPSite(self._runner, "0.0.0.0", self.port)
