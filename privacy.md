@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Serenity Discord Bot**  
-Last updated: July 2026
+Last updated: October 2026
 
 ---
 
@@ -38,14 +38,15 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 
 ## How We Use Data
 
-Data collected is used solely to operate Serenity's features within your server:
+Data collected is used solely to operate and improve Serenity's features:
 
 - **Guild and channel configuration** is used to know where to apply slowmode and where to send log embeds.
 - **Message activity counts** are used to calculate message rates for the slowmode engine. Individual messages are never identified.
 - **Moderation case and warning data** is used to power the `/case`, `/cases`, `/warnings`, and `/modstats` commands within your server.
 - **Ignore lists** are used to exclude specific channels or users from audit log embeds.
+- **Aggregated usage metrics** (how many logs of each type are posted per server, how often each command is used) are used to see which features are used and improve the bot. They cannot identify any individual user.
 
-We do not use any data for advertising, analytics sold to third parties, or any purpose beyond operating the bot.
+We do not use any data for advertising, analytics sold to third parties, or any purpose beyond operating and improving the bot.
 
 ---
 
@@ -65,10 +66,12 @@ Guild IDs and channel IDs are transmitted to Grafana Cloud as metric labels for 
 Serenity communicates exclusively with Discord to receive events and send responses. Discord's Privacy Policy can be found at [discord.com/privacy](https://discord.com/privacy).
 
 ### Prometheus and Grafana Cloud
-Serenity collects internal performance metrics using the `prometheus_client` library and exposes them via a protected `/metrics` endpoint. These metrics are scraped by Grafana Cloud and used solely for monitoring the bot's operational health and performance.
+Serenity collects internal performance metrics using the `prometheus_client` library and exposes them via a protected `/metrics` endpoint. These metrics are scraped by Grafana Cloud and used solely for monitoring the bot's operational health and performance, and for understanding which features are used so the bot can be improved.
 
 **What is included in metrics data:**
 - Guild IDs and channel IDs, used as labels on aggregated counters and gauges (e.g., messages processed per guild, current slowmode per channel)
+- Counts of audit-log embeds posted per guild, by event type (e.g., message edits and deletes, member joins and updates, role, channel, emoji and server updates, moderation actions). These record only that an event of that type was logged in that guild — never who was involved or what changed
+- Counts of slash command uses, by command name only (no guild, channel, or user)
 - Aggregated numerical values such as message processing counts, slowmode change frequency, engine calculation durations, and task execution times
 
 **What is not included in metrics data:**
@@ -82,7 +85,7 @@ The metrics endpoint is protected with HTTP Basic Auth and is not publicly acces
 
 ## Data Storage and Security
 
-Serenity's primary data store is a SQLite database on a self-hosted server. We take reasonable precautions to secure our infrastructure, but no system is perfectly secure. The bot is open source and its data handling can be inspected in full at [https://github.com/patelheet30/Serenity](https://github.com/patelheet30/Serenity).
+Serenity's primary data store is a PostgreSQL database on a self-hosted server. We take reasonable precautions to secure our infrastructure, but no system is perfectly secure. The bot is open source and its data handling can be inspected in full at [https://github.com/patelheet30/Serenity](https://github.com/patelheet30/Serenity).
 
 ---
 

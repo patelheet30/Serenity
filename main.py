@@ -15,7 +15,7 @@ from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.logging_service import LoggingService
-from serenity.services.metrics import BOT_INFO
+from serenity.services.metrics import BOT_INFO, COMMANDS_USED
 from serenity.services.metrics_server import MetricsServer
 from serenity.services.moderation_service import ModerationService
 from serenity.services.slowmode_engine import SlowmodeEngine
@@ -50,6 +50,13 @@ bot = hikari.GatewayBot(
 )
 
 client = arc.GatewayClient(bot)
+
+
+@client.add_post_hook
+async def count_command(ctx: arc.GatewayContext) -> None:
+    """Count every slash command use (failed ones too) to see which features get used."""
+    COMMANDS_USED.labels(command=" ".join(ctx.command.qualified_name)).inc()
+
 
 # Connection settings come from PGHOST/PGUSER/PGPASSWORD/PGDATABASE
 repo = Repository(pool_size=int(os.getenv("DB_POOL_SIZE", "5")))

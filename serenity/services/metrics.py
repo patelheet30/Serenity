@@ -78,3 +78,15 @@ TASK_ERRORS = Counter(
     "Total background task errors",
     ["task_name"],
 )
+
+LOG_EVENTS_SENT = Counter(
+    "serenity_log_events_sent_total",
+    "Audit-log embeds posted to a server's log channel",
+    ["guild_id", "event"],
+)
+
+COMMANDS_USED = Counter(
+    "serenity_commands_used_total",
+    "Slash command invocations",
+    ["command"],
+)

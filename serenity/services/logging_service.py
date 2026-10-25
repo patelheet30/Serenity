@@ -6,6 +6,7 @@ from typing import Optional
 import hikari
 
 from serenity.database.logging_repository import LoggingRepository
+from serenity.services.metrics import LOG_EVENTS_SENT
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -60,6 +61,7 @@ class LoggingService:
         self,
         guild_id: int,
         log_type: str,
+        log_event: str,
         embed: hikari.Embed,
         channel_id: Optional[int] = None,
         user_id: Optional[int] = None
@@ -80,6 +82,7 @@ class LoggingService:
                 return
 
             await self._rest.create_message(target_channel_id, embed=embed)
+            LOG_EVENTS_SENT.labels(guild_id=str(guild_id), event=log_event).inc()
         except hikari.ForbiddenError:
             logger.warning(f"Missing permissions to send {log_type} log in guild {guild_id}")
         except hikari.NotFoundError:
@@ -124,6 +127,7 @@ class LoggingService:
 
         embed.set_footer(text=f"Message ID: {event.message_id}")
         await self._send(
+            log_event="message_delete",
             guild_id=cached.guild_id,
             log_type="message",
             embed=embed,
@@ -169,6 +173,7 @@ class LoggingService:
         )
         embed.set_footer(text=f"Message ID: {event.message_id}")
         await self._send(
+            log_event="message_edit",
             guild_id=event.guild_id,
             log_type="message",
             embed=embed,
@@ -188,6 +193,7 @@ class LoggingService:
         embed.set_footer(text=f"Channel ID: {event.channel_id}")
 
         await self._send(
+            log_event="bulk_message_delete",
             guild_id=event.guild_id,
             log_type="message",
             embed=embed,
@@ -209,7 +215,13 @@ class LoggingService:
         )
         embed.set_footer(text=f"User ID: {member.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="member", embed=embed, user_id=member.id)
+        await self._send(
+            log_event="member_join",
+            guild_id=event.guild_id,
+            log_type="member",
+            embed=embed,
+            user_id=member.id,
+        )
 
     async def log_member_leave(self, event: hikari.MemberDeleteEvent) -> None:
         """Log when a member leaves the guild."""
@@ -232,7 +244,13 @@ class LoggingService:
                     "Roles", " ".join(f"<@&{r}>" for r in role_ids[:10]), inline=False
                 )
         embed.set_footer(text=f"User ID: {user.id}")
-        await self._send(guild_id=event.guild_id, log_type="member", embed=embed, user_id=user.id)
+        await self._send(
+            log_event="member_leave",
+            guild_id=event.guild_id,
+            log_type="member",
+            embed=embed,
+            user_id=user.id,
+        )
 
     async def log_member_update(self, event: hikari.MemberUpdateEvent) -> None:
         """Log nickname, role, or server avatar changes."""
@@ -276,7 +294,13 @@ class LoggingService:
                 embed.add_field(name, before, inline=False)
 
         embed.set_footer(text=f"User ID: {new.id}")
-        await self._send(guild_id=event.guild_id, log_type="member", embed=embed, user_id=new.id)
+        await self._send(
+            log_event="member_update",
+            guild_id=event.guild_id,
+            log_type="member",
+            embed=embed,
+            user_id=new.id,
+        )
 
     async def log_voice_state_update(self, event: hikari.VoiceStateUpdateEvent) -> None:
         """Log voice channel joins, leaves, moves, mutes, and deafens."""
@@ -323,7 +347,13 @@ class LoggingService:
 
         embed.set_footer(text=f"User ID: {user_id}")
 
-        await self._send(guild_id=event.guild_id, log_type="voice", embed=embed, user_id=user_id)
+        await self._send(
+            log_event="voice_state_update",
+            guild_id=event.guild_id,
+            log_type="voice",
+            embed=embed,
+            user_id=user_id,
+        )
 
     async def log_channel_create(self, event: hikari.GuildChannelCreateEvent) -> None:
         """Log when a new channel is created in the guild."""
@@ -340,7 +370,13 @@ class LoggingService:
             embed.add_field("Category", f"<#{channel.parent_id}>", inline=True)
         embed.set_footer(text=f"Channel ID: {channel.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed, channel_id=channel.id)
+        await self._send(
+            log_event="channel_create",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+            channel_id=channel.id,
+        )
 
     async def log_channel_delete(self, event: hikari.GuildChannelDeleteEvent) -> None:
         """Log when a channel is deleted in the guild."""
@@ -354,7 +390,12 @@ class LoggingService:
         embed.add_field("Type", _channel_type_label(channel), inline=True)
         embed.set_footer(text=f"Channel ID: {channel.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed)
+        await self._send(
+            log_event="channel_delete",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+        )
 
     async def log_channel_update(self, event: hikari.GuildChannelUpdateEvent) -> None:
         """Log when a channel is updated."""
@@ -395,7 +436,13 @@ class LoggingService:
         embed.add_field("Changes", "\n".join(changes), inline=False)
         embed.set_footer(text=f"Channel ID: {new.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed, channel_id=new.id)
+        await self._send(
+            log_event="channel_update",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+            channel_id=new.id,
+        )
 
     async def log_role_create(self, event: hikari.RoleCreateEvent) -> None:
         role = event.role
@@ -410,7 +457,12 @@ class LoggingService:
         embed.add_field("Hoisted", "Yes" if role.is_hoisted else "No", inline=True)
         embed.set_footer(text=f"Role ID: {role.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed)
+        await self._send(
+            log_event="role_create",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+        )
 
     async def log_role_delete(self, event: hikari.RoleDeleteEvent) -> None:
         role = event.old_role
@@ -420,7 +472,12 @@ class LoggingService:
             embed.add_field("Color", str(role.color), inline=True)
         embed.set_footer(text=f"Role ID: {event.role_id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed)
+        await self._send(
+            log_event="role_delete",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+        )
 
     async def log_role_update(self, event: hikari.RoleUpdateEvent) -> None:
         old = event.old_role
@@ -451,7 +508,12 @@ class LoggingService:
         embed.add_field("Changes", "\n".join(changes), inline=False)
         embed.set_footer(text=f"Role ID: {new.id}")
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed)
+        await self._send(
+            log_event="role_update",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+        )
 
     async def log_guild_update(self, event: hikari.GuildUpdateEvent) -> None:
         old = event.old_guild
@@ -482,7 +544,7 @@ class LoggingService:
         embed.add_field("Changes", "\n".join(changes), inline=False)
         embed.set_footer(text=f"Guild ID: {new.id}")
 
-        await self._send(guild_id=new.id, log_type="server", embed=embed)
+        await self._send(log_event="guild_update", guild_id=new.id, log_type="server", embed=embed)
 
     async def log_emoji_update(self, event: hikari.EmojisUpdateEvent) -> None:
         old_ids = {e.id for e in event.old_emojis} # type: ignore
@@ -502,7 +564,12 @@ class LoggingService:
                 "Removed", " ".join(f"`:{e.name}:`" for e in removed[:20]), inline=False
             )
 
-        await self._send(guild_id=event.guild_id, log_type="server", embed=embed)
+        await self._send(
+            log_event="emoji_update",
+            guild_id=event.guild_id,
+            log_type="server",
+            embed=embed,
+        )
 
     async def log_mod_action(
         self,
@@ -553,6 +620,7 @@ class LoggingService:
         embed.set_footer(text=f"User ID: {target.id} | Case #{case_number}")
 
         await self._send(
+            log_event=f"mod_{action.lower()}",
             guild_id=guild_id, log_type="mod", embed=embed, user_id=target.id
         )
 
