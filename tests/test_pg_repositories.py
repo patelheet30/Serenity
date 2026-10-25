@@ -248,3 +248,21 @@ async def test_slowmode_raises_are_measured_after_five_minutes(pg_repo: Reposito
     assert (row["before"], row["after"], row["samples"]) == (30.0, 4.0, 1)
     assert CHANNEL not in tasks._PENDING_EFFECT
     assert await pg_repo.get_effectiveness_score(CHANNEL) == 1.0  # 30 -> 4 counts as effective
+
+
+@pytest.mark.asyncio
+async def test_a_raise_during_recording_is_kept():
+    """A newer raise that lands while the old one is being written stays pending."""
+    tasks._PENDING_EFFECT.clear()
+    tasks._PENDING_EFFECT[CHANNEL] = (0, 15, 30.0)
+    newer = (400, 30, 50.0)
+
+    async def record(*args):
+        tasks._PENDING_EFFECT[CHANNEL] = newer  # update_slowmode raised again meanwhile
+
+    repo = MagicMock(
+        get_message_rate=AsyncMock(return_value=4.0),
+        record_slowmode_effectiveness=AsyncMock(side_effect=record),
+    )
+    await tasks._record_due_effectiveness(repo, now=400)
+    assert tasks._PENDING_EFFECT[CHANNEL] == newer
