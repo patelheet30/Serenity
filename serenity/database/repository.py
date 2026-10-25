@@ -279,6 +279,82 @@ class Repository:
 
         return ((total or 0) / window_seconds) * 60  # messages per minute
 
+    async def get_minute_counts(self, channel_ids: List[int], minutes: int) -> Dict[int, List[int]]:
+        """Messages per minute over the last `minutes` minutes, oldest first, for sparklines.
+
+        The last bucket is get_message_rate(channel, 60)'s window ([now - 60, now]), so it
+        matches /stats; each earlier bucket is the 60 s before the next.
+        """
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        now = int(time.time())
+        await self.flush_message_activity()
+        rows = await self.pool.fetch(
+            """SELECT channel_id, GREATEST($2 - timestamp - 1, 0) / 60 AS ago,
+                SUM(message_count) AS n
+            FROM message_activity
+            WHERE channel_id = ANY($1::bigint[]) AND timestamp >= $2 - $3 * 60
+            GROUP BY channel_id, ago""",
+            channel_ids,
+            now,
+            minutes,
+        )
+        counts = {channel_id: [0] * minutes for channel_id in channel_ids}
+        for row in rows:
+            counts[row["channel_id"]][minutes - 1 - row["ago"]] = row["n"]
+        return counts
+
+    async def get_slowmode_changes(self, channel_ids: List[int], limit: int = 100) -> List[dict]:
+        """Recent slowmode changes in these channels, newest first."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        rows = await self.pool.fetch(
+            """SELECT channel_id, old_value, new_value, reason, message_rate, confidence, timestamp
+            FROM slowmode_changes WHERE channel_id = ANY($1::bigint[])
+            ORDER BY timestamp DESC, id DESC LIMIT $2""",
+            channel_ids,
+            limit,
+        )
+        return [dict(row) for row in rows]
+
+    async def get_hourly_messages(self, channel_ids: List[int], hours: int = 24) -> List[int]:
+        """Messages per hour across these channels from channel_analytics, oldest hour first."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        # hour_timestamp marks the end of the hour aggregate_hourly_analytics summed.
+        end = int(time.time() // 3600) * 3600
+        rows = await self.pool.fetch(
+            """SELECT hour_timestamp, SUM(total_messages) AS n FROM channel_analytics
+            WHERE channel_id = ANY($1::bigint[]) AND hour_timestamp > $2 - $3 * 3600
+            GROUP BY hour_timestamp""",
+            channel_ids,
+            end,
+            hours,
+        )
+        totals = [0] * hours
+        for row in rows:
+            totals[hours - 1 - (end - row["hour_timestamp"]) // 3600] = row["n"]
+        return totals
+
+    async def get_effectiveness(self, channel_ids: List[int], days: int = 30) -> List[dict]:
+        """Average message rate before and after slowmode changes, per channel."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        rows = await self.pool.fetch(
+            """SELECT channel_id, AVG(message_rate_before) AS before,
+                AVG(message_rate_after) AS after, COUNT(*) AS samples
+            FROM slowmode_effectiveness
+            WHERE channel_id = ANY($1::bigint[]) AND applied_at >= $2
+            GROUP BY channel_id""",
+            channel_ids,
+            int(time.time()) - days * 86400,
+        )
+        return [dict(row) for row in rows]
+
     async def cleanup_old_message_activity(self, hours: int = 24) -> None:
         """Remove message activity records older than specified hours"""
         if not self.pool:

@@ -470,3 +470,56 @@ async def test_database_not_initialized_error():
 
     with pytest.raises(DatabaseError, match="Database connection is not initialised"):
         await repo.get_guild_config(123)
+
+
+@pytest.mark.asyncio
+async def test_minute_counts_match_message_rate(repo: Repository):
+    """The dashboard's newest sparkline bucket is exactly what /stats calls the 1-minute rate."""
+    a, b, _ = OTHER_CHANNELS
+    now = int(time.time())
+    for ts, n in [
+        (now, 2),
+        (now - 60, 3),
+        (now - 61, 4),
+        (now - 24 * 60, 5),
+        (now - 24 * 60 - 1, 9),
+    ]:
+        for _ in range(n):
+            await repo.record_message_activity(a, ts)
+
+    counts = await repo.get_minute_counts([a, b], minutes=24)
+    assert counts[b] == [0] * 24
+    assert counts[a][-1] == 5 == await repo.get_message_rate(a, 60)
+    assert counts[a][-2] == 4
+    assert counts[a][0] == 5  # the oldest bucket ends 24 minutes ago; older activity drops out
+    assert sum(counts[a]) == 14
+
+
+@pytest.mark.asyncio
+async def test_slowmode_history_and_analytics(repo: Repository):
+    a, b, other = OTHER_CHANNELS
+    await repo.record_slowmode_change(a, 0, 5, "busy", 30.0, 0.8)
+    await repo.record_slowmode_change(a, 5, 10, "busier", 45.0, 0.9)
+    await repo.record_slowmode_change(other, 0, 5, "elsewhere", 1.0, 0.5)
+    history = await repo.get_slowmode_changes([a, b], limit=10)
+    assert [h["reason"] for h in history] == ["busier", "busy"]
+
+    hour = int(time.time() // 3600) * 3600
+    assert repo.pool is not None
+    await repo.pool.execute(
+        """INSERT INTO channel_analytics (channel_id, hour_timestamp, total_messages,
+        unique_users, avg_slowmode, max_slowmode) VALUES ($1, $2, 10, 0, 0, 0),
+        ($3, $2, 5, 0, 0, 0), ($1, $4, 7, 0, 0, 0), ($1, $5, 99, 0, 0, 0)""",
+        a,
+        hour,
+        b,
+        hour - 3600,
+        hour - 24 * 3600,
+    )
+    hourly = await repo.get_hourly_messages([a, b], hours=24)
+    assert hourly[-1] == 15 and hourly[-2] == 7 and sum(hourly) == 22
+
+    await repo.record_slowmode_effectiveness(a, 10, 40.0, 20.0, 300)
+    await repo.record_slowmode_effectiveness(a, 10, 60.0, 30.0, 300)
+    [row] = await repo.get_effectiveness([a, b])
+    assert (row["channel_id"], row["before"], row["after"], row["samples"]) == (a, 50.0, 25.0, 2)
