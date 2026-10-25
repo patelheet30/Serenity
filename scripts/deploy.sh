@@ -7,8 +7,8 @@
 #   (the workflow goes red).
 # - Healthy and stable -> save this image and compose file as the new last-good, exit 0.
 #
-# Not rolled back: database migrations, and changes to other services (e.g. the postgres image),
-# since only $SERVICE is recreated. Keep both backwards-compatible.
+# Not rolled back: database migrations, and changes to other services (e.g. the postgres image or
+# the dashboard), since only $SERVICE is recreated. Keep both backwards-compatible.
 # The overrides below exist so the rollback path can be tested against a dummy service.
 set -euo pipefail
 
@@ -46,7 +46,7 @@ wait_healthy() {
 prev=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)
 [[ -n $prev ]] && docker tag "$prev" "$IMAGE:previous"
 
-docker compose build "$SERVICE"
+docker compose build  # every service, so dashboard changes ship too
 
 if docker compose up -d; then
     if wait_healthy; then

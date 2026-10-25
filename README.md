@@ -79,7 +79,9 @@ npm run dev
 Vite serves the dashboard on http://localhost:5173 and proxies `/api` to the bot on `METRICS_PORT` (default 8080). For login, set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `DASHBOARD_SECRET` in `.env` (see `.env.example`) and add `http://localhost:5173/api/auth/callback` as a redirect in the Discord developer portal. `npm run check`, `npm test` and `npm run build` are what CI runs. `/gallery` shows every UI component.
 
 ### Deployment
-Production runs with `docker compose` (the bot plus a `postgres` container; see `docker-compose.yml`). Every merge to `main` deploys automatically through `.github/workflows/deploy.yml`, which copies the repo to the server and rebuilds the bot.
+Production runs with `docker compose` (the bot, a `postgres` container and `dashboard`; see `docker-compose.yml`). Every merge to `main` deploys automatically through `.github/workflows/deploy.yml`, which copies the repo to the server and rebuilds the bot and the dashboard.
+
+The `dashboard` container is Caddy serving the built SPA and proxying `/api/*` to the bot; `/metrics` is never proxied. Nginx Proxy Manager on the VM owns ports 80/443: a proxy host for the dashboard domain forwards to `172.17.0.1:8090` with a Let's Encrypt certificate. The bot's own port is bound to the Docker bridge (`172.17.0.1:8080`), where Prometheus scrapes it, so it isn't reachable from the internet. The server's `.env` needs `DASHBOARD_URL` (e.g. `https://serenity.patelheet.com`), `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `DASHBOARD_SECRET`.
 
 ### Backups
 On the production server, cron runs [`scripts/backup_postgres.sh`](scripts/backup_postgres.sh) nightly at 03:30 UTC. It writes a `pg_dump` (custom format) to `~/serenity-backups/` (last 7 kept) and uploads it to the `serenity-backups` OCI Object Storage bucket through a write-only pre-authenticated request. A bucket lifecycle rule deletes uploads after 30 days. The log is at `~/serenity-backups/backup.log`.
