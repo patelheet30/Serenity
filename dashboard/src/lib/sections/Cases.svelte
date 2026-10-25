@@ -105,7 +105,7 @@
 			rows.push(...r.cases);
 			page.next = r.next;
 		} catch (e) {
-			toast(e instanceof Error ? e.message : String(e), { error: true });
+			if (gen === generation) toast(e instanceof Error ? e.message : String(e), { error: true });
 		} finally {
 			more = false;
 		}
