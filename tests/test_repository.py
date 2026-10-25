@@ -116,6 +116,23 @@ async def test_update_channel_config(repo: Repository):
     assert config.is_enabled is False
     assert config.threshold == 15
 
+    # 0 is how /serenity channel threshold (and the dashboard) reset to the server default
+    await repo.update_channel_config(CHANNEL, threshold=0)
+    assert (await repo.get_channel_config(CHANNEL, GUILD)).threshold is None
+
+
+@pytest.mark.asyncio
+async def test_channel_configs_list_and_delete(repo: Repository):
+    a, b, c = OTHER_CHANNELS
+    for channel_id in (a, b):
+        await repo.get_channel_config(channel_id, GUILD)
+    await repo.get_channel_config(c, GUILD + 1)
+
+    assert [x.channel_id for x in await repo.get_channel_configs(GUILD)] == sorted([a, b])
+
+    await repo.delete_channel_config(a)
+    assert [x.channel_id for x in await repo.get_channel_configs(GUILD)] == [b]
+
 
 @pytest.mark.asyncio
 async def test_get_enabled_channels(repo: Repository):

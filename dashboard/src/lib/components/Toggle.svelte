@@ -3,9 +3,16 @@
 		checked = $bindable(false),
 		label,
 		disabled = false,
-		onchange
-	}: { checked?: boolean; label: string; disabled?: boolean; onchange?: (v: boolean) => void } =
-		$props();
+		onchange,
+		onblocked
+	}: {
+		checked?: boolean;
+		label: string;
+		disabled?: boolean;
+		onchange?: (v: boolean) => void;
+		/** Clicked while disabled: say why. */
+		onblocked?: () => void;
+	} = $props();
 </script>
 
 <!-- aria-disabled (not disabled) so a blocked toggle can still be focused and explain itself. -->
@@ -16,7 +23,7 @@
 	aria-label={label}
 	aria-disabled={disabled}
 	onclick={() => {
-		if (disabled) return;
+		if (disabled) return onblocked?.();
 		checked = !checked;
 		onchange?.(checked);
 	}}

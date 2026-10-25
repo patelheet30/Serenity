@@ -6,11 +6,10 @@ import hikari
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleNotEnabledError, ModuleType
 from serenity.database.logging_repository import LoggingRepository
+from serenity.services.logging_service import LOG_TYPES, setup_log_channels
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-LOG_TYPES = ["member", "message", "voice", "server", "mod"]
 
 LOG_TYPE_LABELS: dict[str, str] = {
     "member":  "👤 Member",
@@ -20,13 +19,6 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "mod":     "🔨 Mod",
 }
 
-CHANNEL_NAMES: dict[str, str] = {
-    "member":  "member-log",
-    "message": "message-log",
-    "voice":   "voice-log",
-    "server":  "server-log",
-    "mod":     "mod-log",
-}
 
 plugin = arc.GatewayPlugin(
     "logging_commands",
@@ -152,8 +144,8 @@ async def setup(
     repo: LoggingRepository = arc.inject(),
 ) -> None:
     """
-    Creates a '📋 Serenity Logs' category with five text channels:
-    member-log, message-log, voice-log, server-log, mod-log.
+    Gives each log type a channel under a '📋 Serenity Logs' category: member-log,
+    message-log, voice-log, server-log, mod-log. Safe to re-run: existing channels are kept.
 
     Permissions are set so only the bot can send messages.
     Admins can adjust visibility by editing the category permissions.
@@ -167,39 +159,13 @@ async def setup(
 
     await ctx.defer()
 
-    rest = ctx.client.app.rest
+    app = ctx.client.app
     guild_id = ctx.guild_id
-    bot_user = ctx.client.app.get_me()
+    bot_user = app.get_me()
 
-    # Build permission overwrites:
-    # - @everyone: cannot send messages (read-only for humans)
-    # - Bot: can send, view, read history, and embed links
-    overwrites: list[hikari.PermissionOverwrite] = [
-        hikari.PermissionOverwrite(
-            id=guild_id,  # @everyone role has same ID as the guild
-            type=hikari.PermissionOverwriteType.ROLE,
-            deny=hikari.Permissions.SEND_MESSAGES | hikari.Permissions.VIEW_CHANNEL,
-        ),
-    ]
-    if bot_user:
-        overwrites.append(
-            hikari.PermissionOverwrite(
-                id=bot_user.id,
-                type=hikari.PermissionOverwriteType.MEMBER,
-                allow=(
-                    hikari.Permissions.SEND_MESSAGES
-                    | hikari.Permissions.VIEW_CHANNEL
-                    | hikari.Permissions.READ_MESSAGE_HISTORY
-                    | hikari.Permissions.EMBED_LINKS
-                ),
-            )
-        )
-
-    # Create category
     try:
-        category = await rest.create_guild_category(
-            guild_id,
-            name="📋 Serenity Logs",
+        channels, failed = await setup_log_channels(
+            app.rest, app.cache, repo, guild_id, bot_user.id if bot_user else None
         )
     except hikari.ForbiddenError:
         await ctx.respond(
@@ -215,26 +181,7 @@ async def setup(
             flags=hikari.MessageFlag.EPHEMERAL,
         )
         return
-
-    # Create each channel
-    created: list[tuple[str, hikari.GuildTextChannel]] = []
-    failed: list[str] = []
-
-    for log_type, channel_name in CHANNEL_NAMES.items():
-        try:
-            channel = await rest.create_guild_text_channel(
-                guild_id,
-                name=channel_name,
-                category=category,
-                permission_overwrites=overwrites,
-            )
-            await repo.set_log_channel(guild_id, log_type, channel.id)
-            created.append((log_type, channel))
-        except Exception as exc:
-            logger.error(
-                f"Failed to create {channel_name} in guild {guild_id}: {exc}", exc_info=True
-            )
-            failed.append(channel_name)
+    created = [(t, channels[t]) for t in LOG_TYPES if t in channels]
 
     # Build response embed
     color = hikari.Color(0x57F287) if not failed else hikari.Color(0xFEE75C)
@@ -245,8 +192,8 @@ async def setup(
 
     if created:
         embed.add_field(
-            "Channels Created",
-            "\n".join(f"{LOG_TYPE_LABELS[lt]}: {ch.mention}" for lt, ch in created),
+            "Log Channels",
+            "\n".join(f"{LOG_TYPE_LABELS[lt]}: <#{ch.id}>" for lt, ch in created),
             inline=False,
         )
 

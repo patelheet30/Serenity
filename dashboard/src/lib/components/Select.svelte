@@ -8,19 +8,29 @@
 		options,
 		label,
 		placeholder = 'Pick…',
-		onsearch
+		onsearch,
+		onchange,
+		align = 'left'
 	}: {
 		value: T | null;
 		options: Option[];
 		label: string;
 		placeholder?: string;
 		onsearch?: (q: string) => void;
+		onchange?: (v: T) => void;
+		/** Which edge the popover lines up with; 'right' for pickers at the right of a header. */
+		align?: 'left' | 'right';
 	} = $props();
 
 	let open = $state(false);
 	let q = $state('');
 	let sel = $state(0);
 	let root: HTMLElement | undefined = $state();
+	let input: HTMLInputElement | undefined = $state();
+	// Not the autofocus attribute: Chrome ignores it while the toggle button still has focus.
+	$effect(() => {
+		if (open) input?.focus();
+	});
 	const uid = $props.id();
 
 	const shown = $derived(
@@ -29,8 +39,10 @@
 	const current = $derived(options.find((o) => o.value === value));
 
 	function pick(o: Option) {
-		value = o.value;
 		open = false;
+		if (o.value === value) return;
+		value = o.value;
+		onchange?.(o.value);
 	}
 
 	function onkeydown(e: KeyboardEvent) {
@@ -51,11 +63,11 @@
 		<span class:dim={!current}>{current?.label ?? placeholder}</span><Icon name="chev" />
 	</button>
 	{#if open}
-		<div class="popover">
+		<div class="popover" class:right={align === 'right'}>
 			<div class="search">
 				<Icon name="search" />
-				<!-- svelte-ignore a11y_autofocus -->
 				<input
+					bind:this={input}
 					class="inp"
 					type="text"
 					role="combobox"
@@ -64,7 +76,6 @@
 					aria-expanded="true"
 					aria-activedescendant={shown[sel] ? `${uid}-${sel}` : undefined}
 					autocomplete="off"
-					autofocus
 					bind:value={q}
 					oninput={() => ((sel = 0), onsearch?.(q))}
 					{onkeydown}
@@ -94,6 +105,10 @@
 		left: 0;
 		right: auto;
 		top: 38px;
+	}
+	.sel .popover.right {
+		left: auto;
+		right: 0;
 	}
 	.sel li [aria-selected='true'] {
 		background: var(--ink3);

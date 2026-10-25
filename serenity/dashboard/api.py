@@ -11,12 +11,35 @@ from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
-import asyncpg
 import hikari
 from aiohttp import web
 from yarl import URL
 
+from serenity.core.modules import ModuleManager
+from serenity.dashboard import settings
 from serenity.dashboard.auth import DiscordOAuth, GuildAccess, NotInstalledError, Session, Sessions
+from serenity.dashboard.common import (
+    ACCESS,
+    ACCESS_LEVEL,
+    BASE_URL,
+    BOT,
+    CHANGES,
+    LOG_REPO,
+    MOD_REPO,
+    MODULES,
+    OAUTH,
+    ORIGIN,
+    REPO,
+    SECURE,
+    SESSION,
+    SESSIONS,
+    ApiError,
+    ChangeLog,
+)
+from serenity.database.logging_repository import LoggingRepository
+from serenity.database.moderation_repository import ModerationRepository
+from serenity.database.repository import Repository
+from serenity.services.logging_service import LoggingService
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -29,25 +52,6 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 MEMBER_SEARCH_LIMIT = 25
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
-
-BOT = web.AppKey("bot", hikari.GatewayBot)
-BASE_URL = web.AppKey("base_url", str)
-ORIGIN = web.AppKey("origin", str)
-SECURE = web.AppKey("secure", bool)
-ACCESS = web.AppKey("access", GuildAccess)
-SESSIONS = web.AppKey("sessions", Any)  # Sessions, or _NoSessions when login isn't configured
-OAUTH = web.AppKey("oauth", DiscordOAuth)
-SESSION = web.RequestKey("session", Session)
-ACCESS_LEVEL = web.RequestKey("access_level", str)
-
-
-class ApiError(Exception):
-    """Turned into {"error": {"code", "message", ...extra}} with this status by error_middleware."""
-
-    def __init__(self, status: int, code: str, message: str, **extra: Any):
-        super().__init__(message)
-        self.status = status
-        self.body = {"error": {"code": code, "message": message, **extra}}
 
 
 @web.middleware
@@ -308,7 +312,7 @@ async def members(request: web.Request) -> web.Response:
     return web.json_response([_member_json(m) for m in found])
 
 
-def build_api(bot: hikari.GatewayBot, pool: asyncpg.Pool) -> web.Application:
+def build_api(bot: hikari.GatewayBot, repo: Repository) -> web.Application:
     """The /api sub-app. Login needs DISCORD_CLIENT_ID/SECRET, DASHBOARD_URL, DASHBOARD_SECRET."""
     url = os.getenv("DASHBOARD_URL", "http://localhost:5173").rstrip("/")
     secret = os.getenv("DASHBOARD_SECRET", "")
@@ -321,9 +325,14 @@ def build_api(bot: hikari.GatewayBot, pool: asyncpg.Pool) -> web.Application:
     app[ORIGIN] = str(URL(url).origin())
     app[SECURE] = url.startswith("https://")
     app[ACCESS] = GuildAccess(bot)
+    app[REPO] = repo
+    app[LOG_REPO] = LoggingRepository(repo.pool)  # type: ignore[arg-type]
+    app[MOD_REPO] = ModerationRepository(repo.pool)  # type: ignore[arg-type]
+    app[MODULES] = ModuleManager(repo)
+    app[CHANGES] = ChangeLog(LoggingService(app[LOG_REPO], bot.rest))
     # Without a valid secret there are no sessions, so every protected route answers 401.
     try:
-        app[SESSIONS] = Sessions(pool, secret)
+        app[SESSIONS] = Sessions(repo.pool, secret)  # type: ignore[arg-type]
     except ValueError:
         app[SESSIONS] = _NoSessions()
 
@@ -354,6 +363,7 @@ def build_api(bot: hikari.GatewayBot, pool: asyncpg.Pool) -> web.Application:
     app.router.add_get(r"/guilds/{guild_id:\d+}/channels", channels)
     app.router.add_get(r"/guilds/{guild_id:\d+}/roles", roles)
     app.router.add_get(r"/guilds/{guild_id:\d+}/members", members)
+    app.add_routes(settings.routes)
     return app
 
 

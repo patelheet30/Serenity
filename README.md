@@ -195,8 +195,10 @@ serenity/
 │   ├── modules.py          # ModuleType enum, ModuleManager
 │   └── types.py            # Shared dataclasses
 ├── dashboard/
-│   ├── api.py              # /api routes for the web dashboard, auth + guild-access middleware
-│   └── auth.py             # Discord OAuth2, sessions, per-guild authorization
+│   ├── api.py              # /api app: login, auth + guild-access middleware, Discord data
+│   ├── auth.py             # Discord OAuth2, sessions, per-guild authorization
+│   ├── common.py           # app keys, JSON errors, input checks, server-log change log
+│   └── settings.py         # modules, slowmode and logging settings
 ├── database/
 │   ├── migrations/         # Versioned schema migrations
 │   ├── logging_repository.py
