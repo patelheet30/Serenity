@@ -92,7 +92,7 @@ textarea.inp{height:auto;padding:8px 10px;resize:vertical;line-height:1.5}
 /* ---------- landing ---------- */
 .lnav{display:flex;align-items:center;gap:16px;max-width:1240px;margin:0 auto;padding:18px 24px}
 .brand{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-weight:600;font-size:17px;letter-spacing:-.02em;text-decoration:none;background:none;border:0;padding:0}
-.brand svg{width:22px;height:22px}
+.brand .mark{width:24px;height:24px;display:block}
 .lnav .sp{flex:1}
 .hero{display:grid;grid-template-columns:1.02fr .98fr;gap:56px;align-items:center;max-width:1240px;margin:0 auto;padding:72px 24px 96px}
 .hero h1{font-family:var(--disp);font-weight:600;font-size:clamp(44px,6.2vw,86px);line-height:.98;letter-spacing:-.034em;margin:0 0 22px;font-variation-settings:"opsz" 96}
