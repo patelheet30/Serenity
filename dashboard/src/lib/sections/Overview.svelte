@@ -119,7 +119,7 @@
 				<dl class="kv">
 					<dt>Active warnings</dt><dd>{d.stats.active.warnings}</dd>
 					<dt>Active timeouts</dt><dd>{d.stats.active.timeouts}</dd>
-					<dt>Slowmode changes, 6h</dt><dd>{d.analytics.changes['6h']}</dd>
+					<dt>Slowmode changes, 6h</dt><dd>{d.analytics.changes['6h'].toLocaleString()}</dd>
 					<dt>Log types enabled</dt><dd>{d.logging.types.filter((t) => t.enabled).length} / {d.logging.types.length}</dd>
 				</dl>
 			</div>
