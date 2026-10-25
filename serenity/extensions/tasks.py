@@ -280,7 +280,8 @@ async def aggregate_hourly_analytics(repo: Repository) -> None:
         )
 
 
-@arc.utils.interval_loop(hours=1)
+# Not hours=1: arc 2.1.1 sets days = hours (arc/utils/loops.py), so that ran every 25 h.
+@arc.utils.interval_loop(seconds=3600)
 async def cleanup_old_data(repo: Repository) -> None:
     task_start = time.perf_counter()
     try:
