@@ -8,7 +8,7 @@
 	const SITE = import.meta.env.VITE_SITE_URL ?? '';
 	const TITLE = 'Serenity: slowmode that breathes with your chat';
 	const DESCRIPTION =
-		'A Discord bot that eases slowmode up and down on its own as each channel gets busy or calms down. Audit logging, moderation cases and tickets included.';
+		'A Discord bot that eases slowmode up and down on its own as each channel gets busy or calms down. Audit logging and moderation cases included.';
 
 	// Logged-in visitors get "Open dashboard" instead of the login button.
 	let me: Me | null = $state(null);
@@ -119,8 +119,8 @@
 		<div>
 			<h1>Slowmode that <em>breathes</em> with your chat.</h1>
 			<p>
-				Serenity watches each channel’s pace and eases slowmode up and down on its own. Logging,
-				cases and tickets included.
+				Serenity watches each channel’s pace and eases slowmode up and down on its own. Logging
+				and moderation cases included.
 			</p>
 			<div class="ctas">
 				<a class="btn pri lg" href={inviteUrl()} data-sveltekit-reload>Add to Discord <Icon name="arrow" /></a>
@@ -224,46 +224,8 @@
 		</div>
 	</section>
 
-	<section class="lsec" id="tickets">
-		<div class="how" style="align-items:center">
-			<div>
-				<h2>Tickets for whatever your community runs on.</h2>
-				<p class="lead">
-					A Minecraft network, a freelance studio, a game community. Every ticket type gets its own
-					fields, stages and context, so a ticket knows what it’s about. An appeal knows the player’s
-					IGN and every earlier ticket about it. A Discord report knows the member’s mod history.
-				</p>
-				<p class="lead" style="margin-top:14px">Panels, transcripts, auto-close and stats are free and unlimited.</p>
-			</div>
-			<div class="demo" role="figure" aria-label="Example: a Minecraft ban appeal with linked tickets by IGN">
-				<div class="demo-in">
-					<span class="fg2">#appeal-notch_2</span><span style="flex:1"></span>
-					<span class="stg"><i style="background:#8f887a"></i>Received</span>
-				</div>
-				<div style="padding:14px 16px;display:grid;gap:12px">
-					<dl class="answers" style="grid-template-columns:repeat(3,minmax(0,1fr));display:grid">
-						<div><dt>IGN · identity</dt><dd class="mono acc">Notch_2</dd></div>
-						<div><dt>Server</dt><dd>Survival</dd></div>
-						<div><dt>Ban ID</dt><dd class="mono">B-4471</dd></div>
-					</dl>
-					<div class="dossier">
-						<div class="dtop">
-							<Icon name="tickets" />
-							<div style="font-size:13px"><b>3</b> earlier tickets about IGN <span class="mono acc">Notch_2</span></div>
-						</div>
-						<ul class="mini-list" style="border-top:1px solid var(--line)">
-							<li><span class="mono dim">#0124</span><span class="grow">Store issue</span><span class="stg"><i style="background:#8fe3bf"></i>Resolved</span></li>
-							<li><span class="mono dim">#0118</span><span class="grow">Ban appeal</span><span class="stg"><i style="background:#8fe3bf"></i>Accepted</span></li>
-							<li><span class="mono dim">#0112</span><span class="grow">Player report</span><span class="stg"><i style="background:#ef8a78"></i>No action</span></li>
-						</ul>
-					</div>
-				</div>
-			</div>
-		</div>
-	</section>
-
 	<section class="lsec final">
-		<h2 style="margin:0">Running in 60+ servers. Yours next.</h2>
+		<h2 style="margin:0">Running in 75+ servers. Yours next.</h2>
 		<a class="btn pri lg" href={inviteUrl()} data-sveltekit-reload>Add to Discord <Icon name="arrow" /></a>
 	</section>
 </main>
