@@ -100,7 +100,8 @@
 		more = true;
 		const gen = generation;
 		try {
-			const r = await api<Page>(`/guilds/${guildId}/cases?${params(page.next)}`);
+			// Later pages carry only cases and the cursor; facets stay from the first page.
+			const r = await api<Pick<Page, 'cases' | 'next'>>(`/guilds/${guildId}/cases?${params(page.next)}`);
 			if (gen !== generation || !page) return; // the filters changed meanwhile
 			rows.push(...r.cases);
 			page.next = r.next;

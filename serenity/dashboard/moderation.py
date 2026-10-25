@@ -26,6 +26,7 @@ routes = web.RouteTableDef()
 GUILD = r"/guilds/{guild_id:\d+}"
 
 PAGE_SIZE = 50
+FACET_MODERATORS = 8  # moderator chips the Cases page shows
 REASON_MAX = 512  # what the mod-log embed shows
 STATS_DAYS = (7, 30, 90)
 
@@ -64,8 +65,19 @@ def _case_json(request: web.Request, case: dict[str, Any], now: int) -> dict[str
     }
 
 
+BIGINT_MAX = 2**63 - 1  # snowflakes
+INT_MAX = 2**31 - 1  # case numbers
+
+
+def parse_int(value: str, limit: int) -> Optional[int]:
+    """A plain 0-9 number that fits the column, or None (so bad input can't 500 in asyncpg)."""
+    if value.isascii() and value.isdecimal() and len(value) <= 19 and int(value) <= limit:
+        return int(value)
+    return None
+
+
 def _ids(value: str) -> list[int]:
-    return [int(v) for v in value.split(",") if v.isdigit()]
+    return [i for v in value.split(",") if (i := parse_int(v, BIGINT_MAX)) is not None]
 
 
 def _name_matches(request: web.Request, text: str) -> list[int]:
@@ -93,25 +105,25 @@ async def list_cases(request: web.Request) -> web.Response:
         active=q.get("active") == "1",
         text=text,
         text_user_ids=_name_matches(request, text) if text else [],
-        before=int(before) if before.isdigit() else None,
+        before=parse_int(before, INT_MAX),
         limit=PAGE_SIZE,
     )
-    facets = await request.app[MOD_REPO].case_facets(guild_id(request))
     now = int(time.time())
-    return web.json_response(
-        {
-            "cases": [_case_json(request, c, now) for c in cases],
-            "total": total,
-            "all": sum(facets["action"].values()),
-            "next": cases[-1]["case_number"] if len(cases) == PAGE_SIZE else None,
-            "facets": {
-                "action": facets["action"],
-                "moderator": [
-                    {**_user(request, m), "count": n} for m, n in facets["moderator"].items()
-                ],
-            },
+    body: dict[str, Any] = {
+        "cases": [_case_json(request, c, now) for c in cases],
+        "total": total,
+        "next": cases[-1]["case_number"] if len(cases) == PAGE_SIZE else None,
+    }
+    if not before:  # "Load more" pages reuse the first page's facets
+        facets = await request.app[MOD_REPO].case_facets(guild_id(request), FACET_MODERATORS)
+        body["all"] = sum(facets["action"].values())
+        body["facets"] = {
+            "action": facets["action"],
+            "moderator": [
+                {**_user(request, m), "count": n} for m, n in facets["moderator"].items()
+            ],
         }
-    )
+    return web.json_response(body)
 
 
 async def _case_or_404(request: web.Request) -> dict[str, Any]:

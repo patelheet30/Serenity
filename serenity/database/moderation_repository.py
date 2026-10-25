@@ -284,14 +284,16 @@ class ModerationRepository:
             add("moderator_id = ANY(?::bigint[])", moderators)
         if users:
             add("target_user_id = ANY(?::bigint[])", users)
-        if active:  # warnings not cleared and timeouts not expired; other actions have no state
+        if active:  # as the dashboard's status: uncleared warnings, unexpired timeouts
             add(
-                "action IN ('warn', 'timeout') AND is_active AND (expires_at IS NULL OR expires_at > ?)",
+                "action IN ('warn', 'timeout') AND is_active"
+                " AND (action = 'warn' OR expires_at > ?)",
                 int(time.time()),
             )
         if text:
-            number = int(text) if text.isdigit() and len(text) < 10 else -1
-            snowflake = int(text) if text.isdigit() else -1
+            digits = text.isascii() and text.isdecimal() and len(text) <= 19
+            number = int(text) if digits and int(text) < 2**31 else -1
+            snowflake = int(text) if digits and int(text) < 2**63 else -1
             add(
                 "(case_number = ? OR target_user_id = ? OR moderator_id = ?"
                 " OR target_user_id = ANY(?::bigint[]) OR moderator_id = ANY(?::bigint[])"
@@ -316,8 +318,8 @@ class ModerationRepository:
         )
         return [dict(row) for row in rows], total
 
-    async def case_facets(self, guild_id: int) -> dict[str, dict[Any, int]]:
-        """Case counts per action and per moderator, for the filter chips."""
+    async def case_facets(self, guild_id: int, top: int) -> dict[str, dict[Any, int]]:
+        """Case counts per action and for the `top` busiest moderators (filter chips)."""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
@@ -327,8 +329,9 @@ class ModerationRepository:
         )
         moderators = await self.pool.fetch(
             """SELECT moderator_id, COUNT(*) AS n FROM mod_cases WHERE guild_id = $1
-            GROUP BY moderator_id ORDER BY n DESC""",
+            GROUP BY moderator_id ORDER BY n DESC, moderator_id LIMIT $2""",
             guild_id,
+            top,
         )
         return {
             "action": {r["action"]: r["n"] for r in actions},

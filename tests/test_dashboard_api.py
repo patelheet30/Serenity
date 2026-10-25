@@ -695,6 +695,11 @@ async def test_case_list_filters_and_pages(settings, cases):
 
     status, body = await settings("GET", "/cases", before=str(body["next"]))
     assert [c["number"] for c in body["cases"]] == list(range(10, 0, -1)) and body["next"] is None
+    assert "facets" not in body  # only the first page counts them
+
+    # Malformed numbers are ignored, never an asyncpg overflow or ValueError (a 500).
+    for bad in ({"before": "9" * 30}, {"user": "²,9" + "9" * 25}, {"q": "9" * 30}, {"q": "²"}):
+        assert (await settings("GET", "/cases", **bad))[0] == 200, bad
 
     async def numbers(**query):
         return [c["number"] for c in (await settings("GET", "/cases", **query))[1]["cases"]]
@@ -712,6 +717,10 @@ async def test_case_list_filters_and_pages(settings, cases):
     }
     assert len(await numbers(q="mod-b")) == 20
     assert len(await numbers(q="ARIA")) == 30  # USER is the target of the even-numbered cases
+
+    # A timeout with no expiry shows as inactive, so "active" must not list it either.
+    await cases.create_case(GUILD, USER, MOD_A, "timeout", "no expiry")
+    assert 61 not in await numbers(active="1")
 
 
 @pytest.mark.asyncio
