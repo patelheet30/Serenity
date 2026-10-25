@@ -410,7 +410,7 @@
 							<div class="rowline" style="margin-bottom:6px">
 								<span class="fg2" style="font-size:12px">Rate before → after slowmode, 30 days</span>
 								<span class="legend">
-									<span><i style="background:var(--amber);border-radius:50%;width:8px;height:8px"></i>before</span>
+									<span><i style="background:var(--warn);border-radius:50%;width:8px;height:8px"></i>before</span>
 									<span><i style="background:var(--acc);border-radius:50%;width:8px;height:8px"></i>after</span>
 								</span>
 							</div>
@@ -419,7 +419,7 @@
 									<span class="chname" style="font-weight:400">#{name(e.channel_id)}</span>
 									<span class="trk" aria-hidden="true">
 										<span class="ln" style:left="{(Math.min(e.after, e.before) / top) * 100}%" style:width="{(Math.abs(e.before - e.after) / top) * 100}%"></span>
-										<span class="dot" style:left="{(e.before / top) * 100}%" style:background="var(--amber)"></span>
+										<span class="dot" style:left="{(e.before / top) * 100}%" style:background="var(--warn)"></span>
 										<span class="dot" style:left="{(e.after / top) * 100}%" style:background="var(--acc)"></span>
 									</span>
 									<span class="mono" style="text-align:right;font-size:12px">{e.before.toFixed(0)} → {e.after.toFixed(0)}</span>

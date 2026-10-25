@@ -152,15 +152,15 @@
 				>
 					<defs>
 						<linearGradient id="dg" x1="0" x2="0" y1="0" y2="1">
-							<stop offset="0" stop-color="#8fe3bf" stop-opacity=".22" />
-							<stop offset="1" stop-color="#8fe3bf" stop-opacity="0" />
+							<stop offset="0" stop-color="#ffb547" stop-opacity=".22" />
+							<stop offset="1" stop-color="#ffb547" stop-opacity="0" />
 						</linearGradient>
 					</defs>
-					<line x1="0" x2={W} y1={y(threshold)} y2={y(threshold)} stroke="rgba(240,180,106,.6)" stroke-dasharray="3 4" vector-effect="non-scaling-stroke" />
-					<text x={W - 4} y={y(threshold) - 5} fill="#f0b46a" font-size="10" text-anchor="end" font-family="Geist Mono, monospace">threshold {threshold}</text>
+					<line x1="0" x2={W} y1={y(threshold)} y2={y(threshold)} stroke="rgba(255,127,107,.6)" stroke-dasharray="3 4" vector-effect="non-scaling-stroke" />
+					<text x={W - 4} y={y(threshold) - 5} fill="#ff7f6b" font-size="10" text-anchor="end" font-family="Geist Mono, monospace">threshold {threshold}</text>
 					<path d="{path} L{W} {H} L0 {H}Z" fill="url(#dg)" />
-					<path d={path} fill="none" stroke="#8fe3bf" stroke-width="1.6" vector-effect="non-scaling-stroke" />
-					<circle cx={W - 2} cy={last} r="3" fill="#8fe3bf" style="filter:drop-shadow(0 0 6px #8fe3bf)" />
+					<path d={path} fill="none" stroke="#ffb547" stroke-width="1.6" vector-effect="non-scaling-stroke" />
+					<circle cx={W - 2} cy={last} r="3" fill="#ffb547" style="filter:drop-shadow(0 0 6px #ffb547)" />
 				</svg>
 			</div>
 			<ol class="demo-log" aria-live="off">
@@ -183,9 +183,9 @@
 			<div>
 				<div class="wbar" aria-hidden="true">
 					<div style="flex:40;background:var(--acc)">40</div>
-					<div style="flex:30;background:#6fb99a">30</div>
-					<div style="flex:20;background:#4f8d74">20</div>
-					<div style="flex:10;background:#3a6655;color:var(--fg)">10</div>
+					<div style="flex:30;background:#e0973a">30</div>
+					<div style="flex:20;background:#b4772d">20</div>
+					<div style="flex:10;background:#7a5426;color:var(--fg)">10</div>
 				</div>
 				<div class="wlist">
 					<div><b>40%</b><span>Current rate</span></div>

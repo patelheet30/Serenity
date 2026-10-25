@@ -23,11 +23,11 @@
 
 <span class="saved" role="status">
 	<Icon name={status === 'error' ? 'warn' : 'check'} />
-	<span class="txt" class:amber={status === 'error'}>{text}</span>
+	<span class="txt" class:warn={status === 'error'}>{text}</span>
 </span>
 
 <style>
-	.amber {
-		color: var(--amber);
+	.warn {
+		color: var(--warn);
 	}
 </style>
