@@ -37,6 +37,20 @@ plugin = arc.GatewayPlugin("tasks")
 _PERMISSION_FAILURES: dict[int, int] = {}
 _MAX_PERMISSION_FAILURES = 5
 
+# When each guild was last scored, for /serenity guild interval (1-5 min). In-memory, so a
+# restart scores every guild straight away.
+_LAST_SCORED: dict[int, float] = {}
+
+
+def _due(guild_id: int, interval_seconds: int, now: float) -> bool:
+    """Whether a guild's update interval has passed. The loop ticks every 60 s, so shorter
+    intervals (the table default is 30) mean every tick; the slack absorbs tick jitter."""
+    last = _LAST_SCORED.get(guild_id)
+    if last is not None and now - last < interval_seconds - 5:
+        return False
+    _LAST_SCORED[guild_id] = now
+    return True
+
 
 @arc.utils.interval_loop(seconds=SLOWMODE_CONFIG.SLOWMODE_CHECK_INTERVAL)
 async def update_slowmode(
@@ -56,7 +70,9 @@ async def update_slowmode(
             ctx_guild_id.set(guild_id)
 
             guild_config = await repo.get_guild_config(guild_id)
-            if not guild_config.is_enabled:
+            if not guild_config.is_enabled or not _due(
+                guild_id, guild_config.update_interval, time.monotonic()
+            ):
                 ctx_guild_id.set(None)
                 continue
 

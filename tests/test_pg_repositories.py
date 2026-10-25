@@ -210,3 +210,13 @@ async def test_pattern_hour_is_folded_once(pg_repo: Repository):
     await tasks._record_pattern_sample(pg_repo, CHANNEL, 3, 18, 9.0, hour_end - 7 * 86400)
     row = await pg_repo.pool.fetchrow("SELECT avg_message_rate, sample_count FROM channel_patterns")
     assert (row["sample_count"], row["avg_message_rate"]) == (1, 2.0)
+
+
+def test_guild_update_interval_is_honoured():
+    """/serenity guild interval (stored in seconds) spaces out scoring; the loop ticks each 60 s."""
+    tasks._LAST_SCORED.clear()
+    assert tasks._due(GUILD, 180, now=0)
+    assert not tasks._due(GUILD, 180, now=60)
+    assert not tasks._due(GUILD, 180, now=120)
+    assert tasks._due(GUILD, 180, now=178)  # a tick that lands a little early still counts
+    assert tasks._due(OTHER_GUILD, 30, now=0) and tasks._due(OTHER_GUILD, 30, now=60)
