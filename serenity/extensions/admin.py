@@ -323,6 +323,8 @@ async def set_channel_threshold(
     try:
         threshold_value = threshold if threshold > 0 else None
         await repo.get_channel_config(target_channel_id, ctx.guild_id)
+        # Pass 0 through: the repository stores it as NULL (server default); None would mean
+        # "don't change the threshold".
         await repo.update_channel_config(channel_id=target_channel_id, threshold=threshold)
         if threshold_value is not None:
             description = (
