@@ -3,7 +3,7 @@
 	import Avatar from '../components/Avatar.svelte';
 	import EmptyState from '../components/EmptyState.svelte';
 	import Segmented from '../components/Segmented.svelte';
-	import { ACTION_COLORS, type CaseUser } from './moderation';
+	import { ACTIONS as ACTION_META, GROUPS, type CaseUser } from './moderation';
 
 	type Stats = {
 		days: number;
@@ -16,12 +16,8 @@
 
 	let { guildId, onerror }: { guildId: string; onerror: (e: unknown) => void } = $props();
 
-	const GROUPS = [
-		{ n: 'Removals', a: ['ban', 'softban', 'kick'], c: 'var(--red)' },
-		{ n: 'Restrictions', a: ['timeout', 'warn'], c: 'var(--amber)' },
-		{ n: 'Reversals', a: ['unban', 'untimeout'], c: 'var(--acc)' }
-	];
-	const ACTIONS = Object.keys(ACTION_COLORS);
+	const ACTIONS = Object.keys(ACTION_META);
+	const color = (a: string) => ACTION_META[a]?.color ?? 'var(--fg3)';
 	const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
 
 	let days = $state(30);
@@ -31,6 +27,7 @@
 		const id = guildId;
 		const d = days;
 		let stale = false;
+		stats = null; // never show one range's numbers under another's label
 		api<Stats>(`/guilds/${id}/modstats?days=${d}`).then((s) => !stale && (stats = s), (e) => !stale && onerror(e));
 		return () => (stale = true);
 	});
@@ -40,7 +37,7 @@
 </script>
 
 <div class="phead">
-	<div><h1>Mod stats</h1><p>Last {days} days · the same numbers as <span class="mono">/modstats</span></p></div>
+	<div><h1>Mod stats</h1><p>Last {stats?.days ?? days} days · the same numbers as <span class="mono">/modstats</span></p></div>
 	<Segmented label="Range" bind:value={days} options={[7, 30, 90].map((d) => ({ value: d, label: `${d}d` }))} />
 </div>
 
@@ -61,7 +58,7 @@
 		<div class="tile"><b>{stats.active.warnings}</b><span>Active warnings now</span></div>
 	</div>
 	{#if !cases}
-		<section class="pane"><EmptyState icon="stats">No moderation actions in the last {days} days.</EmptyState></section>
+		<section class="pane"><EmptyState icon="stats">No moderation actions in the last {stats.days} days.</EmptyState></section>
 	{:else}
 		<div class="grid">
 			<section class="pane s8" aria-labelledby="otT">
@@ -71,7 +68,7 @@
 					<div class="leg2">{#each GROUPS as g (g.n)}<span><i style:background={g.c}></i>{g.n}</span>{/each}</div>
 				</div>
 				<div class="pb">
-					<svg viewBox="0 0 {W} {H + 18}" style="width:100%;height:auto" role="img" aria-label="Cases per day over {days} days, peak {peak}">
+					<svg viewBox="0 0 {W} {H + 18}" style="width:100%;height:auto" role="img" aria-label="Cases per day over {stats.days} days, peak {peak}">
 						{#each [0, 0.5, 1] as f (f)}
 							<line x1="0" x2={W} y1={H - f * H * 0.92} y2={H - f * H * 0.92} stroke="rgba(236,226,208,.07)" />
 						{/each}
@@ -86,7 +83,7 @@
 								{/if}
 							{/each}
 						{/each}
-						<text x="0" y={H + 14} fill="#8f887a" font-size="10" font-family="Geist Mono, monospace">{days}d ago</text>
+						<text x="0" y={H + 14} fill="#8f887a" font-size="10" font-family="Geist Mono, monospace">{stats.days}d ago</text>
 						<text x={W} y={H + 14} fill="#8f887a" font-size="10" text-anchor="end" font-family="Geist Mono, monospace">today</text>
 					</svg>
 				</div>
@@ -97,7 +94,7 @@
 					{#each types as [a, n], i (a)}
 						<div class="hb">
 							<span class="act" data-a={a}>{a}</span>
-							<span><span class="b" style:display="block" style:width="{(n / types[0][1]) * 100}%" style:background={ACTION_COLORS[a]} style:animation-delay="{i * 30}ms"></span></span>
+							<span><span class="b" style:display="block" style:width="{(n / types[0][1]) * 100}%" style:background={color(a)} style:animation-delay="{i * 30}ms"></span></span>
 							<span class="mono" style="text-align:right">{n}</span>
 						</div>
 					{/each}
@@ -107,7 +104,7 @@
 				<div class="ph">
 					<h2 id="bmT">By moderator</h2>
 					<span class="sp"></span>
-					<div class="leg2">{#each ACTIONS as a (a)}<span><i style:background={ACTION_COLORS[a]}></i>{a}</span>{/each}</div>
+					<div class="leg2">{#each ACTIONS as a (a)}<span><i style:background={color(a)}></i>{a}</span>{/each}</div>
 				</div>
 				<div class="scroll">
 					<table class="tbl">
@@ -126,7 +123,7 @@
 									<td>
 										<div class="stk" style:width="{(total / busiest) * 100}%">
 											{#each ACTIONS.filter((a) => m.counts[a]) as a (a)}
-												<i style:flex={m.counts[a]} style:background={ACTION_COLORS[a]} title="{a}: {m.counts[a]}"></i>
+												<i style:flex={m.counts[a]} style:background={color(a)} title="{a}: {m.counts[a]}"></i>
 											{/each}
 										</div>
 									</td>

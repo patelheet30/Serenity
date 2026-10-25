@@ -17,6 +17,7 @@
 		logging: { types: { enabled: boolean }[] };
 		history: Change[];
 		cases: { cases: Case[] };
+		analytics: { changes: Record<'6h' | '24h', number> };
 		stats: { active: { timeouts: number; warnings: number } };
 	};
 
@@ -44,9 +45,11 @@
 			api<Data['logging']>(`${g}/logging`),
 			api<Change[]>(`${g}/slowmode/history`),
 			api<Data['cases']>(`${g}/cases`),
-			api<Data['stats']>(`${g}/modstats?days=7`)
+			api<Data['stats']>(`${g}/modstats?days=7`),
+			api<Data['analytics']>(`${g}/slowmode/analytics`)
 		]).then(
-			([slowmode, modules, logging, history, cases, stats]) => !stale && (data = { slowmode, modules, logging, history, cases, stats }),
+			([slowmode, modules, logging, history, cases, stats, analytics]) =>
+				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics }),
 			(e) => !stale && onerror(e)
 		);
 		// The pulse keeps moving; a failed refresh keeps the last numbers (the page loaded fine).
@@ -116,7 +119,7 @@
 				<dl class="kv">
 					<dt>Active warnings</dt><dd>{d.stats.active.warnings}</dd>
 					<dt>Active timeouts</dt><dd>{d.stats.active.timeouts}</dd>
-					<dt>Slowmode changes, 6h</dt><dd>{d.history.filter((h) => h.at * 1000 > Date.now() - 6 * 3_600_000).length}</dd>
+					<dt>Slowmode changes, 6h</dt><dd>{d.analytics.changes['6h']}</dd>
 					<dt>Log types enabled</dt><dd>{d.logging.types.filter((t) => t.enabled).length} / {d.logging.types.length}</dd>
 				</dl>
 			</div>

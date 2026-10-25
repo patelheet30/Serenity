@@ -24,12 +24,19 @@ export function duration(seconds: number | null): string {
 	return `${Math.floor(seconds / 86400)}d`;
 }
 
-export const ACTION_COLORS: Record<string, string> = {
-	ban: '#ef8a78',
-	softban: '#c96e60',
-	kick: '#f0b46a',
-	timeout: '#d9a05c',
-	warn: '#e6d38c',
-	unban: '#8fe3bf',
-	untimeout: '#5fa98a'
+/** Every case action: its colour, and which group the "Actions over time" chart stacks it in. */
+export const ACTIONS: Record<string, { color: string; group: 'Removals' | 'Restrictions' | 'Reversals' }> = {
+	ban: { color: '#ef8a78', group: 'Removals' },
+	softban: { color: '#c96e60', group: 'Removals' },
+	kick: { color: '#f0b46a', group: 'Removals' },
+	timeout: { color: '#d9a05c', group: 'Restrictions' },
+	warn: { color: '#e6d38c', group: 'Restrictions' },
+	untimeout: { color: '#5fa98a', group: 'Reversals' },
+	unban: { color: '#8fe3bf', group: 'Reversals' }
 };
+
+export const GROUPS = [
+	{ n: 'Removals', c: 'var(--red)' },
+	{ n: 'Restrictions', c: 'var(--amber)' },
+	{ n: 'Reversals', c: 'var(--acc)' }
+].map((g) => ({ ...g, a: Object.keys(ACTIONS).filter((a) => ACTIONS[a].group === g.n) }));

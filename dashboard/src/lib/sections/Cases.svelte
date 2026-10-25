@@ -9,7 +9,7 @@
 	import { palette, registerCommands } from '../palette.svelte';
 	import { toast } from '../toast.svelte';
 	import { ago, isTyping, MOD } from '../util';
-	import { duration, type Case, type CaseUser } from './moderation';
+	import { ACTIONS as ACTION_META, duration, type Case, type CaseUser } from './moderation';
 
 	type Detail = Case & { history: Case[]; warnings: number };
 	type Page = {
@@ -22,7 +22,7 @@
 
 	let { guildId, onerror }: { guildId: string; onerror: (e: unknown) => void } = $props();
 
-	const ACTIONS = ['ban', 'softban', 'kick', 'timeout', 'untimeout', 'unban', 'warn'];
+	const ACTIONS = Object.keys(ACTION_META);
 	const who = (u: CaseUser) => u.name ?? u.id;
 
 	let q = $state('');
@@ -75,10 +75,12 @@
 	});
 
 	// The first page, again whenever a filter changes.
+	let generation = 0; // bumped per first-page load; older "Load more" answers are dropped
 	$effect(() => {
 		const id = guildId;
 		const p = params();
 		version;
+		generation++;
 		let stale = false;
 		api<Page>(`/guilds/${id}/cases?${p}`).then(
 			(r) => {
@@ -96,8 +98,10 @@
 	async function loadMore() {
 		if (!page?.next || more) return;
 		more = true;
+		const gen = generation;
 		try {
 			const r = await api<Page>(`/guilds/${guildId}/cases?${params(page.next)}`);
+			if (gen !== generation || !page) return; // the filters changed meanwhile
 			rows.push(...r.cases);
 			page.next = r.next;
 		} catch (e) {
@@ -122,6 +126,7 @@
 	}
 
 	function close() {
+		detailFor++; // an open() still in flight must not bring the pane back
 		selected = null;
 		detail = null;
 		sheet = false;

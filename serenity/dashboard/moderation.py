@@ -5,6 +5,7 @@ Reason edits and clearing warnings make the same database writes as /reason and 
 
 import time
 from collections import defaultdict
+from itertools import islice
 from typing import Any, Optional
 
 import hikari
@@ -71,9 +72,11 @@ def _name_matches(request: web.Request, text: str) -> list[int]:
     """Members whose name contains `text`, so searching "kiri" finds kiri_nyx's cases."""
     text = text.lower()
     members = request.app[BOT].cache.get_members_view_for_guild(guild_id(request)).values()
-    return [m.id for m in members if text in m.username.lower() or text in m.display_name.lower()][
-        :100
-    ]
+    # Stops at 100 matches rather than scanning every cached member for a common substring.
+    matches = (
+        m.id for m in members if text in m.username.lower() or text in m.display_name.lower()
+    )
+    return list(islice(matches, 100))
 
 
 @routes.get(f"{GUILD}/cases")
