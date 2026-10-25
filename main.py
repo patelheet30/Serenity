@@ -10,6 +10,7 @@ import hikari
 from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
+from serenity.dashboard.api import build_api
 from serenity.database.import_sqlite import cutover_if_needed
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
@@ -87,7 +88,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
 
-    await metrics_server.start()
+    await metrics_server.start(api=build_api(bot, repo.pool))
 
     BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("ENVIRONMENT", "local")})
 

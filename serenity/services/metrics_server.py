@@ -62,12 +62,14 @@ class MetricsServer:
         self.port = port
         self._runner: web.AppRunner | None = None
 
-    async def start(self) -> None:
-        """Start the metrics HTTP server."""
+    async def start(self, api: web.Application | None = None) -> None:
+        """Start the HTTP server, with the dashboard API mounted at /api if given."""
         app = web.Application()
         app.router.add_get("/metrics", _metrics_handler)
         app.router.add_get("/health", _health_handler)
         app.router.add_get("/", _health_handler)
+        if api is not None:
+            app.add_subapp("/api", api)
 
         # No access log: Docker probes /health every 10 s and Prometheus scrapes every 15 s.
         self._runner = web.AppRunner(app, access_log=None)
