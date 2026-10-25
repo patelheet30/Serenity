@@ -55,6 +55,7 @@
 		history = null;
 		analytics = null;
 		historyFor = null;
+		liveFailing = false;
 		let loaded = false; // plain, so reading it doesn't make this effect depend on `history`
 		async function tick() {
 			if (document.hidden && loaded) return;
@@ -401,7 +402,7 @@
 						</div>
 						<div class="tile"><b>{fmt(busy.length ? Math.round(busy.reduce((a, h) => a + h.avg_slowmode, 0) / busy.length) : 0)}</b><span>Avg slowmode</span></div>
 						<div class="tile"><b>{fmt(Math.max(0, ...hourly.map((h) => h.max_slowmode)))}</b><span>Max slowmode</span></div>
-						<div class="tile"><b>{analytics.changes['24h']}</b><span>Changes, 24 h</span></div>
+						<div class="tile"><b>{analytics.changes['24h'].toLocaleString()}</b><span>Changes, 24 h</span></div>
 					</div>
 					{#if analytics.effectiveness.length}
 						{@const top = Math.max(...analytics.effectiveness.map((e) => Math.max(e.before, e.after))) * 1.1 || 1}
