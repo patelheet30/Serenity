@@ -55,7 +55,7 @@ class DiscordOAuth:
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
 
-    def authorize_url(self, state: str) -> str:
+    def authorize_url(self, state: str, prompt: str = "none") -> str:
         return "https://discord.com/oauth2/authorize?" + urlencode(
             {
                 "client_id": self.client_id,
@@ -63,7 +63,9 @@ class DiscordOAuth:
                 "scope": "identify guilds",
                 "redirect_uri": self.redirect_uri,
                 "state": state,
-                "prompt": "none",
+                # "none" skips the screen for returning users; callback() retries with
+                # "consent" if Discord answers consent_required.
+                "prompt": prompt,
             }
         )
 
@@ -177,8 +179,11 @@ class Sessions:
 
         try:
             tokens = await oauth.refresh(tokens["refresh_token"])
-        except aiohttp.ClientResponseError:
-            return None
+        except aiohttp.ClientResponseError as e:
+            if e.status in (400, 401):  # invalid_grant: revoked or already rotated
+                return None
+            raise  # rate limit or Discord outage: keep the session
+
         await self.pool.execute(
             "UPDATE dashboard_sessions SET tokens = $2 WHERE id_hash = $1",
             session.id_hash,

@@ -8,3 +8,5 @@ CREATE TABLE dashboard_sessions (
     created_at BIGINT NOT NULL,
     last_seen  BIGINT NOT NULL
 );
+
+CREATE INDEX idx_dashboard_sessions_last_seen ON dashboard_sessions (last_seen);  -- expiry cleanup

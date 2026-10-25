@@ -3,6 +3,7 @@
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import hikari
 import pytest
 import pytest_asyncio
@@ -11,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.fernet import Fernet
 
 from serenity.dashboard import auth
-from serenity.dashboard.api import SESSION_COOKIE, SESSIONS, build_api
+from serenity.dashboard.api import OAUTH, SESSION_COOKIE, SESSIONS, build_api
 from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
 
 GUILD = 111
@@ -100,6 +101,12 @@ async def client_for():
     async def make(bot):
         api = build_api(bot, pool=None)
         api[SESSIONS] = FakeSessions()
+
+        async def fake_oauth(app):
+            app[OAUTH] = MagicMock(authorize_url=lambda state, prompt: f"https://discord/{prompt}")
+            yield
+
+        api.cleanup_ctx.append(fake_oauth)
         root = web.Application()
         root.add_subapp("/api", api)
         client = TestClient(TestServer(root))
@@ -183,6 +190,19 @@ async def test_me(client_for):
     assert (await resp.json())["id"] == str(USER)
 
 
+@pytest.mark.asyncio
+async def test_login_falls_back_to_consent_screen(client_for):
+    client = await client_for(make_bot())
+    resp = await client.get("/api/auth/login", allow_redirects=False)
+    assert resp.headers["Location"] == "https://discord/none"
+
+    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
+    assert resp.headers["Location"].endswith("/api/auth/login?prompt=consent")
+
+    resp = await client.get("/api/auth/login?prompt=consent", allow_redirects=False)
+    assert resp.headers["Location"] == "https://discord/consent"
+
+
 # --- Sessions (Postgres) -------------------------------------------------------------------------
 
 
@@ -211,3 +231,22 @@ async def test_sessions_roundtrip_and_idle_expiry(pg_repo):
     token = await sessions.create(user, tokens)
     await sessions.delete(await sessions.get(token))
     assert await sessions.get(token) is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_failures(pg_repo):
+    """A revoked grant ends the session; a Discord outage must not."""
+    sessions = Sessions(pg_repo.pool, Fernet.generate_key().decode())
+    user = {"id": str(USER), "username": "aria"}
+    token = await sessions.create(
+        user, {"access_token": "a", "refresh_token": "r", "expires_at": 0}
+    )
+    session = await sessions.get(token)
+
+    def failing(status):
+        err = aiohttp.ClientResponseError(MagicMock(), (), status=status)
+        return MagicMock(refresh=AsyncMock(side_effect=err))
+
+    with pytest.raises(aiohttp.ClientResponseError):
+        await sessions.access_token(session, failing(503))
+    assert await sessions.access_token(session, failing(400)) is None
