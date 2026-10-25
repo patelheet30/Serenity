@@ -596,3 +596,29 @@ def test_dashboard_limits_match_the_slash_commands():
     assert limits("set_threshold", "threshold") == (1, dash.THRESHOLD_MAX)
     assert limits("set_channel_threshold", "threshold") == (0, dash.THRESHOLD_MAX)
     assert limits("set_update_interval", "interval") == dash.INTERVAL_MINUTES
+
+
+@pytest.mark.asyncio
+async def test_missing_fields_are_422_not_500(settings):
+    assert (await settings("PUT", "/modules/logging", {}))[0] == 422
+    assert (await settings("PUT", f"/slowmode/channels/{TEXT_CHANNEL}", {"enabled": None}))[
+        0
+    ] == 422
+
+
+@pytest.mark.asyncio
+async def test_change_log_posts_the_oldest_early_when_full(monkeypatch):
+    monkeypatch.setattr(ChangeLog, "DEBOUNCE", 0.05)
+    monkeypatch.setattr(ChangeLog, "PENDING_MAX", 2)
+    svc = MagicMock(log_dashboard_change=AsyncMock())
+    changes = ChangeLog(svc)
+
+    for i in range(3):
+        changes.record(GUILD, USER, f"setting {i}", "a", "b")
+    assert len(changes._pending) == 2
+    await asyncio.sleep(0)  # the early post runs
+    assert svc.log_dashboard_change.await_args.kwargs["setting"] == "setting 0"
+
+    await asyncio.sleep(0.1)
+    assert svc.log_dashboard_change.await_count == 3  # each posted once
+    assert changes._pending == {}

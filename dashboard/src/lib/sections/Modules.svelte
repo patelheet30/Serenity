@@ -47,7 +47,8 @@
 			note = { k, kind: missing.length ? 'need' : 'block', other: missing.length ? missing : blocking };
 			return;
 		}
-		if (!(await put(k, on))) return void (d.enabled[k] = !on);
+		// Revert on the current data: a concurrent write may have replaced `d` meanwhile.
+		if (!(await put(k, on))) return void (data!.enabled[k] = !on);
 		toast(`${title(k)} turned ${on ? 'on' : 'off'}`, { undo: () => set(k, !on) });
 	}
 

@@ -103,7 +103,9 @@ async def _slowmode_json(request: web.Request) -> dict[str, Any]:
         "enabled": config.is_enabled,
         "default_threshold": config.default_threshold,
         # Stored in seconds; the table default (30) predates the 1-5 minute command.
-        "interval": min(max(config.update_interval // 60, 1), 5),
+        "interval": min(
+            max(config.update_interval // 60, INTERVAL_MINUTES[0]), INTERVAL_MINUTES[1]
+        ),
         "channels": [
             {
                 "id": str(c.channel_id),
@@ -165,7 +167,9 @@ async def put_slowmode_channel(request: web.Request) -> web.Response:
     enabled = bool_field(data, "enabled") if "enabled" in data else None
     threshold = None
     if "threshold" in data:
-        threshold = 0 if data["threshold"] is None else int_field(data, "threshold", 0, 100)
+        threshold = (
+            0 if data["threshold"] is None else int_field(data, "threshold", 0, THRESHOLD_MAX)
+        )
 
     await repo.update_channel_config(channel.id, is_enabled=enabled, threshold=threshold)
     if enabled is not None:

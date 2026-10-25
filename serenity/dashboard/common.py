@@ -55,16 +55,17 @@ async def read_json(request: web.Request) -> dict[str, Any]:
 
 
 def int_field(data: dict[str, Any], key: str, lo: int, hi: int) -> int:
-    value = data[key]
+    value = data.get(key)
     if type(value) is not int or not lo <= value <= hi:  # type() so True isn't 1
         raise ApiError(422, "invalid", f"{key} must be a whole number from {lo} to {hi}.")
     return value
 
 
 def bool_field(data: dict[str, Any], key: str) -> bool:
-    if not isinstance(data[key], bool):
+    value = data.get(key)
+    if not isinstance(value, bool):  # a missing key is a 422 too, not a KeyError 500
         raise ApiError(422, "invalid", f"{key} must be true or false.")
-    return data[key]
+    return value
 
 
 def guild_channel(
@@ -92,6 +93,7 @@ class ChangeLog:
     """
 
     DEBOUNCE = 10.0
+    PENDING_MAX = 1000  # settings waiting to be posted; past this the oldest is posted early
 
     def __init__(self, logging_svc: LoggingService):
         self.logging_svc = logging_svc
@@ -103,15 +105,27 @@ class ChangeLog:
         if key in self._pending:
             self._pending[key][1] = str(new)
             return
+        if len(self._pending) >= self.PENDING_MAX:
+            # A burst of distinct settings (e.g. ignoring hundreds of users) mustn't grow this
+            # without bound: post the oldest now instead of waiting out its debounce.
+            oldest = next(iter(self._pending))
+            self._spawn(self._post(oldest, self._pending.pop(oldest)))
         self._pending[key] = [str(old), str(new)]
         # ponytail: entries still waiting when the bot stops are lost; fine for an audit nicety.
-        task = asyncio.create_task(self._post_later(key))
+        self._spawn(self._post_later(key))
+
+    def _spawn(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _post_later(self, key: tuple[int, int, str]) -> None:
         await asyncio.sleep(self.DEBOUNCE)
-        old, new = self._pending.pop(key)
+        if key in self._pending:  # not already posted early by PENDING_MAX
+            await self._post(key, self._pending.pop(key))
+
+    async def _post(self, key: tuple[int, int, str], change: list[str]) -> None:
+        old, new = change
         if old != new:
             guild, user, setting = key
             await self.logging_svc.log_dashboard_change(
