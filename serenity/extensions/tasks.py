@@ -42,6 +42,32 @@ _MAX_PERMISSION_FAILURES = 5
 _LAST_SCORED: dict[int, float] = {}
 
 
+# Slowmode raised in a channel, waiting to be measured: channel -> (applied at, seconds,
+# messages/min over the 5 minutes before). In memory: a restart drops at most 5 minutes' worth.
+_PENDING_EFFECT: dict[int, tuple[int, int, float]] = {}
+EFFECT_WINDOW = 300  # compare the 5 minutes before a raise with the 5 minutes after
+
+
+async def _record_due_effectiveness(repo: Repository, now: int) -> None:
+    """Record before/after rates for raises whose 5-minute window has passed.
+
+    Feeds slowmode_effectiveness, which the engine's effectiveness factor and the dashboard's
+    before/after chart read.
+    """
+    for channel_id, entry in list(_PENDING_EFFECT.items()):
+        applied_at, seconds, before = entry
+        if now - applied_at < EFFECT_WINDOW:
+            continue
+        after = await repo.get_message_rate(channel_id, EFFECT_WINDOW)
+        await repo.record_slowmode_effectiveness(
+            channel_id, seconds, before, after, now - applied_at
+        )
+        # Only once recorded (a failure or cancellation leaves it for the next check), and
+        # only if a newer raise didn't replace it while we were writing.
+        if _PENDING_EFFECT.get(channel_id) == entry:
+            del _PENDING_EFFECT[channel_id]
+
+
 def _due(guild_id: int, interval_seconds: int, now: float) -> bool:
     """Whether a guild's update interval has passed. The loop ticks every 60 s, so shorter
     intervals (the table default is 30) mean every tick; the slack absorbs tick jitter."""
@@ -64,6 +90,7 @@ async def update_slowmode(
     total_enabled_channels = 0
 
     try:
+        await _record_due_effectiveness(repo, int(time.time()))
         guilds = client.app.cache.get_available_guilds_view()
 
         for guild_id in guilds.keys():
@@ -111,6 +138,7 @@ async def update_slowmode(
                     EFFECTIVENESS_SCORE.labels(channel_id=str(channel_id)).set(eff_score)
 
                     if decision.slowmode_seconds != current_slowmode:
+                        rate_before = await repo.get_message_rate(channel_id, EFFECT_WINDOW)
                         await client.app.rest.edit_channel(
                             channel_id,
                             rate_limit_per_user=decision.slowmode_seconds,
@@ -131,6 +159,12 @@ async def update_slowmode(
 
                         if decision.slowmode_seconds > current_slowmode:
                             direction = "increase"
+                            # A newer raise replaces one still being measured.
+                            _PENDING_EFFECT[channel_id] = (
+                                int(time.time()),
+                                decision.slowmode_seconds,
+                                rate_before,
+                            )
                         elif decision.slowmode_seconds == 0:
                             direction = "reset"
                         else:
@@ -142,11 +176,13 @@ async def update_slowmode(
                         ).set(decision.slowmode_seconds)
                         ENGINE_DECISIONS.labels(outcome="changed").inc()
 
+                        repo.record_slowmode_sample(channel_id, decision.slowmode_seconds)
                         logger.info(
                             f"Updated slowmode: {current_slowmode}s -> {decision.slowmode_seconds}s "
                             f"(rate: {current_rate:.1f} msg/min, confidence: {decision.confidence:.2f})"
                         )
                     else:
+                        repo.record_slowmode_sample(channel_id, int(current_slowmode))
                         ENGINE_DECISIONS.labels(outcome="unchanged").inc()
                         SLOWMODE_CURRENT.labels(
                             channel_id=str(channel_id), guild_id=str(guild_id)
@@ -270,9 +306,10 @@ async def aggregate_hourly_analytics(repo: Repository) -> None:
         hour_timestamp = (current_time // 3600) * 3600
         completed_hour_start = hour_timestamp - 3600
 
-        channels_with_activity = await _get_active_channels(
-            repo, completed_hour_start, hour_timestamp
-        )
+        # Channels held in slowmode without messages still get their hour's slowmode written.
+        channels_with_activity = set(
+            await _get_active_channels(repo, completed_hour_start, hour_timestamp)
+        ) | repo.sampled_channels(completed_hour_start)
 
         updated_count = 0
         for channel_id in channels_with_activity:
@@ -311,6 +348,7 @@ async def cleanup_old_data(repo: Repository) -> None:
         TASK_ERRORS.labels(task_name="cleanup_old_data").inc()
     finally:
         TASK_DURATION.labels(task_name="cleanup_old_data").observe(time.perf_counter() - task_start)
+
 
 @arc.utils.interval_loop(minutes=5)
 async def expire_timeouts(mod_repo: ModerationRepository) -> None:

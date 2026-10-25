@@ -489,6 +489,37 @@ async def test_slowmode_channels(settings, pg_repo):
 
 
 @pytest.mark.asyncio
+async def test_slowmode_live_rates_match_stats(settings, pg_repo):
+    await settings("PUT", f"/slowmode/channels/{TEXT_CHANNEL}", {})
+    now = int(time.time())
+    for ts in (now, now - 30, now - 90):
+        await pg_repo.record_message_activity(TEXT_CHANNEL, ts)
+    await pg_repo.record_slowmode_change(TEXT_CHANNEL, 0, 5, "busy", 12.5, 0.8)
+
+    status, body = await settings("GET", "/slowmode/live")
+    [live] = body["channels"]
+    assert live["rate"] == await pg_repo.get_message_rate(TEXT_CHANNEL, 60) == 2.0  # as /stats
+    assert live["history"][-2:] == [1, 2] and len(live["history"]) == 24
+    assert live["slowmode"] == 5
+
+    status, body = await settings("GET", "/slowmode/history")
+    assert body == [
+        {
+            "channel_id": str(TEXT_CHANNEL),
+            "old": 0,
+            "new": 5,
+            "reason": "busy",
+            "rate": 12.5,
+            "confidence": 0.8,
+            "at": body[0]["at"],
+        }
+    ]
+    status, body = await settings("GET", "/slowmode/analytics")
+    assert status == 200 and len(body["hourly"]) == 24 and body["effectiveness"] == []
+    assert body["changes"] == {"6h": 1, "24h": 1}
+
+
+@pytest.mark.asyncio
 async def test_log_types(settings):
     status, body = await settings("PUT", "/logging/message", {"enabled": True})
     assert status == 409 and body["error"]["code"] == "no_channel"

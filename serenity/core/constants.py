@@ -35,6 +35,7 @@ class DatabaseConfig:
     POOL_SIZE: int = 5
     ACTIVITY_FLUSH_INTERVAL: int = 5  # seconds between batched message_activity writes
     ACTIVITY_MAX_BUFFERED_KEYS: int = 100_000  # (channel, second) pairs; roughly 15 MB
+    HOURLY_USERS_MAX: int = 200_000  # author ids held for this/last hour's unique counts; ~15 MB
 
 
 SLOWMODE_CONFIG = SlowmodeConfig()
