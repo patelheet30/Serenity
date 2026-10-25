@@ -24,15 +24,13 @@ jobs:
           source: "."
           target: "/home/ubuntu/serenity"
 
-      - name: Build and Restart Docker Container
+      - name: Build, health-check and roll back if needed
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
-          script: |
-            cd /home/ubuntu/serenity
-            # Pull the latest base images and rebuild the bot with the new code
-            docker compose up -d --build
-            # Clean up old, unused Docker images to save disk space
-            docker image prune -f
+          command_timeout: 20m
+          # Builds, waits for /health, and rolls back to the previous image if the new one
+          # never gets healthy (the step then fails). See scripts/deploy.sh.
+          script: bash /home/ubuntu/serenity/scripts/deploy.sh
