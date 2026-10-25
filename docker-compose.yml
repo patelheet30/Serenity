@@ -39,8 +39,8 @@ services:
     restart: unless-stopped
     environment:
       - METRICS_PORT=${METRICS_PORT:-8080}
-    healthcheck:                       # deploy.sh waits for this too
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
+    healthcheck:                       # deploy.sh waits for this; goes through Caddy's /api proxy to the bot
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/api/health"]
       interval: 10s
       timeout: 3s
       retries: 3
