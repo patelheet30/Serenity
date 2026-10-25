@@ -220,3 +220,22 @@ def test_guild_update_interval_is_honoured():
     assert not tasks._due(GUILD, 180, now=120)
     assert tasks._due(GUILD, 180, now=178)  # a tick that lands a little early still counts
     assert tasks._due(OTHER_GUILD, 30, now=0) and tasks._due(OTHER_GUILD, 30, now=60)
+
+
+@pytest.mark.asyncio
+async def test_slowmode_raises_are_measured_after_five_minutes(pg_repo: Repository):
+    """update_slowmode notes each raise; 5 minutes later the before/after rates are recorded."""
+    tasks._PENDING_EFFECT.clear()
+    now = int(time.time())
+    for i in range(20):  # 4 msgs/min over the last 5 minutes
+        await pg_repo.record_message_activity(CHANNEL, now - 10 * i)
+    tasks._PENDING_EFFECT[CHANNEL] = (now - 100, 15, 30.0)
+
+    await tasks._record_due_effectiveness(pg_repo, now)  # window not over yet
+    assert await pg_repo.get_effectiveness([CHANNEL]) == []
+
+    await tasks._record_due_effectiveness(pg_repo, now + 200)
+    [row] = await pg_repo.get_effectiveness([CHANNEL])
+    assert (row["before"], row["after"], row["samples"]) == (30.0, 4.0, 1)
+    assert CHANNEL not in tasks._PENDING_EFFECT
+    assert await pg_repo.get_effectiveness_score(CHANNEL) == 1.0  # 30 -> 4 counts as effective

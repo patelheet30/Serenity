@@ -36,6 +36,13 @@ class Repository:
         # Held for the whole write, so a reader that flushes waits for an in-flight batch.
         self._flush_lock = asyncio.Lock()
 
+        # Per (channel_id, hour start): message authors, and slowmode samples (sum, count, max)
+        # from each update_slowmode check. aggregate_hourly_analytics writes them out when the
+        # hour is over. In memory only: an hour that spans a restart loses what came before.
+        self._hour_users: Dict[tuple[int, int], set[int]] = {}
+        self._hour_user_count = 0
+        self._hour_slowmode: Dict[tuple[int, int], list[int]] = {}
+
     async def init(self) -> None:
         """Create the connection pool, run migrations and start the activity flusher"""
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=self.pool_size)
@@ -245,9 +252,12 @@ class Repository:
         )
 
     async def record_message_activity(
-        self, channel_id: int, timestamp: Optional[int] = None
+        self, channel_id: int, timestamp: Optional[int] = None, user_id: Optional[int] = None
     ) -> None:
-        """Count a message for a channel; written to the DB on the next flush"""
+        """Count a message for a channel; written to the DB on the next flush.
+
+        user_id feeds the hourly unique-user count in channel_analytics.
+        """
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
@@ -261,6 +271,24 @@ class Repository:
             # back 15 minutes anyway.
             del self._activity[next(iter(self._activity))]
         self._activity[key] = self._activity.get(key, 0) + 1
+
+        if user_id is not None:
+            users = self._hour_users.setdefault((channel_id, timestamp // 3600 * 3600), set())
+            # Past the cap new authors aren't counted, so unique_users reads low rather than the
+            # bot running out of memory (only reachable if aggregation stops for hours).
+            if user_id not in users and self._hour_user_count < DATABASE_CONFIG.HOURLY_USERS_MAX:
+                users.add(user_id)
+                self._hour_user_count += 1
+
+    def record_slowmode_sample(
+        self, channel_id: int, seconds: int, timestamp: Optional[int] = None
+    ) -> None:
+        """Note a channel's slowmode at one check, for the hour's avg/max in channel_analytics."""
+        hour = (timestamp if timestamp is not None else int(time.time())) // 3600 * 3600
+        sample = self._hour_slowmode.setdefault((channel_id, hour), [0, 0, 0])
+        sample[0] += seconds
+        sample[1] += 1
+        sample[2] = max(sample[2], seconds)
 
     async def get_message_rate(self, channel_id: int, window_seconds: int = 60) -> float:
         """Get the message rate (messages per minute) for a channel over a time window"""
@@ -319,25 +347,32 @@ class Repository:
         )
         return [dict(row) for row in rows]
 
-    async def get_hourly_messages(self, channel_ids: List[int], hours: int = 24) -> List[int]:
-        """Messages per hour across these channels from channel_analytics, oldest hour first."""
+    async def get_hourly_analytics(self, channel_ids: List[int], hours: int = 24) -> List[dict]:
+        """Per hour across these channels, oldest first: messages, users (unique per channel,
+        summed over channels), and the average and highest slowmode. Hours with no row are 0."""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         # hour_timestamp marks the end of the hour aggregate_hourly_analytics summed.
         end = int(time.time() // 3600) * 3600
         rows = await self.pool.fetch(
-            """SELECT hour_timestamp, SUM(total_messages) AS n FROM channel_analytics
+            """SELECT hour_timestamp, SUM(total_messages) AS messages, SUM(unique_users) AS users,
+                ROUND(AVG(avg_slowmode))::int AS avg_slowmode, MAX(max_slowmode) AS max_slowmode
+            FROM channel_analytics
             WHERE channel_id = ANY($1::bigint[]) AND hour_timestamp > $2 - $3 * 3600
             GROUP BY hour_timestamp""",
             channel_ids,
             end,
             hours,
         )
-        totals = [0] * hours
+        hourly = [
+            {"messages": 0, "users": 0, "avg_slowmode": 0, "max_slowmode": 0} for _ in range(hours)
+        ]
         for row in rows:
-            totals[hours - 1 - (end - row["hour_timestamp"]) // 3600] = row["n"]
-        return totals
+            hourly[hours - 1 - (end - row["hour_timestamp"]) // 3600] = {
+                k: row[k] for k in ("messages", "users", "avg_slowmode", "max_slowmode")
+            }
+        return hourly
 
     async def get_effectiveness(self, channel_ids: List[int], days: int = 30) -> List[dict]:
         """Average message rate before and after slowmode changes, per channel."""
@@ -485,7 +520,12 @@ class Repository:
         return score if score is not None else 0.0
 
     async def aggregate_hourly_analytics(self, channel_id: int) -> None:
-        """Aggregate message activity into hourly analytics for a channel"""
+        """Write the last completed hour's analytics row for a channel.
+
+        Messages come from message_activity; unique users and avg/max slowmode from what this
+        process saw during the hour. Re-running for the same hour (e.g. after a restart, when
+        those in-memory counts are gone) never lowers what an earlier run wrote.
+        """
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
@@ -501,16 +541,37 @@ class Repository:
             hour_timestamp,
         )
 
+        users = self._hour_users.pop((channel_id, start_time), set())
+        self._hour_user_count -= len(users)
+        slowmode_sum, samples, slowmode_max = self._hour_slowmode.pop(
+            (channel_id, start_time), [0, 0, 0]
+        )
+        # Hours before the one just written can't be aggregated any more, for any channel
+        # (a managed channel with no messages would otherwise keep its samples forever).
+        for buffer in (self._hour_users, self._hour_slowmode):
+            for key in [k for k in buffer if k[1] < start_time]:
+                stale = buffer.pop(key)
+                if buffer is self._hour_users:
+                    self._hour_user_count -= len(stale)
+
         if total:
             await self.pool.execute(
                 """INSERT INTO channel_analytics
                 (channel_id, hour_timestamp, total_messages, unique_users, avg_slowmode, max_slowmode)
-                VALUES ($1, $2, $3, 0, 0, 0)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (channel_id, hour_timestamp) DO UPDATE SET
-                total_messages = EXCLUDED.total_messages""",
+                total_messages = EXCLUDED.total_messages,
+                unique_users = GREATEST(channel_analytics.unique_users, EXCLUDED.unique_users),
+                avg_slowmode = CASE WHEN $7 > 0 THEN EXCLUDED.avg_slowmode
+                    ELSE channel_analytics.avg_slowmode END,
+                max_slowmode = GREATEST(channel_analytics.max_slowmode, EXCLUDED.max_slowmode)""",
                 channel_id,
                 hour_timestamp,
                 total,
+                len(users),
+                round(slowmode_sum / samples) if samples else 0,
+                slowmode_max,
+                samples,
             )
 
     async def get_channel_analytics(self, channel_id: int, hours_back: int = 24) -> List[dict]:

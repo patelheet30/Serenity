@@ -42,6 +42,28 @@ _MAX_PERMISSION_FAILURES = 5
 _LAST_SCORED: dict[int, float] = {}
 
 
+# Slowmode raised in a channel, waiting to be measured: channel -> (applied at, seconds,
+# messages/min over the 5 minutes before). In memory: a restart drops at most 5 minutes' worth.
+_PENDING_EFFECT: dict[int, tuple[int, int, float]] = {}
+EFFECT_WINDOW = 300  # compare the 5 minutes before a raise with the 5 minutes after
+
+
+async def _record_due_effectiveness(repo: Repository, now: int) -> None:
+    """Record before/after rates for raises whose 5-minute window has passed.
+
+    Feeds slowmode_effectiveness, which the engine's effectiveness factor and the dashboard's
+    before/after chart read.
+    """
+    for channel_id, (applied_at, seconds, before) in list(_PENDING_EFFECT.items()):
+        if now - applied_at < EFFECT_WINDOW:
+            continue
+        del _PENDING_EFFECT[channel_id]
+        after = await repo.get_message_rate(channel_id, EFFECT_WINDOW)
+        await repo.record_slowmode_effectiveness(
+            channel_id, seconds, before, after, now - applied_at
+        )
+
+
 def _due(guild_id: int, interval_seconds: int, now: float) -> bool:
     """Whether a guild's update interval has passed. The loop ticks every 60 s, so shorter
     intervals (the table default is 30) mean every tick; the slack absorbs tick jitter."""
@@ -64,6 +86,7 @@ async def update_slowmode(
     total_enabled_channels = 0
 
     try:
+        await _record_due_effectiveness(repo, int(time.time()))
         guilds = client.app.cache.get_available_guilds_view()
 
         for guild_id in guilds.keys():
@@ -111,6 +134,7 @@ async def update_slowmode(
                     EFFECTIVENESS_SCORE.labels(channel_id=str(channel_id)).set(eff_score)
 
                     if decision.slowmode_seconds != current_slowmode:
+                        rate_before = await repo.get_message_rate(channel_id, EFFECT_WINDOW)
                         await client.app.rest.edit_channel(
                             channel_id,
                             rate_limit_per_user=decision.slowmode_seconds,
@@ -131,6 +155,12 @@ async def update_slowmode(
 
                         if decision.slowmode_seconds > current_slowmode:
                             direction = "increase"
+                            # A newer raise replaces one still being measured.
+                            _PENDING_EFFECT[channel_id] = (
+                                int(time.time()),
+                                decision.slowmode_seconds,
+                                rate_before,
+                            )
                         elif decision.slowmode_seconds == 0:
                             direction = "reset"
                         else:
@@ -142,11 +172,13 @@ async def update_slowmode(
                         ).set(decision.slowmode_seconds)
                         ENGINE_DECISIONS.labels(outcome="changed").inc()
 
+                        repo.record_slowmode_sample(channel_id, decision.slowmode_seconds)
                         logger.info(
                             f"Updated slowmode: {current_slowmode}s -> {decision.slowmode_seconds}s "
                             f"(rate: {current_rate:.1f} msg/min, confidence: {decision.confidence:.2f})"
                         )
                     else:
+                        repo.record_slowmode_sample(channel_id, int(current_slowmode))
                         ENGINE_DECISIONS.labels(outcome="unchanged").inc()
                         SLOWMODE_CURRENT.labels(
                             channel_id=str(channel_id), guild_id=str(guild_id)

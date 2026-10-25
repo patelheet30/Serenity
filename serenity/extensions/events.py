@@ -23,7 +23,7 @@ async def on_message_create(event: hikari.MessageCreateEvent) -> None:
     ctx_channel_id.set(event.channel_id)
 
     timestamp = int(event.message.timestamp.timestamp())
-    await repo.record_message_activity(event.channel_id, timestamp)
+    await repo.record_message_activity(event.channel_id, timestamp, event.author_id)
 
     MESSAGES_PROCESSED.labels(guild_id=str(event.message.guild_id)).inc()
 
