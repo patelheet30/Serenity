@@ -36,6 +36,8 @@ def _check_basic_auth(request: web.Request) -> bool:
 async def _metrics_handler(request: web.Request) -> web.Response:
     """Serve Prometheus metrics (behind basic auth in production)."""
     if _AUTH_ENABLED and not _check_basic_auth(request):
+        # The access log is off (see MetricsServer.start), so record failures explicitly.
+        logger.warning(f"Metrics auth failure from {request.remote}")
         return web.Response(
             status=401,
             text="Unauthorized",
