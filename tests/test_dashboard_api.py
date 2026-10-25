@@ -648,6 +648,7 @@ async def test_change_log_posts_the_oldest_early_when_full(monkeypatch):
     for i in range(3):
         changes.record(GUILD, USER, f"setting {i}", "a", "b")
     assert len(changes._pending) == 2
+    assert len(changes._timers) == 2  # the evicted entry's timer was cancelled, not left asleep
     await asyncio.sleep(0)  # the early post runs
     assert svc.log_dashboard_change.await_args.kwargs["setting"] == "setting 0"
 
