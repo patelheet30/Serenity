@@ -252,11 +252,12 @@ async def slowmode_history(request: web.Request) -> web.Response:
 
 @routes.get(f"{GUILD}/slowmode/analytics")
 async def slowmode_analytics(request: web.Request) -> web.Response:
-    """Messages per hour over 24 h, and the rate before/after slowmode over 30 days."""
+    """Per hour over 24 h (messages, users, avg/max slowmode), and the rate before/after
+    slowmode raises over 30 days."""
     repo, ids = request.app[REPO], _guild_channel_ids(request)
     return web.json_response(
         {
-            "hourly": await repo.get_hourly_messages(ids, 24),
+            "hourly": await repo.get_hourly_analytics(ids, 24),
             "effectiveness": [
                 {
                     "channel_id": str(r["channel_id"]),
