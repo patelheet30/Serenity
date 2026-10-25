@@ -200,15 +200,18 @@ class GuildAccess:
     """Decides whether a user may manage a guild, from the bot's view of their current roles.
 
     The OAuth guild list is never trusted for this: it can be stale and is client-visible.
-    Decisions are cached for ACCESS_CACHE_SECONDS, so a revoked permission applies within that.
+    Permissions are cached for ACCESS_CACHE_SECONDS, so a revoked permission applies within that.
     """
 
     def __init__(self, bot: hikari.GatewayBot):
         self.bot = bot
-        self._cache: dict[tuple[int, int], tuple[float, Optional[str]]] = {}
+        self._cache: dict[tuple[int, int], tuple[float, Optional[hikari.Permissions]]] = {}
 
-    async def level(self, user_id: int, guild_id: int) -> Optional[str]:
-        """Return "manage" if the user may manage the guild, else None. Raises NotInstalledError."""
+    async def permissions(self, user_id: int, guild_id: int) -> Optional[hikari.Permissions]:
+        """The user's permissions in the guild, or None if they aren't a member.
+
+        Raises NotInstalledError.
+        """
         if self.bot.cache.get_guild(guild_id) is None:
             raise NotInstalledError  # never cached, so inviting the bot takes effect at once
 
@@ -218,21 +221,28 @@ class GuildAccess:
         if cached and cached[0] > now:
             return cached[1]
 
-        level = await self._compute(user_id, guild_id)
+        perms = await self._compute(user_id, guild_id)
         if len(self._cache) > 10_000:  # ponytail: crude bound, fine at our traffic
             self._cache.clear()
-        self._cache[key] = (now + ACCESS_CACHE_SECONDS, level)
-        return level
+        self._cache[key] = (now + ACCESS_CACHE_SECONDS, perms)
+        return perms
 
-    async def _compute(self, user_id: int, guild_id: int) -> Optional[str]:
+    async def level(self, user_id: int, guild_id: int) -> Optional[str]:
+        """Return "manage" if the user may manage the guild, else None. Raises NotInstalledError."""
+        return access_level(await self.permissions(user_id, guild_id))
+
+    async def _compute(self, user_id: int, guild_id: int) -> Optional[hikari.Permissions]:
         member = self.bot.cache.get_member(guild_id, user_id)
         if member is None:
             try:
                 member = await self.bot.rest.fetch_member(guild_id, user_id)
             except hikari.NotFoundError:
                 return None
+        return toolbox.calculate_permissions(member)
 
-        if toolbox.calculate_permissions(member) & hikari.Permissions.MANAGE_GUILD:
-            return "manage"
-        # Tickets dashboard milestone: return "staff" here for members with a ticket-staff role.
-        return None
+
+def access_level(perms: Optional[hikari.Permissions]) -> Optional[str]:
+    if perms is not None and perms & hikari.Permissions.MANAGE_GUILD:
+        return "manage"
+    # Tickets dashboard milestone: return "staff" here for members with a ticket-staff role.
+    return None

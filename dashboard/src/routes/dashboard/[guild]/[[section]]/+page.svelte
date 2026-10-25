@@ -6,11 +6,13 @@
 	import { SECTIONS } from '#lib/commands.ts';
 	import AppShell from '#lib/components/AppShell.svelte';
 	import AutosaveIndicator from '#lib/components/AutosaveIndicator.svelte';
-	import DataTable from '#lib/components/DataTable.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import Cases from '#lib/sections/Cases.svelte';
 	import Logging from '#lib/sections/Logging.svelte';
+	import ModStats from '#lib/sections/ModStats.svelte';
 	import Modules from '#lib/sections/Modules.svelte';
+	import Overview from '#lib/sections/Overview.svelte';
 	import Slowmode from '#lib/sections/Slowmode.svelte';
 	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
 
@@ -68,7 +70,7 @@
 {#if session.me}
 	<AppShell me={session.me} {guild} guilds={session.guilds ?? []} section={section.k}>
 		{#snippet status()}<AutosaveIndicator status={autosave.status} savedAt={autosave.savedAt} />{/snippet}
-		{#if error || !channels || section.k === 'overview' || section.k === 'cases' || section.k === 'stats'}
+		{#if error || !channels}
 			<div class="phead">
 				<div>
 					<h1>{section.name}</h1>
@@ -92,25 +94,17 @@
 		{:else if !channels}
 			<section class="pane"><EmptyState>Loading…</EmptyState></section>
 		{:else if section.k === 'overview'}
-			<section class="pane">
-				<div class="ph"><h2>Channels Serenity can see</h2><span class="sp"></span><span class="cnt">{channels.length}</span></div>
-				<DataTable
-					label="Channels"
-					rows={channels}
-					key={(c) => c.id}
-					columns={[{ key: 'name', label: 'Channel' }, { key: 'type', label: 'Type' }, { key: 'position', label: 'Position', align: 'right' }]}
-				/>
-			</section>
+			<Overview {guildId} guildName={guild.name} {channels} onerror={fail} />
+		{:else if section.k === 'cases'}
+			<Cases {guildId} onerror={fail} />
+		{:else if section.k === 'stats'}
+			<ModStats {guildId} onerror={fail} />
 		{:else if section.k === 'slowmode'}
 			<Slowmode {guildId} {channels} onerror={fail} />
 		{:else if section.k === 'logging'}
 			<Logging {guildId} {channels} onerror={fail} onchannels={reloadChannels} />
 		{:else if section.k === 'modules'}
 			<Modules {guildId} onerror={fail} />
-		{:else}
-			<section class="pane">
-				<EmptyState icon={section.k}>{section.name} arrives later in the Dashboard configuration milestone.</EmptyState>
-			</section>
 		{/if}
 	</AppShell>
 {:else if loadError}
