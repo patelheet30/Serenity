@@ -295,20 +295,6 @@ dialog[open] .pal-box,dialog[open] .sheet{animation:palin .18s var(--spring)}
 @keyframes tin{from{opacity:0;transform:translateY(8px) scale(.98)}}
 
 .sbadge{display:inline-block;margin-left:8px;padding:0 6px;line-height:17px;border-radius:4px;border:1px solid var(--accln);color:var(--acc);font-family:var(--mono);font-size:10.5px;font-weight:400;vertical-align:1px}
-.answers{display:grid;gap:10px;margin:0}
-.answers dt{font-size:11.5px;color:var(--fg3)}
-.answers dd{margin:1px 0 0;font-size:13px;overflow-wrap:anywhere}
-.dossier{border:1px solid var(--line2);border-radius:var(--r);background:var(--ink);overflow:hidden}
-.dossier .dtop{display:flex;gap:10px;align-items:center;padding:10px 12px}
-.dossier .dg{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
-.dossier .dg div{padding:8px 10px;border-left:1px solid var(--line)}
-.dossier .dg div:first-child{border-left:0}
-.dossier .dg b{display:block;font-family:var(--mono);font-weight:500;font-size:14px}
-.dossier .dg span{font-size:11px;color:var(--fg3)}
-.dossier .hist{padding:6px 12px}
-.dossier .dfoot{padding:2px 12px 10px;font-size:12px;color:var(--fg3)}
-.stg{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}
-.stg i{width:7px;height:7px;border-radius:2px;flex:none}
 /* responsive */
 @media (max-width:1500px){
   .top-in{grid-template-columns:auto auto 1fr auto;grid-template-areas:"brand guild cmd user" "tabs tabs tabs tabs";height:auto;padding-top:8px;row-gap:0}
