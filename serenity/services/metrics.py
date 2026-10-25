@@ -85,8 +85,29 @@ LOG_EVENTS_SENT = Counter(
     ["guild_id", "event"],
 )
 
+# Every log_event LoggingService can send (mod_* comes from ModerationService actions)
+LOG_EVENTS = (
+    "message_delete", "message_edit", "bulk_message_delete",
+    "member_join", "member_leave", "member_update", "voice_state_update",
+    "channel_create", "channel_delete", "channel_update",
+    "role_create", "role_delete", "role_update", "guild_update", "emoji_update",
+    "mod_ban", "mod_softban", "mod_unban", "mod_kick", "mod_timeout", "mod_untimeout", "mod_warn",
+)
+
 COMMANDS_USED = Counter(
     "serenity_commands_used_total",
     "Slash command invocations",
     ["command"],
 )
+
+
+def init_guild_log_events(guild_id: int) -> None:
+    """Create a guild's log-event series at 0.
+
+    A series that first appears at 1 reads as no increase to increase()/rate(), so without this
+    the first log of each event in each guild never shows up in Grafana.
+    """
+    # ponytail: guilds x len(LOG_EVENTS) series even for guilds without logging; only pre-create
+    # for guilds with a log channel configured if the series count ever matters
+    for event in LOG_EVENTS:
+        LOG_EVENTS_SENT.labels(guild_id=str(guild_id), event=event)

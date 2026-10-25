@@ -1,5 +1,7 @@
-"""Log-event counter only counts embeds actually posted, never skipped or failed sends."""
+"""Log-event counter: counts only posted logs, and every series starts at 0."""
 
+import re
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import hikari
@@ -7,7 +9,7 @@ import pytest
 
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.logging_service import LoggingService
-from serenity.services.metrics import LOG_EVENTS_SENT
+from serenity.services.metrics import LOG_EVENTS, LOG_EVENTS_SENT, init_guild_log_events
 
 
 def _sent(guild_id: int) -> float:
@@ -37,3 +39,19 @@ async def test_counts_only_posted_logs(should_log, send_error, expected):
     )
 
     assert _sent(guild_id) - before == expected
+
+
+def test_log_events_cover_every_sent_event():
+    """init_guild_log_events only zero-inits what's in LOG_EVENTS, so it must not drift."""
+    logging_src = Path("serenity/services/logging_service.py").read_text()
+    moderation_src = Path("serenity/services/moderation_service.py").read_text()
+    sent = set(re.findall(r'log_event="(\w+)"', logging_src))
+    actions = re.findall(r'action="(\w+)"', moderation_src)
+    assert sent | {f"mod_{a}" for a in actions} == set(LOG_EVENTS)
+
+
+def test_init_guild_log_events_starts_at_zero():
+    init_guild_log_events(777)
+    assert all(
+        LOG_EVENTS_SENT.labels(guild_id="777", event=e)._value.get() == 0 for e in LOG_EVENTS
+    )
