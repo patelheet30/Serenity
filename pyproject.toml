@@ -8,7 +8,7 @@ dependencies = [
     "hikari[speedups]>=2.5.0",
     "hikari-arc[cron]>=2.3.2",
     "hikari-toolbox>=0.1.7",
-    "python-dotenv>=1.2.1",
+    "python-dotenv>=1.2.2",
     "uvloop>=0.21.0 ; sys_platform == 'darwin' or sys_platform == 'linux'",
     "prometheus-client>=0.24.1",
     "asyncpg>=0.32.0",
