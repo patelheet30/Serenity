@@ -17,7 +17,8 @@
 	type Slowmode = { enabled: boolean; default_threshold: number; interval: number; channels: Row[] };
 	type Live = { id: string; rate: number; history: number[]; slowmode: number | null };
 	type Change = { channel_id: string; old: number; new: number; reason: string; rate: number; confidence: number; at: number };
-	type Analytics = { hourly: number[]; effectiveness: { channel_id: string; before: number; after: number; samples: number }[] };
+	type Hour = { messages: number; users: number; avg_slowmode: number; max_slowmode: number };
+	type Analytics = { hourly: Hour[]; effectiveness: { channel_id: string; before: number; after: number; samples: number }[] };
 
 	let { guildId, channels, onerror }: { guildId: string; channels: Channel[]; onerror: (e: unknown) => void } =
 		$props();
@@ -373,24 +374,31 @@
 			<div class="ph"><h2 id="anT">Analytics</h2><span class="sp"></span><span class="dim" style="font-size:12px">last 24 h</span></div>
 			{#if analytics}
 				{@const hourly = analytics.hourly}
-				{@const peak = Math.max(1, ...hourly)}
-				{@const current = data.channels.filter((r) => r.enabled).map((r) => slowmodeOf(r) ?? 0)}
+				{@const peak = Math.max(1, ...hourly.map((h) => h.messages))}
+				{@const busy = hourly.filter((h) => h.messages)}
 				<div class="pb stack">
 					<div>
 						<div class="rowline" style="margin-bottom:8px">
 							<span class="fg2" style="font-size:12px">Messages per hour in this server’s channels</span>
-							<span class="mono" style="font-size:12px">{hourly.reduce((a, b) => a + b, 0).toLocaleString()} total</span>
+							<span class="mono" style="font-size:12px">{hourly.reduce((a, h) => a + h.messages, 0).toLocaleString()} total</span>
 						</div>
 						<div class="bars" role="img" aria-label="Messages per hour over the last 24 hours, peak {peak}">
-							{#each hourly as v, i (i)}
-								<i class:now={i === hourly.length - 1} style:height="{(v / peak) * 100}%" title="{hourly.length - i}h ago · {v} messages"></i>
+							{#each hourly as h, i (i)}
+								<i
+									class:now={i === hourly.length - 1}
+									style:height="{(h.messages / peak) * 100}%"
+									title="{hourly.length - i}h ago · {h.messages} messages · {h.users} chatters · slowmode up to {fmt(h.max_slowmode)}"
+								></i>
 							{/each}
 						</div>
 						<div class="axis"><span>24h ago</span><span>12h</span><span>now</span></div>
 					</div>
-					<div class="tiles" style="grid-template-columns:repeat(3,1fr)">
-						<div class="tile"><b>{fmt(current.length ? Math.round(current.reduce((a, b) => a + b, 0) / current.length) : 0)}</b><span>Avg slowmode now</span></div>
-						<div class="tile"><b>{fmt(Math.max(0, ...current))}</b><span>Max slowmode now</span></div>
+					<div class="tiles two">
+						<div class="tile" title="Unique people per channel, added up across channels">
+							<b>{Math.max(0, ...hourly.map((h) => h.users)).toLocaleString()}</b><span>Most chatters in an hour</span>
+						</div>
+						<div class="tile"><b>{fmt(busy.length ? Math.round(busy.reduce((a, h) => a + h.avg_slowmode, 0) / busy.length) : 0)}</b><span>Avg slowmode</span></div>
+						<div class="tile"><b>{fmt(Math.max(0, ...hourly.map((h) => h.max_slowmode)))}</b><span>Max slowmode</span></div>
 						<div class="tile"><b>{(history ?? []).filter((h) => h.at * 1000 > Date.now() - 86_400_000).length}</b><span>Changes, 24 h</span></div>
 					</div>
 					{#if analytics.effectiveness.length}
