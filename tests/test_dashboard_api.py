@@ -464,7 +464,7 @@ async def test_slowmode_settings_match_the_command_limits(settings):
     assert settings.changes() == [
         ("Auto slowmode", "on", "off"),
         ("Default threshold", 10, 25),
-        ("Update interval", "1 min", "3 min"),  # the 30 s table default reads as 1 min
+        ("Update interval", "30 s", "3 min"),  # the table default, unclamped in the log
     ]
 
 
