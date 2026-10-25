@@ -12,6 +12,9 @@ from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.logging_service import LoggingService
+from serenity.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 BOT = web.AppKey("bot", hikari.GatewayBot)
 BASE_URL = web.AppKey("base_url", str)
@@ -95,6 +98,7 @@ class ChangeLog:
 
     DEBOUNCE = 10.0
     PENDING_MAX = 1000  # settings waiting to be posted; past this the oldest is posted early
+    POSTING_MAX = 50  # early posts in flight; past this (Discord or the DB stalled) they're dropped
 
     def __init__(self, logging_svc: LoggingService):
         self.logging_svc = logging_svc
@@ -112,9 +116,13 @@ class ChangeLog:
             # without bound: post the oldest now and cancel its timer.
             oldest = next(iter(self._pending))
             self._timers.pop(oldest).cancel()
-            task = asyncio.create_task(self._post(oldest, self._pending.pop(oldest)))
-            self._posting.add(task)
-            task.add_done_callback(self._posting.discard)
+            change = self._pending.pop(oldest)
+            if len(self._posting) >= self.POSTING_MAX:
+                logger.warning(f"Server log backed up; dropped dashboard change {oldest}: {change}")
+            else:
+                task = asyncio.create_task(self._post(oldest, change))
+                self._posting.add(task)
+                task.add_done_callback(self._posting.discard)
         self._pending[key] = [str(old), str(new)]
         # ponytail: entries still waiting when the bot stops are lost; fine for an audit nicety.
         self._timers[key] = asyncio.create_task(self._post_later(key))

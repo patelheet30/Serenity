@@ -613,6 +613,7 @@ async def test_change_log_batches_rapid_edits(monkeypatch):
 
     changes.record(GUILD, USER, "Default threshold", 10, 11)
     changes.record(GUILD, USER, "Default threshold", 11, 12)
+    assert len(changes._timers) == 1  # a repeat edit updates the entry, it doesn't add a timer
     changes.record(GUILD, USER, "Update interval", "1 min", "2 min")
     changes.record(GUILD, USER, "Update interval", "2 min", "1 min")  # back where it started
     await asyncio.sleep(0.05)
@@ -761,3 +762,24 @@ async def test_modstats_totals_match_the_command(settings, cases):
     assert [m["id"] for m in body["moderators"]] == [str(MOD_A), str(MOD_B)]
     assert body["active"] == {"timeouts": 0, "warnings": 0}
     assert (await settings("GET", "/modstats", days="8"))[0] == 422
+
+
+@pytest.mark.asyncio
+async def test_change_log_drops_early_posts_when_the_log_is_stuck(monkeypatch):
+    monkeypatch.setattr(ChangeLog, "PENDING_MAX", 1)
+    monkeypatch.setattr(ChangeLog, "POSTING_MAX", 1)
+    stuck = asyncio.Event()
+
+    async def post(**kwargs):
+        await stuck.wait()
+
+    svc = MagicMock(log_dashboard_change=AsyncMock(side_effect=post))
+    changes = ChangeLog(svc)
+
+    for i in range(4):  # each new setting evicts the previous one into an early post
+        changes.record(GUILD, USER, f"setting {i}", "a", "b")
+    await asyncio.sleep(0)
+    assert len(changes._posting) == 1 and len(changes._pending) == 1 and len(changes._timers) == 1
+    stuck.set()
+    for t in list(changes._timers.values()):
+        t.cancel()
