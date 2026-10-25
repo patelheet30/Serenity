@@ -387,7 +387,7 @@
 							{#each hourly as h, i (i)}
 								<i
 									class:now={i === hourly.length - 1}
-									style:height="{(h.messages / peak) * 100}%"
+									style:--h="{(h.messages / peak) * 100}%"
 									title="{hourly.length - i}h ago · {h.messages} messages · {h.users} chatters · slowmode up to {fmt(h.max_slowmode)}"
 								></i>
 							{/each}
