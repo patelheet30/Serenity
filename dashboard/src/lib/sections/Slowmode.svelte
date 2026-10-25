@@ -18,7 +18,7 @@
 	type Live = { id: string; rate: number; history: number[]; slowmode: number | null };
 	type Change = { channel_id: string; old: number; new: number; reason: string; rate: number; confidence: number; at: number };
 	type Hour = { messages: number; users: number; avg_slowmode: number; max_slowmode: number };
-	type Analytics = { hourly: Hour[]; effectiveness: { channel_id: string; before: number; after: number; samples: number }[] };
+	type Analytics = { hourly: Hour[]; changes: Record<'6h' | '24h', number>; effectiveness: { channel_id: string; before: number; after: number; samples: number }[] };
 
 	let { guildId, channels, onerror }: { guildId: string; channels: Channel[]; onerror: (e: unknown) => void } =
 		$props();
@@ -55,8 +55,9 @@
 		history = null;
 		analytics = null;
 		historyFor = null;
+		let loaded = false; // plain, so reading it doesn't make this effect depend on `history`
 		async function tick() {
-			if (document.hidden && history) return;
+			if (document.hidden && loaded) return;
 			try {
 				const [l, h] = await Promise.all([
 					api<{ channels: Live[] }>(`/guilds/${id}/slowmode/live`),
@@ -65,10 +66,11 @@
 				if (stale) return;
 				live = Object.fromEntries(l.channels.map((c) => [c.id, c]));
 				history = h;
+				loaded = true;
 				liveFailing = false;
 			} catch (e) {
 				if (stale) return;
-				if (history) liveFailing = true;
+				if (loaded) liveFailing = true;
 				else onerror(e);
 			}
 		}
@@ -399,7 +401,7 @@
 						</div>
 						<div class="tile"><b>{fmt(busy.length ? Math.round(busy.reduce((a, h) => a + h.avg_slowmode, 0) / busy.length) : 0)}</b><span>Avg slowmode</span></div>
 						<div class="tile"><b>{fmt(Math.max(0, ...hourly.map((h) => h.max_slowmode)))}</b><span>Max slowmode</span></div>
-						<div class="tile"><b>{(history ?? []).filter((h) => h.at * 1000 > Date.now() - 86_400_000).length}</b><span>Changes, 24 h</span></div>
+						<div class="tile"><b>{analytics.changes['24h']}</b><span>Changes, 24 h</span></div>
 					</div>
 					{#if analytics.effectiveness.length}
 						{@const top = Math.max(...analytics.effectiveness.map((e) => Math.max(e.before, e.after))) * 1.1 || 1}

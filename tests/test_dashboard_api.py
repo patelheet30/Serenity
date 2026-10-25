@@ -516,6 +516,7 @@ async def test_slowmode_live_rates_match_stats(settings, pg_repo):
     ]
     status, body = await settings("GET", "/slowmode/analytics")
     assert status == 200 and len(body["hourly"]) == 24 and body["effectiveness"] == []
+    assert body["changes"] == {"6h": 1, "24h": 1}
 
 
 @pytest.mark.asyncio
