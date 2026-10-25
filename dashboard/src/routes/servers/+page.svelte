@@ -22,7 +22,7 @@
 			await loadGuilds(true);
 			error = '';
 		} catch (e) {
-			if (!handleUnauthorized(e)) error = (e as Error).message;
+			if (!handleUnauthorized(e)) error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
@@ -119,7 +119,7 @@
 					<EmptyState>Loading your servers…</EmptyState>
 				{:else if !rows.length}
 					<EmptyState>
-						{q ? `No servers match “${q}”.` : 'You don’t manage any servers yet.'}
+						{q ? `No servers you can configure match “${q}”.` : 'You don’t manage any servers yet.'}
 					</EmptyState>
 				{/if}
 				{#if ready.length}
@@ -134,7 +134,7 @@
 			{#if noPerm.length}
 				<details class="noperm">
 					<summary>
-						<Icon name="lock" />{noPerm.length} servers without Manage Server permission <Icon name="chev" />
+						<Icon name="lock" />{noPerm.length} {noPerm.length === 1 ? 'server' : 'servers'} without Manage Server permission <Icon name="chev" />
 					</summary>
 					{#each noPerm as g (g.id)}
 						<div class="prow off" aria-disabled="true">

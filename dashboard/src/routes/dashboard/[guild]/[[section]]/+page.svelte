@@ -24,12 +24,13 @@
 	onMount(() => {
 		requireMe().then(
 			(me) => me && loadGuilds().catch(() => {}),
-			(e) => (loadError = (e as Error).message)
+			(e) => (loadError = e instanceof Error ? e.message : String(e))
 		);
 	});
 
 	// Every guild route is authorised server-side; this request doubles as the access check.
 	$effect(() => {
+		if (!session.me) return; // wait for /me, so a failed login doesn't fire a doomed request
 		const id = guildId;
 		let stale = false; // a slower response for the previous server must not land here
 		channels = null;
