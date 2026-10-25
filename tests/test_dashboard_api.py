@@ -7,6 +7,7 @@ import aiohttp
 import hikari
 import pytest
 import pytest_asyncio
+import toolbox
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.fernet import Fernet
@@ -14,6 +15,8 @@ from cryptography.fernet import Fernet
 from serenity.dashboard import auth
 from serenity.dashboard.api import OAUTH, SESSION_COOKIE, SESSIONS, build_api
 from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
+
+REAL_PERMISSIONS = toolbox.calculate_permissions  # before fake_permissions patches it
 
 GUILD = 111
 USER = 222
@@ -77,6 +80,34 @@ async def test_access_revoked_mid_session(monkeypatch):
     now = time.monotonic()
     monkeypatch.setattr(auth.time, "monotonic", lambda: now + auth.ACCESS_CACHE_SECONDS + 1)
     assert await access.level(USER, GUILD) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner", "role_perms", "expected"),
+    [
+        (True, hikari.Permissions.NONE, "manage"),
+        (False, hikari.Permissions.ADMINISTRATOR, "manage"),
+        (False, hikari.Permissions.MANAGE_GUILD, "manage"),
+        (False, hikari.Permissions.SEND_MESSAGES, None),
+    ],
+)
+async def test_access_with_real_permission_helper(monkeypatch, owner, role_perms, expected):
+    """Runs hikari-toolbox's calculate_permissions, which GuildAccess relies on to treat the
+    owner and ADMINISTRATOR as having Manage Server."""
+    monkeypatch.setattr(auth.toolbox, "calculate_permissions", REAL_PERMISSIONS)
+    role_id = 333
+    guild = MagicMock(id=GUILD, owner_id=USER if owner else 999)
+    guild.get_roles.return_value = {
+        GUILD: MagicMock(id=GUILD, permissions=hikari.Permissions.NONE),  # @everyone
+        role_id: MagicMock(id=role_id, permissions=role_perms),
+    }
+    member = MagicMock(id=USER, role_ids=[role_id])
+    member.get_guild.return_value = guild
+    bot = make_bot()
+    bot.cache.get_member.return_value = member
+
+    assert await GuildAccess(bot).level(USER, GUILD) == expected
 
 
 # --- HTTP ----------------------------------------------------------------------------------------
@@ -209,6 +240,11 @@ async def test_login_falls_back_to_consent_screen(client_for):
     # Already retried once (consent cookie set by that login): give up instead of looping.
     resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
     assert resp.headers["Location"].endswith("/?login=failed")
+
+    # Logging in again by hand starts over, so that attempt gets its own retry.
+    await client.get("/api/auth/login", allow_redirects=False)
+    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
+    assert resp.headers["Location"].endswith("/api/auth/login?prompt=consent")
 
 
 @pytest.mark.asyncio

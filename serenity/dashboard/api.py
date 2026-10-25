@@ -149,6 +149,8 @@ async def login(request: web.Request) -> web.Response:
     response.set_cookie(STATE_COOKIE, state, max_age=600, **_cookie_args(request))
     if prompt == "consent":
         response.set_cookie(CONSENT_COOKIE, "1", max_age=600, **_cookie_args(request))
+    else:  # a fresh login the user started gets its own consent retry
+        response.del_cookie(CONSENT_COOKIE, path="/")
     raise response
 
 
