@@ -447,6 +447,18 @@ async def test_hourly_unique_users_and_slowmode(repo: Repository):
 
 
 @pytest.mark.asyncio
+async def test_slowmode_is_written_for_hours_without_messages(repo: Repository):
+    """A channel held in slowmode while nobody talks still gets its hour's avg/max."""
+    last_hour = (int(time.time()) // 3600) * 3600 - 3600
+    repo.record_slowmode_sample(CHANNEL, 30, last_hour + 60)
+    assert repo.sampled_channels(last_hour) == {CHANNEL}
+
+    await repo.aggregate_hourly_analytics(CHANNEL)
+    [row] = await repo.get_channel_analytics(CHANNEL, hours_back=2)
+    assert (row["total_messages"], row["avg_slowmode"], row["max_slowmode"]) == (0, 30, 30)
+
+
+@pytest.mark.asyncio
 async def test_hourly_users_are_capped(repo: Repository, monkeypatch):
     monkeypatch.setattr(
         "serenity.database.repository.DATABASE_CONFIG",
@@ -549,6 +561,9 @@ async def test_slowmode_history_and_analytics(repo: Repository):
         b,
         hour - 3600,
         hour - 24 * 3600,
+    )
+    await repo.pool.execute(  # written as the clock crossed into the next hour
+        "INSERT INTO channel_analytics VALUES ($1, $2, 50, 0, 0, 0)", b, hour + 3600
     )
     hourly = await repo.get_hourly_analytics([a, b], hours=24)
     assert hourly[-1] == {"messages": 15, "users": 6, "avg_slowmode": 15, "max_slowmode": 30}
