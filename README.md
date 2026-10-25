@@ -181,6 +181,9 @@ serenity/
 │   ├── hooks.py            # Arc hooks (require_module)
 │   ├── modules.py          # ModuleType enum, ModuleManager
 │   └── types.py            # Shared dataclasses
+├── dashboard/
+│   ├── api.py              # /api routes for the web dashboard, auth + guild-access middleware
+│   └── auth.py             # Discord OAuth2, sessions, per-guild authorization
 ├── database/
 │   ├── migrations/         # Versioned schema migrations
 │   ├── logging_repository.py

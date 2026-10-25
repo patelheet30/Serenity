@@ -54,12 +54,13 @@ async def test_init_creates_tables(repo: Repository):
 @pytest.mark.asyncio
 async def test_migrations_are_idempotent(repo: Repository):
     """Running migrations again on an up-to-date database is a no-op"""
-    from serenity.database.migrations import run_migrations
+    from serenity.database.migrations import MIGRATIONS_DIR, run_migrations
 
     assert repo.pool is not None
     await run_migrations(repo.pool)
 
-    assert await repo.pool.fetchval("SELECT COUNT(*) FROM schema_version") == 1
+    expected = len(list(MIGRATIONS_DIR.glob("*.sql")))
+    assert await repo.pool.fetchval("SELECT COUNT(*) FROM schema_version") == expected
 
 
 @pytest.mark.asyncio
