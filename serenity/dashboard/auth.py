@@ -208,7 +208,7 @@ class GuildAccess:
         self._cache: dict[tuple[int, int], tuple[float, Optional[str]]] = {}
 
     async def level(self, user_id: int, guild_id: int) -> Optional[str]:
-        """ "manage" if the user may manage the guild, else None. Raises NotInstalledError."""
+        """Return "manage" if the user may manage the guild, else None. Raises NotInstalledError."""
         if self.bot.cache.get_guild(guild_id) is None:
             raise NotInstalledError  # never cached, so inviting the bot takes effect at once
 

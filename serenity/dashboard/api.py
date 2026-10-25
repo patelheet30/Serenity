@@ -23,9 +23,9 @@ logger = get_logger(__name__)
 
 SESSION_COOKIE = "serenity_session"
 STATE_COOKIE = "serenity_oauth_state"
+CONSENT_COOKIE = "serenity_oauth_consent"  # set while retrying with Discord's consent screen
 PUBLIC_PATHS = {"/api/health", "/api/auth/login", "/api/auth/callback", "/api/auth/invite"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-CONSENT_ERRORS = {"consent_required", "interaction_required", "login_required"}
 MEMBER_SEARCH_LIMIT = 25
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -147,6 +147,8 @@ async def login(request: web.Request) -> web.Response:
     prompt = "consent" if request.query.get("prompt") == "consent" else "none"
     response = web.HTTPFound(_oauth(request).authorize_url(state, prompt))
     response.set_cookie(STATE_COOKIE, state, max_age=600, **_cookie_args(request))
+    if prompt == "consent":
+        response.set_cookie(CONSENT_COOKIE, "1", max_age=600, **_cookie_args(request))
     raise response
 
 
@@ -157,8 +159,8 @@ async def callback(request: web.Request) -> web.Response:
     state = request.query.get("state", "")
     code = request.query.get("code")
 
-    if request.query.get("error") in CONSENT_ERRORS:
-        # prompt=none and the user hasn't authorised the app (yet): show Discord's screen.
+    if request.query.get("error") == "consent_required" and CONSENT_COOKIE not in request.cookies:
+        # prompt=none and the user hasn't authorised the app (yet): show Discord's screen, once.
         raise web.HTTPFound(f"{base}/api/auth/login?prompt=consent")
     if not code or not expected or not secrets.compare_digest(state, expected):
         # Cancelled on Discord's screen, or a forged/stale callback.
@@ -175,6 +177,7 @@ async def callback(request: web.Request) -> web.Response:
     response = web.HTTPFound(f"{base}/servers")
     response.set_cookie(SESSION_COOKIE, token, max_age=7 * 24 * 3600, **_cookie_args(request))
     response.del_cookie(STATE_COOKIE, path="/")
+    response.del_cookie(CONSENT_COOKIE, path="/")
     raise response
 
 
@@ -206,12 +209,14 @@ async def guilds(request: web.Request) -> web.Response:
     session: Session = request[SESSION]
     try:
         access_token = await request.app[SESSIONS].access_token(session, oauth)
-        if access_token is None:
-            await request.app[SESSIONS].delete(session)
-            raise ApiError(401, "unauthenticated", "Your Discord login expired. Log in again.")
-        user_guilds = await oauth.get("/users/@me/guilds", access_token)
+        user_guilds = await oauth.get("/users/@me/guilds", access_token) if access_token else None
     except aiohttp.ClientResponseError as e:
-        raise ApiError(502, "discord_unavailable", f"Discord returned {e.status}.") from None
+        if e.status != 401:  # rate limit or outage: keep the session
+            raise ApiError(502, "discord_unavailable", f"Discord returned {e.status}.") from None
+        user_guilds = None  # Discord rejected a token we thought was valid
+    if user_guilds is None:
+        await request.app[SESSIONS].delete(session)
+        raise ApiError(401, "unauthenticated", "Your Discord login expired. Log in again.")
 
     manage = hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
     cache = request.app[BOT].cache
@@ -293,7 +298,7 @@ async def members(request: web.Request) -> web.Response:
             if len(found) == MEMBER_SEARCH_LIMIT:
                 break
 
-    if not found and query:
+    if not found and len(query) >= 2:  # keeps one-letter typos off Discord's rate limit
         found = list(await bot.rest.search_members(guild_id, query))[:MEMBER_SEARCH_LIMIT]
 
     return web.json_response([_member_json(m) for m in found])

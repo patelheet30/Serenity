@@ -93,6 +93,9 @@ class FakeSessions:
     async def delete(self, session):
         self.deleted = True
 
+    async def access_token(self, session, oauth):
+        return "token"
+
 
 @pytest_asyncio.fixture
 async def client_for():
@@ -111,6 +114,7 @@ async def client_for():
         root.add_subapp("/api", api)
         client = TestClient(TestServer(root))
         await client.start_server()
+        client.api = api  # type: ignore[attr-defined]
         clients.append(client)
         return client
 
@@ -202,6 +206,22 @@ async def test_login_falls_back_to_consent_screen(client_for):
     resp = await client.get("/api/auth/login?prompt=consent", allow_redirects=False)
     assert resp.headers["Location"] == "https://discord/consent"
 
+    # Already retried once (consent cookie set by that login): give up instead of looping.
+    resp = await client.get("/api/auth/callback?error=consent_required", allow_redirects=False)
+    assert resp.headers["Location"].endswith("/?login=failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "expected", "deleted"), [(503, 502, False), (401, 401, True)])
+async def test_guild_list_discord_errors(client_for, status, expected, deleted):
+    """An outage keeps the session; Discord rejecting the token ends it."""
+    client = await client_for(make_bot())
+    err = aiohttp.ClientResponseError(MagicMock(), (), status=status)
+    client.api[OAUTH].get = AsyncMock(side_effect=err)
+    resp = await client.get("/api/guilds", cookies={SESSION_COOKIE: "good"})
+    assert resp.status == expected
+    assert client.api[SESSIONS].deleted is deleted
+
 
 # --- Sessions (Postgres) -------------------------------------------------------------------------
 
@@ -247,6 +267,8 @@ async def test_refresh_failures(pg_repo):
         err = aiohttp.ClientResponseError(MagicMock(), (), status=status)
         return MagicMock(refresh=AsyncMock(side_effect=err))
 
-    with pytest.raises(aiohttp.ClientResponseError):
-        await sessions.access_token(session, failing(503))
-    assert await sessions.access_token(session, failing(400)) is None
+    for status in (429, 500, 503):
+        with pytest.raises(aiohttp.ClientResponseError):
+            await sessions.access_token(session, failing(status))
+    for status in (400, 401):
+        assert await sessions.access_token(session, failing(status)) is None
