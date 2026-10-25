@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="216 156 600 600"><g id="body"><defs>
+<radialGradient id="bo_sh" cx="421.56" cy="333.5" r="476.0" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#FFFFFF"/><stop offset="0.28" stop-color="#F4F2F7"/><stop offset="0.58" stop-color="#C9C7DA"/><stop offset="0.82" stop-color="#7D7A9C"/><stop offset="1" stop-color="#4A4670"/></radialGradient>
+<mask id="bo_cres" maskUnits="userSpaceOnUse" x="-2000" y="-2000" width="5000" height="5000"><rect x="-2000" y="-2000" width="5000" height="5000" fill="#fff"/><ellipse cx="504.86" cy="431.0" rx="234.43" ry="246.25" transform="rotate(-8 512 446)" fill="#000" filter="url(#bo_sb3)"/></mask>
+<filter id="bo_sb3" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="9.0"/></filter>
+<linearGradient id="bo_bounce" gradientUnits="userSpaceOnUse" x1="274" y1="0" x2="750" y2="0"><stop offset="0.1" stop-color="#FFC978" stop-opacity="0"/><stop offset="0.5" stop-color="#FFD38E"/><stop offset="0.9" stop-color="#FFC978" stop-opacity="0"/></linearGradient>
+<clipPath id="bo_egg"><ellipse cx="512" cy="446" rx="238" ry="250" transform="rotate(-8 512 446)"/></clipPath>
+<filter id="bo_sb2" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3.0"/></filter>
+<filter id="bo_dsh" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="22.0"/></filter></defs>
+<ellipse cx="526.28" cy="471.0" rx="238.0" ry="245.0" fill="#05050C" opacity="0.5" filter="url(#bo_dsh)"/>
+<ellipse cx="512" cy="446" rx="238" ry="250" transform="rotate(-8 512 446)" fill="url(#bo_sh)"/>
+<g clip-path="url(#bo_egg)">
+<g mask="url(#bo_cres)"><ellipse cx="512" cy="446" rx="238" ry="250" transform="rotate(-8 512 446)" fill="url(#bo_bounce)" opacity="0.6" filter="url(#bo_sb2)"/></g>
+<ellipse cx="488.2" cy="416.0" rx="242.76" ry="255.0" transform="rotate(-8 512 446)" fill="none" stroke="#FFFFFF" stroke-opacity="0.0" />
+</g></g><g id="face"><defs><linearGradient id="fa_vz" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#23253C"/><stop offset="0.35" stop-color="#0B0C16"/><stop offset="1" stop-color="#05050A"/></linearGradient>
+<linearGradient id="fa_vrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.0"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.55"/></linearGradient>
+<filter id="fa_vb" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="3.0"/></filter></defs>
+<g transform="rotate(-8 512 446)">
+<ellipse cx="512" cy="444.0" rx="205.92" ry="107.0" fill="url(#fa_vrim)" opacity="0.6" filter="url(#fa_vb)"/>
+<ellipse cx="512" cy="441.0" rx="199.92" ry="100.0" fill="url(#fa_vz)"/>
+<path d="M 356.0624 386.0 Q 512 339.0 667.9376 386.0" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="7.0" stroke-linecap="round"/>
+</g></g><g id="eyes"><defs><filter id="ey_eg" x="-100%" y="-200%" width="300%" height="500%"><feGaussianBlur stdDeviation="16.0"/></filter>
+<filter id="ey_eg2" x="-100%" y="-200%" width="300%" height="500%"><feGaussianBlur stdDeviation="5.0"/></filter>
+<linearGradient id="ey_ec" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF1D6"/><stop offset="1" stop-color="#FFB547"/></linearGradient></defs><g transform="rotate(-8 512 446)"><ellipse cx="512" cy="452.9" rx="157.08" ry="47.6" fill="#FFB547" opacity="0.13" filter="url(#ey_eg)"/><ellipse cx="438.22" cy="448.14" rx="57.12" ry="35.699999999999996" fill="#FF8A1F" opacity="0.22" filter="url(#ey_eg)"/><ellipse cx="585.78" cy="448.14" rx="57.12" ry="35.699999999999996" fill="#FF8A1F" opacity="0.22" filter="url(#ey_eg)"/><path d="M 402.52000000000004 416.55740000000003 Q 438.22 410.6788 473.92 415.0104 C 476.776 486.1724 399.66400000000004 486.1724 402.52000000000004 416.55740000000003 Z" fill="#FF8A1F" opacity="0.7" filter="url(#ey_eg)" transform="translate(0 4.0) scale(1)"/><path d="M 402.52000000000004 416.55740000000003 Q 438.22 410.6788 473.92 415.0104 C 476.776 486.1724 399.66400000000004 486.1724 402.52000000000004 416.55740000000003 Z" fill="#FFB547" filter="url(#ey_eg2)"/><path d="M 402.52000000000004 416.55740000000003 Q 438.22 410.6788 473.92 415.0104 C 476.776 486.1724 399.66400000000004 486.1724 402.52000000000004 416.55740000000003 Z" fill="url(#ey_ec)"/><path d="M 550.0799999999999 415.0104 Q 585.78 410.6788 621.48 416.55740000000003 C 624.336 486.1724 547.2239999999999 486.1724 550.0799999999999 415.0104 Z" fill="#FF8A1F" opacity="0.7" filter="url(#ey_eg)" transform="translate(0 4.0) scale(1)"/><path d="M 550.0799999999999 415.0104 Q 585.78 410.6788 621.48 416.55740000000003 C 624.336 486.1724 547.2239999999999 486.1724 550.0799999999999 415.0104 Z" fill="#FFB547" filter="url(#ey_eg2)"/><path d="M 550.0799999999999 415.0104 Q 585.78 410.6788 621.48 416.55740000000003 C 624.336 486.1724 547.2239999999999 486.1724 550.0799999999999 415.0104 Z" fill="url(#ey_ec)"/></g></g><g id="highlight"><defs><filter id="hi_sp" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9.0"/></filter>
+<filter id="hi_sp2" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5"/></filter>
+<radialGradient id="hi_spg"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient></defs>
+<g transform="rotate(-8 512 446)">
+<ellipse cx="412.04" cy="316.0" rx="71.39999999999999" ry="42.5" transform="rotate(-35 412.04 316.0)" fill="url(#hi_spg)" filter="url(#hi_sp)"/>
+<ellipse cx="416.8" cy="321.0" rx="52.36" ry="27.5" transform="rotate(-35 416.8 321.0)" fill="#FFFFFF" opacity="0.55" filter="url(#hi_sp)"/>
+<path d="M 659.56 271.0 A 234.43 246.25 0 0 1 733.34 508.5" fill="none" stroke="#D8D2FF" stroke-width="5.0" stroke-linecap="round" opacity="0.5" filter="url(#hi_sp2)"/>
+<ellipse cx="400.14" cy="306.0" rx="23.8" ry="13.75" transform="rotate(-35 400.14 306.0)" fill="#FFFFFF" opacity="0.9"/>
+<path d="M 642.9 601.0 A 226.1 237.5 0 0 1 476.3 686.0" fill="none" stroke="#FFF1D6" stroke-width="6.0" stroke-linecap="round" opacity="0.55" filter="url(#hi_sp)"/>
+</g></g></svg>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Optional threshold: a dashed line, and the line turns amber and its end glows while the
+	// Optional threshold: a dashed line, and the line turns the warning colour and its end glows while the
 	// latest value is over it. `muted` greys it out (e.g. a paused channel).
 	let {
 		values,
@@ -15,13 +15,13 @@
 	const pts = $derived(values.map((v, i) => [(i * W) / Math.max(1, values.length - 1), y(v)]));
 	const d = $derived(pts.map(([px, py], i) => `${i ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`).join(' '));
 	const over = $derived(threshold !== undefined && (values.at(-1) ?? 0) > threshold);
-	const color = $derived(muted ? 'var(--fg3)' : over ? 'var(--amber)' : 'var(--acc)');
+	const color = $derived(muted ? 'var(--fg3)' : over ? 'var(--warn)' : 'var(--acc)');
 	const last = $derived(pts.at(-1));
 </script>
 
 <svg class="spark" viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label={label}>
 	{#if threshold !== undefined}
-		<line x1="0" x2={W} y1={y(threshold)} y2={y(threshold)} stroke="rgba(236,226,208,.16)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke" />
+		<line x1="0" x2={W} y1={y(threshold)} y2={y(threshold)} stroke="rgba(214,210,255,.16)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke" />
 	{/if}
 	<path {d} fill="none" stroke={color} stroke-width="1.4" vector-effect="non-scaling-stroke" />
 	{#if last && threshold !== undefined}
@@ -31,9 +31,9 @@
 
 <style>
 	.glow {
-		filter: drop-shadow(0 0 4px #8fe3bf);
+		filter: drop-shadow(0 0 4px #ffb547);
 	}
 	.glow.over {
-		filter: drop-shadow(0 0 4px #f0b46a);
+		filter: drop-shadow(0 0 4px #ff7f6b);
 	}
 </style>

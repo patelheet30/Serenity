@@ -70,7 +70,7 @@
 				<div class="pb">
 					<svg viewBox="0 0 {W} {H + 18}" style="width:100%;height:auto" role="img" aria-label="Cases per day over {stats.days} days, peak {peak}">
 						{#each [0, 0.5, 1] as f (f)}
-							<line x1="0" x2={W} y1={H - f * H * 0.92} y2={H - f * H * 0.92} stroke="rgba(236,226,208,.07)" />
+							<line x1="0" x2={W} y1={H - f * H * 0.92} y2={H - f * H * 0.92} stroke="rgba(214,210,255,.07)" />
 						{/each}
 						{#each perDay as v, i (i)}
 							{#each v as n, gi (gi)}
@@ -83,8 +83,8 @@
 								{/if}
 							{/each}
 						{/each}
-						<text x="0" y={H + 14} fill="#8f887a" font-size="10" font-family="Geist Mono, monospace">{stats.days}d ago</text>
-						<text x={W} y={H + 14} fill="#8f887a" font-size="10" text-anchor="end" font-family="Geist Mono, monospace">today</text>
+						<text x="0" y={H + 14} fill="#8b87a8" font-size="10" font-family="Geist Mono, monospace">{stats.days}d ago</text>
+						<text x={W} y={H + 14} fill="#8b87a8" font-size="10" text-anchor="end" font-family="Geist Mono, monospace">today</text>
 					</svg>
 				</div>
 			</section>

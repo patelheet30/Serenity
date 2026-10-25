@@ -26,17 +26,17 @@ export function duration(seconds: number | null): string {
 
 /** Every case action: its colour, and which group the "Actions over time" chart stacks it in. */
 export const ACTIONS: Record<string, { color: string; group: 'Removals' | 'Restrictions' | 'Reversals' }> = {
-	ban: { color: '#ef8a78', group: 'Removals' },
-	softban: { color: '#c96e60', group: 'Removals' },
-	kick: { color: '#f0b46a', group: 'Removals' },
-	timeout: { color: '#d9a05c', group: 'Restrictions' },
-	warn: { color: '#e6d38c', group: 'Restrictions' },
-	untimeout: { color: '#5fa98a', group: 'Reversals' },
-	unban: { color: '#8fe3bf', group: 'Reversals' }
+	ban: { color: '#f0567a', group: 'Removals' },
+	softban: { color: '#c2456a', group: 'Removals' },
+	kick: { color: '#ff7f6b', group: 'Removals' },
+	timeout: { color: '#ff9a2e', group: 'Restrictions' },
+	warn: { color: '#ffd38e', group: 'Restrictions' },
+	untimeout: { color: '#7e78d6', group: 'Reversals' },
+	unban: { color: '#a9a3f0', group: 'Reversals' }
 };
 
 export const GROUPS = [
 	{ n: 'Removals', c: 'var(--red)' },
-	{ n: 'Restrictions', c: 'var(--amber)' },
-	{ n: 'Reversals', c: 'var(--acc)' }
+	{ n: 'Restrictions', c: 'var(--acc)' },
+	{ n: 'Reversals', c: 'var(--lilac)' }
 ].map((g) => ({ ...g, a: Object.keys(ACTIONS).filter((a) => ACTIONS[a].group === g.n) }));
