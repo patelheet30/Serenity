@@ -67,6 +67,17 @@ The bot stores everything in Postgres and connects using the standard `PGHOST` /
 uv run main.py
 ```
 
+### Dashboard (local dev)
+The dashboard is a SvelteKit SPA in `dashboard/`; its API lives inside the bot under `/api` on the same port as `/metrics`. Run the bot as above, then:
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+
+Vite serves the dashboard on http://localhost:5173 and proxies `/api` to the bot on `METRICS_PORT` (default 8080). For login, set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `DASHBOARD_SECRET` in `.env` (see `.env.example`) and add `http://localhost:5173/api/auth/callback` as a redirect in the Discord developer portal. `npm run check`, `npm test` and `npm run build` are what CI runs. `/gallery` shows every UI component.
+
 ### Deployment
 Production runs with `docker compose` (the bot plus a `postgres` container; see `docker-compose.yml`). Every merge to `main` deploys automatically through `.github/workflows/deploy.yml`, which copies the repo to the server and rebuilds the bot.
 
