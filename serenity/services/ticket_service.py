@@ -395,11 +395,19 @@ class TicketService:
                         "Manage Channels and Manage Roles."
                     ) from None
                 raise
-            await self.repo.set_ticket_channel(ticket["id"], channel.id)
+            try:
+                await self.repo.set_ticket_channel(ticket["id"], channel.id)
+            except BaseException:  # don't leave a channel and an open ticket nobody can find
+                await self.rest.delete_channel(channel.id)
+                await self.repo.delete_ticket(ticket["id"])
+                raise
             self.open_channels.add(channel.id)
             ticket["channel_id"] = channel.id
 
-        await self.post_welcome(ticket, ticket_type, member.id)
+        try:
+            await self.post_welcome(ticket, ticket_type, member.id)
+        except hikari.HTTPError:  # the ticket is open and the opener gets its link regardless
+            logger.exception(f"Couldn't post the welcome message for ticket {ticket['id']}")
         return ticket
 
     async def post_welcome(self, ticket: dict, ticket_type: dict, opener_id: int) -> None:
