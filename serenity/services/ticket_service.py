@@ -13,6 +13,7 @@ import toolbox
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
+from serenity.services.ticket_webhooks import TicketWebhooks
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -175,6 +176,7 @@ class TicketService:
         self.cache = cache
         self.modules = modules
         self.logging = logging
+        self.webhooks = TicketWebhooks(repo)
         # Channels of open tickets, so the message listener can skip every other message
         # without a query. ponytail: one bot process; shard across processes and this moves to the DB.
         self.open_channels: set[int] = set()
@@ -202,7 +204,8 @@ class TicketService:
         actor_id: Optional[int],
         detail: Optional[str] = None,
     ) -> None:
-        """Post a ticket event to the ticket log, if the server has one."""
+        """Post a ticket event to the ticket log, if the server has one, and to its webhooks."""
+        self.webhooks.dispatch(ticket, ticket_type, kind, actor_id, detail)
         if self.logging:
             await self.logging.log_ticket_event(
                 guild_id=ticket["guild_id"],

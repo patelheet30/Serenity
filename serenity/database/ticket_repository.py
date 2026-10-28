@@ -585,6 +585,105 @@ class TicketRepository:
             now,
         )
 
+    # Webhooks
+
+    async def add_webhook(
+        self, guild_id: int, url: str, secret: str, events: list[str], type_id: Optional[int], /
+    ) -> dict:
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            """INSERT INTO ticket_webhooks (guild_id, url, secret, events, type_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING *""",
+            guild_id,
+            url,
+            secret,
+            events,
+            type_id,
+            int(time.time()),
+        )
+        return dict(row)  # type: ignore[arg-type]
+
+    async def remove_webhook(self, guild_id: int, webhook_id: int, /) -> bool:
+        pool = self._require_pool()
+        status = await pool.execute(
+            "DELETE FROM ticket_webhooks WHERE guild_id = $1 AND id = $2", guild_id, webhook_id
+        )
+        return status != "DELETE 0"
+
+    async def get_webhook(self, guild_id: int, webhook_id: int, /) -> Optional[dict]:
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM ticket_webhooks WHERE guild_id = $1 AND id = $2", guild_id, webhook_id
+        )
+        return dict(row) if row else None
+
+    async def list_webhooks(self, guild_id: int, /) -> list[dict]:
+        """A server's webhooks, each with its latest delivery's outcome (`last_*`)."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT w.*, d.event AS last_event, d.attempts AS last_attempts,
+                d.status AS last_status, d.latency_ms AS last_latency_ms,
+                d.error AS last_error, d.created_at AS last_at
+            FROM ticket_webhooks w
+            LEFT JOIN LATERAL (
+                SELECT * FROM ticket_webhook_deliveries WHERE webhook_id = w.id
+                ORDER BY id DESC LIMIT 1
+            ) d ON TRUE
+            WHERE w.guild_id = $1 ORDER BY w.id""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def webhooks_for(self, guild_id: int, event: str, type_id: int, /) -> list[dict]:
+        """The webhooks subscribed to `event` on tickets of `type_id`."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT * FROM ticket_webhooks WHERE guild_id = $1
+            AND (events = '{}' OR $2 = ANY(events)) AND (type_id IS NULL OR type_id = $3)
+            ORDER BY id""",
+            guild_id,
+            event,
+            type_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def add_delivery(self, webhook_id: int, event: str, /) -> int:
+        pool = self._require_pool()
+        return await pool.fetchval(
+            """INSERT INTO ticket_webhook_deliveries (webhook_id, event, created_at)
+            VALUES ($1, $2, $3) RETURNING id""",
+            webhook_id,
+            event,
+            int(time.time()),
+        )
+
+    async def update_delivery(
+        self,
+        delivery_id: int,
+        attempts: int,
+        status: Optional[int],
+        latency_ms: Optional[int],
+        error: Optional[str],
+        /,
+    ) -> None:
+        pool = self._require_pool()
+        await pool.execute(
+            """UPDATE ticket_webhook_deliveries
+            SET attempts = $2, status = $3, latency_ms = $4, error = $5 WHERE id = $1""",
+            delivery_id,
+            attempts,
+            status,
+            latency_ms,
+            error,
+        )
+
+    async def purge_webhook_deliveries(self, before: int, /) -> int:
+        pool = self._require_pool()
+        status = await pool.execute(
+            "DELETE FROM ticket_webhook_deliveries WHERE created_at < $1", before
+        )
+        return int(status.split()[-1])
+
     # Blacklist
 
     async def blacklist_add(

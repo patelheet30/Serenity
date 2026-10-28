@@ -19,6 +19,7 @@ from serenity.services.ticket_service import (
     parse_questions,
     render_transcript,
 )
+from serenity.services.ticket_webhooks import DELIVERY_RETENTION, EVENTS, WebhookError
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
 
@@ -43,6 +44,7 @@ panel_group = ticket.include_subgroup("panel", "Post the messages members open t
 blacklist_group = ticket.include_subgroup("blacklist", "Stop members from opening tickets.")
 transcript_group = ticket.include_subgroup("transcript", "Closed tickets' transcripts.")
 settings_group = ticket.include_subgroup("settings", "Server-wide ticket settings.")
+webhook_group = ticket.include_subgroup("webhook", "Send ticket events to your own systems.")
 
 PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
 MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
@@ -56,7 +58,7 @@ async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
             flags=hikari.MessageFlag.EPHEMERAL,
         )
         return
-    if isinstance(exc, (TicketError, SerenityPermissionError)):
+    if isinstance(exc, (TicketError, WebhookError, SerenityPermissionError)):
         await ctx.respond(f"❌ {exc}", flags=hikari.MessageFlag.EPHEMERAL)
         return
     if isinstance(exc, asyncpg.UniqueViolationError):  # type names, case-insensitively
@@ -700,6 +702,111 @@ async def settings_retention(
     )
 
 
+def parse_events(text: Optional[str]) -> list[str]:
+    """"opened, closed" as ["ticket.opened", "ticket.closed"]; nothing means every event ([])."""
+    events: list[str] = []
+    for name in (text or "").replace(",", " ").split():
+        event = name if name.startswith("ticket.") else f"ticket.{name}"
+        if event not in EVENTS:
+            raise TicketError(
+                f"There's no **{name}** event. Events: "
+                + ", ".join(e.removeprefix("ticket.") for e in EVENTS)
+            )
+        if event not in events:
+            events.append(event)
+    return events
+
+
+@webhook_group.include
+@arc.slash_subcommand("add", "Send ticket events to a URL, signed with a secret.")
+async def webhook_add(
+    ctx: arc.GatewayContext,
+    url: arc.Option[str, arc.StrParams("An https:// URL on the public internet.", max_length=500)],
+    events: arc.Option[
+        Optional[str], arc.StrParams("e.g. opened, stage_changed, closed (default: all).", max_length=300)
+    ] = None,
+    type: arc.Option[
+        Optional[str], arc.StrParams("Only tickets of this type.", autocomplete_with=type_names)
+    ] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type) if type else None
+    hook = await service.webhooks.add(
+        guild_id, url, parse_events(events), ticket_type["id"] if ticket_type else None
+    )
+    # The secret is shown once, to the admin only, and is never logged.
+    await ctx.respond(
+        f"✅ Webhook #{hook['id']} added. Its signing secret, shown only now:\n||`{hook['secret']}`||\n"
+        "Each POST carries `X-Serenity-Timestamp` and `X-Serenity-Signature: sha256=<hex>`, the "
+        "HMAC-SHA256 of `<timestamp>.<body>` keyed with that secret. "
+        f"Try it with `/ticket webhook test {hook['id']}`.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@webhook_group.include
+@arc.slash_subcommand("remove", "Stop sending ticket events to a webhook.")
+async def webhook_remove(
+    ctx: arc.GatewayContext,
+    webhook: arc.Option[int, arc.IntParams("Webhook number, from /ticket webhook list.", min=1)],
+    repo: TicketRepository = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    if not await repo.remove_webhook(guild_id, webhook):
+        raise TicketError(f"There's no webhook #{webhook}.")
+    await ctx.respond(f"🗑️ Removed webhook #{webhook}.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@webhook_group.include
+@arc.slash_subcommand("list", "This server's webhooks and how their last delivery went.")
+async def webhook_list(ctx: arc.GatewayContext, repo: TicketRepository = arc.inject()) -> None:
+    guild_id = require_manage_guild(ctx)
+    hooks = await repo.list_webhooks(guild_id)
+    if not hooks:
+        await ctx.respond(
+            "No webhooks yet. Add one with `/ticket webhook add`.", flags=hikari.MessageFlag.EPHEMERAL
+        )
+        return
+    types = {t["id"]: t["name"] for t in await repo.list_types(guild_id)}
+    lines = []
+    for h in hooks:
+        events = ", ".join(e.removeprefix("ticket.") for e in h["events"]) or "all events"
+        scope = f" · {types.get(h['type_id'], 'deleted type')} tickets only" if h["type_id"] else ""
+        if h["last_at"] is None:
+            last = "nothing sent yet"
+        elif h["last_error"] is None:
+            last = f"✅ {h['last_event']} <t:{h['last_at']}:R> (HTTP {h['last_status']}, {h['last_latency_ms']} ms)"
+        else:
+            last = (
+                f"❌ {h['last_event']} <t:{h['last_at']}:R> after {h['last_attempts']} "
+                f"attempt(s): {h['last_error']}"
+            )
+        lines.append(f"**#{h['id']}** <{h['url']}>\n{events}{scope}\nLast: {last}")
+    await ctx.respond("\n\n".join(lines)[:2000], flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@webhook_group.include
+@arc.slash_subcommand("test", "Send a test event to a webhook now.")
+async def webhook_test(
+    ctx: arc.GatewayContext,
+    webhook: arc.Option[int, arc.IntParams("Webhook number, from /ticket webhook list.", min=1)],
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    hook = await service.repo.get_webhook(guild_id, webhook)
+    if hook is None:
+        raise TicketError(f"There's no webhook #{webhook}.")
+    await ctx.defer(flags=hikari.MessageFlag.EPHEMERAL)  # the receiver has up to 10 seconds
+    error = await service.webhooks.send_test(hook)
+    await ctx.respond(
+        f"✅ Webhook #{webhook} accepted the test event."
+        if error is None
+        else f"❌ Webhook #{webhook} didn't accept the test event: {error}",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -897,7 +1004,9 @@ async def auto_unclaim(service: TicketService) -> None:
 @arc.utils.cron_loop("30 4 * * *")  # nightly, after the 03:30 UTC backup
 async def purge_transcripts(service: TicketService) -> None:
     try:
-        await service.purge_transcripts(int(time.time()))
+        now = int(time.time())
+        await service.purge_transcripts(now)
+        await service.repo.purge_webhook_deliveries(now - DELIVERY_RETENTION)
     except Exception:
         logger.exception("Ticket transcript purge failed")
 
