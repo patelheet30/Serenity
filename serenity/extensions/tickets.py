@@ -235,7 +235,8 @@ async def type_staff(
     roles: list[int] = ticket_type["staff_role_ids"]
     removed = role.id in roles
     roles = [r for r in roles if r != role.id] if removed else [*roles, role.id]
-    await repo.update_type(guild_id, ticket_type["id"], staff_role_ids=roles)
+    if await repo.update_type(guild_id, ticket_type["id"], staff_role_ids=roles) is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
     await ctx.respond(
         f"✅ {role.mention} {'no longer handles' if removed else 'now handles'} "
         f"**{ticket_type['name']}** tickets. (Open tickets keep their current access.)",
