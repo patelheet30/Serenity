@@ -142,6 +142,7 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
         f" · Outside hours: {'can open' if ticket_type['open_off_hours'] else 'closed'}\n"
         f"Transcripts: {'on' if ticket_type['transcripts'] else 'off'}"
         f" · Retention: {'server default' if retention is None else 'until deleted' if retention == 0 else f'{retention} days'}\n"
+        f"Ratings: {'on' if ticket_type['ratings'] else 'off'}\n"
         f"Stages: {stages}\n"
         f"Questions:\n{questions}"
     )
@@ -231,6 +232,9 @@ async def type_edit(
         Optional[int],
         arc.IntParams("Unclaim after this many hours of staff silence (0 = never).", min=0, max=168),
     ] = None,
+    ratings: arc.Option[
+        Optional[bool], arc.BoolParams("Ask openers to rate closed tickets (turn off for appeals).")
+    ] = None,
     hours: arc.Option[
         Optional[str],
         arc.StrParams('Own support hours, e.g. "mon-fri 09:00-17:00" ("default" = the server\'s).', max_length=200),
@@ -256,6 +260,7 @@ async def type_edit(
         "name_template": channel_name,
         "transcripts": transcripts,
         "retention_days": retention_days,
+        "ratings": ratings,
         "open_off_hours": open_off_hours,
     }
     values = {k: v for k, v in values.items() if v is not None}
@@ -932,12 +937,16 @@ async def transcript_get(
     transcript = await service.repo.get_transcript(found["id"])
     if transcript is None:
         raise TicketError(f"Ticket #{number} has no transcript.")
+    text = render_transcript(transcript["document"], staff=True)
+    if rating := await service.repo.get_rating(found["id"]):
+        text += f"\nRated {rating['rating']}/5 by the opener" + (
+            f": {rating['comment']}\n" if rating["comment"] else "\n"
+        )
     await ctx.respond(
         f"📄 Transcript of ticket #{number}"
+        + (f" · {'⭐' * rating['rating']}" if rating else "")
         + (" · ⚠️ the opener asked for it to be deleted" if transcript["deletion_requested_at"] else ""),
-        attachment=hikari.Bytes(
-            render_transcript(transcript["document"], staff=True).encode(), f"ticket-{number}.txt"
-        ),
+        attachment=hikari.Bytes(text.encode(), f"ticket-{number}.txt"),
         flags=hikari.MessageFlag.EPHEMERAL,
     )
 
@@ -1010,6 +1019,25 @@ async def settings_retention(
     await ctx.respond(
         f"✅ Transcripts are now kept for {days} days after a ticket closes. "
         "(Already-closed tickets keep their current expiry.)",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("ratings", "How long openers can rate a closed ticket.")
+async def settings_ratings(
+    ctx: arc.GatewayContext,
+    days: arc.Option[int, arc.IntParams("Days after closing (1–30).", min=1, max=30)],
+    modules: ModuleManager = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    config = await modules.get_module_config(guild_id, ModuleType.TICKETS)
+    await modules.update_module_settings(
+        guild_id, ModuleType.TICKETS, {**config.settings, "rating_window_days": days}
+    )
+    await ctx.respond(
+        f"✅ Openers can rate a ticket for {days} days after it closes. Ratings of "
+        "2 or less are flagged in the ticket log; turn ratings off per type with `/ticket type edit`.",
         flags=hikari.MessageFlag.EPHEMERAL,
     )
 
@@ -1383,6 +1411,29 @@ async def request_deletion(
         await reply(interaction, "You've already asked, or the transcript is already gone.")
 
 
+async def rate(
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    service: TicketService,
+    target: str,
+) -> None:
+    """A star button in the close DM opens an optional-comment form; submitting it rates."""
+    ticket_id, rating = (int(part) for part in target.split(":"))
+    if isinstance(interaction, hikari.ComponentInteraction):
+        # Checked before the form too, so nobody writes a comment only to be refused.
+        current, _ = await service.check_can_rate(ticket_id, interaction.user.id)
+        row = service.rest.build_modal_action_row().add_text_input(
+            "comment", "Anything to add? (optional)", style=hikari.TextInputStyle.PARAGRAPH,
+            required=False, max_length=500,
+        )
+        await interaction.create_modal_response(
+            f"Rate ticket #{current['number']}: {rating}/5", f"ticket:ratewhy:{target}", component=row
+        )
+        return
+    comment = modal_values(interaction).get("comment") or None
+    await service.rate(ticket_id, interaction.user.id, rating, comment)
+    await reply(interaction, f"✅ Thanks! You rated this ticket {rating}/5.")
+
+
 @plugin.listen()
 async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     interaction = event.interaction
@@ -1396,6 +1447,9 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     try:
         if action == "delreq":  # from the close DM, so there's no guild
             await request_deletion(interaction, service, int(target))
+            return
+        if action in ("rate", "ratewhy"):  # also from the close DM; the service checks the guild
+            await rate(interaction, service, target)
             return
         if not interaction.guild_id:
             return

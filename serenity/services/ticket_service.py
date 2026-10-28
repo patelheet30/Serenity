@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import hikari
 import toolbox
 
-from serenity.core.modules import ModuleManager, ModuleType
+from serenity.core.modules import ModuleManager, ModuleType, module_available
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
 from serenity.services.ticket_hours import (
@@ -33,6 +33,8 @@ PRIORITIES = ("low", "normal", "high", "urgent")
 CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
+DEFAULT_RATING_WINDOW_DAYS = 7
+LOW_RATING = 2  # ratings at or below this alert the ticket log
 RAID_PAUSED = "Opening tickets is paused because a lot were opened at once. Please try again later."
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 DEFAULT_OFF_HOURS = (
@@ -1285,18 +1287,33 @@ class TicketService:
         embed.add_field("Closed by", f"<@{closed_by}>", inline=True)
         embed.add_field("Reason", (reason or "No reason given")[:1024], inline=True)
         kwargs: dict = {}
+        rows: list[hikari.api.MessageActionRowBuilder] = []
+        # Not asked again after a reopen if they already rated it.
+        try:
+            ask = ticket_type["ratings"] and await self.repo.get_rating(ticket["id"]) is None
+        except Exception:  # the close already happened; send the DM without the buttons
+            logger.exception(f"Couldn't check the rating of closed ticket {ticket['id']}")
+            ask = False
+        if ask:
+            embed.add_field("How did we do?", "Rate your experience from 1 (poor) to 5 (great).")
+            rows.append(self.rest.build_message_action_row())
+            for n in range(1, 6):
+                rows[-1].add_interactive_button(
+                    hikari.ButtonStyle.SECONDARY, f"ticket:rate:{ticket['id']}:{n}", label=str(n), emoji="⭐"
+                )
         if document is not None:
             embed.set_footer("The transcript is attached. Staff can reopen this ticket for 7 days.")
             kwargs["attachment"] = hikari.Bytes(
                 render_transcript(document, staff=False).encode(), f"ticket-{ticket['number']}.txt"
             )
-            kwargs["component"] = self.rest.build_message_action_row().add_interactive_button(
+            rows.append(self.rest.build_message_action_row().add_interactive_button(
                 hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
                 label="Ask to delete this transcript",
-            )
+            ))
         try:
             dm = await self.rest.create_dm_channel(ticket["opener_id"])
-            await self.rest.create_message(dm, embed=embed, **kwargs)
+            # ponytail: DMs closed means no rating; the dashboard's transcript page can offer it later.
+            await self.rest.create_message(dm, embed=embed, components=rows, **kwargs)
         except (hikari.ForbiddenError, hikari.NotFoundError, hikari.BadRequestError):
             pass  # DMs closed, or the opener left: they still have nothing to lose
         except hikari.HTTPError as exc:  # the close already happened; don't report it as failed
@@ -1377,6 +1394,50 @@ class TicketService:
             f"Delete it with `/ticket transcript delete {ticket['number']}`.",
         )
         return True
+
+    # Ratings
+
+    async def check_can_rate(self, ticket_id: int, user_id: int) -> tuple[dict, dict]:
+        """The closed ticket `user_id` may rate now, and its type; raises if they can't."""
+        ticket = await self.repo.get_ticket_by_id(ticket_id)
+        if ticket is None or ticket["opener_id"] != user_id:
+            raise TicketError("Only the person who opened this ticket can rate it.")
+        guild_id = ticket["guild_id"]
+        # The buttons are in a DM, so the guild checks other ticket buttons get happen here.
+        if not module_available(guild_id, ModuleType.TICKETS) or not await self.modules.is_enabled(
+            guild_id, ModuleType.TICKETS
+        ):
+            raise TicketError("Tickets are turned off in that server.")
+        ticket_type: dict = await self.repo.get_type(guild_id, ticket["type_id"])  # type: ignore[assignment]
+        if ticket["status"] != "closed":
+            raise TicketError("This ticket was reopened. You can rate it once it closes again.")
+        if not ticket_type["ratings"]:
+            raise TicketError(f"**{ticket_type['name']}** tickets aren't rated.")
+        if await self.repo.get_rating(ticket_id):
+            raise TicketError("You've already rated this ticket. Thanks!")
+        config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
+        days = int(config.settings.get("rating_window_days", DEFAULT_RATING_WINDOW_DAYS))
+        if ticket["closed_at"] < time.time() - days * 86400:
+            raise TicketError(f"Tickets can only be rated for {days} days after they close.")
+        return ticket, ticket_type
+
+    async def rate(self, ticket_id: int, user_id: int, rating: int, comment: Optional[str]) -> dict:
+        """Store the opener's rating, credited to the ticket's handlers; low ones alert staff."""
+        if not 1 <= rating <= 5:
+            raise TicketError("Ratings are from 1 to 5.")
+        ticket, ticket_type = await self.check_can_rate(ticket_id, user_id)
+        stored = await self.repo.add_rating(ticket_id, user_id, rating, comment)
+        if stored is None:  # a second submit that raced the first
+            raise TicketError("You've already rated this ticket. Thanks!")
+        await self.repo.add_event(ticket_id, "rated", user_id, {"rating": rating})
+        if rating <= LOW_RATING:
+            handlers = " ".join(f"<@{h}>" for h in stored["handler_ids"]) or "nobody"
+            detail = f"{'⭐' * rating} {rating}/5 · Handled by {handlers}"
+            await self.log(
+                ticket, ticket_type, "low_rating", user_id,
+                f"{detail}\n> {comment}" if comment else detail,
+            )
+        return stored
 
     # Staff controls
 

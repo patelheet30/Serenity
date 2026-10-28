@@ -5,6 +5,7 @@ import itertools
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import hikari
 import pytest
 from hikari.impl import MessageActionRowBuilder
@@ -561,6 +562,65 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_opener_rates_once_from_the_close_dm(service: TicketService, monkeypatch):
+    from serenity.core.modules import ModuleType
+
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+    await service.modules.enable_module(GUILD, ModuleType.TICKETS)
+    service.logging = AsyncMock()
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    with pytest.raises(TicketError, match="reopened"):  # still open
+        await service.rate(ticket["id"], ALICE, 5, None)
+    await service.repo.record_message(ticket["id"], BOB, staff=True)
+    await service.close(ticket, support, BOB, None)
+
+    rows = service.rest.create_message.call_args.kwargs["components"]
+    ids = [c.custom_id for c in rows[0].components]
+    assert ids == [f"ticket:rate:{ticket['id']}:{n}" for n in range(1, 6)]
+
+    with pytest.raises(TicketError, match="Only the person who opened"):
+        await service.rate(ticket["id"], BOB, 5, None)
+    stored = await service.rate(ticket["id"], ALICE, 2, "slow reply")
+    assert stored["rating"] == 2 and stored["handler_ids"] == [BOB]
+    alert = service.logging.log_ticket_event.call_args.kwargs
+    assert alert["kind"] == "low_rating" and f"<@{BOB}>" in alert["detail"] and "slow reply" in alert["detail"]
+    with pytest.raises(TicketError, match="already rated"):
+        await service.rate(ticket["id"], ALICE, 5, None)
+    assert (await service.repo.get_rating(ticket["id"]))["rating"] == 2  # type: ignore[index]
+
+    # Past the window, and types with ratings off: no buttons, and no rating.
+    late = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    await service.close(late, support, BOB, None)
+    await service.repo.pool.execute("UPDATE tickets SET closed_at = closed_at - 8 * 86400 WHERE id = $1", late["id"])
+    with pytest.raises(TicketError, match="for 7 days"):  # the default window
+        await service.rate(late["id"], BOB, 4, None)
+    with pytest.raises(TicketError, match="from 1 to 5"):
+        await service.rate(late["id"], BOB, 6, None)
+    with pytest.raises(asyncpg.CheckViolationError):  # and the table holds the line too
+        await service.repo.add_rating(late["id"], BOB, 6, None)
+    await service.modules.update_module_settings(GUILD, ModuleType.TICKETS, {"rating_window_days": 10})
+    assert (await service.rate(late["id"], BOB, 4, None))["rating"] == 4  # /ticket settings ratings
+    appeals = await service.repo.create_type(GUILD, "Appeals", ratings=False)
+    appeal = await service.open_ticket(GUILD, member(ALICE, "alice"), appeals, {})
+    await service.close(appeal, appeals, ALICE, None)
+    assert all("rate" not in c.custom_id for r in service.rest.create_message.call_args.kwargs["components"]
+               for c in r.components)
+    with pytest.raises(TicketError, match="aren't rated"):
+        await service.rate(appeal["id"], ALICE, 4, None)
+
+    # A failed rating lookup costs the buttons, not the close.
+    monkeypatch.setattr(service.repo, "get_rating", AsyncMock(side_effect=asyncpg.PostgresError()))
+    last = await service.open_ticket(GUILD, member(CAROL, "carol"), support, {})
+    await service.close(last, support, CAROL, None)
+    rows = service.rest.create_message.call_args.kwargs["components"]
+    assert [c.custom_id for r in rows for c in r.components] == [f"ticket:delreq:{last['id']}"]
+    assert service.logging.log_ticket_event.call_args.kwargs["kind"] == "closed"
 
 
 @pytest.mark.asyncio
