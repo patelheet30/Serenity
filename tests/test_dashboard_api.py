@@ -232,6 +232,7 @@ PLACEHOLDERS = {
     "{panel_id}": "1",
     "{pack}": "game",
     "{type_id}": "1",
+    "{webhook_id}": "1",
 }
 
 

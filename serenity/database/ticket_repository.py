@@ -852,6 +852,23 @@ class TicketRepository:
         )
         return dict(row)  # type: ignore[arg-type]
 
+    async def update_webhook(self, guild_id: int, webhook_id: int, /, **values: Any) -> Optional[dict]:
+        """Set any of url, secret, events and type_id; None if there's no such webhook."""
+        pool = self._require_pool()
+        sets, params = [], [guild_id, webhook_id]
+        for key, value in values.items():
+            if key not in ("url", "secret", "events", "type_id"):
+                raise ValueError(f"Unknown ticket webhook column: {key}")
+            params.append(value)
+            sets.append(f"{key} = ${len(params)}")
+        if not sets:
+            return await self.get_webhook(guild_id, webhook_id)
+        row = await pool.fetchrow(
+            f"UPDATE ticket_webhooks SET {', '.join(sets)} WHERE guild_id = $1 AND id = $2 RETURNING *",
+            *params,
+        )
+        return dict(row) if row else None
+
     async def remove_webhook(self, guild_id: int, webhook_id: int, /) -> bool:
         pool = self._require_pool()
         status = await pool.execute(
@@ -925,6 +942,19 @@ class TicketRepository:
             latency_ms,
             error,
         )
+
+    async def list_deliveries(self, guild_id: int, webhook_id: int, /, limit: int = 50) -> list[dict]:
+        """A webhook's latest deliveries, newest first; none if it isn't this server's."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT d.* FROM ticket_webhook_deliveries d
+            JOIN ticket_webhooks w ON w.id = d.webhook_id
+            WHERE w.guild_id = $1 AND d.webhook_id = $2 ORDER BY d.id DESC LIMIT $3""",
+            guild_id,
+            webhook_id,
+            limit,
+        )
+        return [dict(r) for r in rows]
 
     async def purge_webhook_deliveries(self, before: int, /) -> int:
         pool = self._require_pool()
