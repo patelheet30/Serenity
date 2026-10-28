@@ -540,11 +540,18 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     )
     service.cache.get_guild_channel.return_value = None
     service.cache.get_member.return_value = None
-    service.rest.fetch_channel.return_value = MagicMock(permission_overwrites={CAROL: guest})
+    opener = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(ALICE), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.rest.fetch_channel.return_value = MagicMock(
+        permission_overwrites={ALICE: opener, CAROL: guest}
+    )
 
     await service.transfer(ticket, support, billing, BOB)
     move = service.rest.edit_channel.call_args_list[0].kwargs
-    assert CAROL in {o.id for o in move["permission_overwrites"]}  # the guest kept access
+    users = {o.id for o in move["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.MEMBER}
+    assert users == {ALICE, CAROL}  # the opener and the guest both keep access
 
     service.rest.fetch_channel.side_effect = hikari.NotFoundError("", {}, b"")
     moved = await service.repo.get_ticket_by_id(ticket["id"])
