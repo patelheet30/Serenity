@@ -53,6 +53,18 @@ def test_log_types_match_the_schema_and_setup_channel_names():
     assert checks
     assert [t.strip(" '") for t in checks[-1].split(",")] == LOG_TYPES
 
+    # log_ignores allows the same types plus "*" (every type).
+    ignores = []
+    for path in sorted(Path("serenity/database/migrations").glob("*.sql")):
+        sql = path.read_text()
+        table = re.search(r"CREATE TABLE log_ignores \((.*?)\n\);", sql, re.S)
+        ignores += re.findall(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1) if table else "")
+        ignores += re.findall(
+            r"log_ignores_log_type_check\s+CHECK \(log_type IN \(([^)]*)\)\)", sql
+        )
+    assert ignores
+    assert [t.strip(" '") for t in ignores[-1].split(",")] == ["*", *LOG_TYPES]
+
 
 def test_dashboard_labels_every_log_type():
     """The dashboard's Logging page looks each log type up in TYPES; a missing one crashes it."""
