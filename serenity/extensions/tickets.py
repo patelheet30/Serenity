@@ -558,9 +558,9 @@ async def priority(
     service.require_staff(ctx.member, ticket_type)
     if current["priority"] == level:
         raise TicketError(f"This ticket is already {level} priority.")
-    await ctx.defer()
-    await service.set_priority(current, ticket_type, level, ctx.user.id)
+    # Answer first: a rename can wait up to 10 minutes on Discord's rate limit.
     await ctx.respond(f"🚦 Priority set to **{level}**.")
+    await service.set_priority(current, ticket_type, level, ctx.user.id)
 
 
 @ticket.include
@@ -586,6 +586,10 @@ async def note(
 ) -> None:
     current, ticket_type = await service.ticket_here(ctx.channel_id)
     service.require_staff(ctx.member, ticket_type)
+    if not ticket_type["transcripts"]:
+        raise TicketError(
+            f"Notes are kept in the transcript, and **{ticket_type['name']}** tickets don't keep one."
+        )
     await service.repo.add_note(current["id"], ctx.user.id, text)
     await ctx.respond(
         "🗒️ Note saved. Only staff see it, in the transcript (`/ticket transcript get`).",

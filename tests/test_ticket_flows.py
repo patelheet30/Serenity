@@ -414,6 +414,7 @@ async def test_priority_renames_and_opener_cant_be_removed(service: TicketServic
 
 
 
+@pytest.mark.asyncio
 async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=1)
     first = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
@@ -474,3 +475,24 @@ async def test_close_survives_a_channel_deleted_by_hand(service: TicketService):
     closed = await service.close(ticket, support, ALICE, None)
     assert closed["status"] == "closed"
     assert (await service.repo.get_transcript(ticket["id"]))["document"]["messages"] == []  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_priority_survives_reopen_and_rolls_back_without_permission(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.MANAGE_GUILD)
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    urgent = await service.set_priority(ticket, support, "urgent", BOB)
+
+    service.rest.edit_channel.side_effect = hikari.ForbiddenError("", {}, b"")
+    with pytest.raises(TicketError, match="Manage Channels"):
+        await service.set_priority(urgent, support, "low", BOB)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["priority"] == "urgent"  # type: ignore[index]
+
+    await service.close(urgent, support, BOB, None)
+    await service.reopen(GUILD, 1, staff(BOB, "bob"))
+    assert service.rest.create_guild_text_channel.call_args.args[1] == "urgent-support-1"
