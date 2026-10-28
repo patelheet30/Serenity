@@ -117,3 +117,33 @@ async def test_notes_transcripts_and_blacklist(tickets: TicketRepository):
     assert await tickets.blacklist_remove(GUILD, USER)
     assert await tickets.get_blacklist_entry(GUILD, USER) is None
 
+
+
+@pytest.mark.asyncio
+async def test_guild_boundaries_and_name_uniqueness(tickets: TicketRepository):
+    ours = await tickets.create_type(GUILD, "Billing")
+    theirs = await tickets.create_type(OTHER_GUILD, "Billing")
+
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await tickets.create_type(GUILD, "billing")
+    with pytest.raises(ValueError):
+        await tickets.create_ticket(GUILD, theirs["id"], USER, {})
+    with pytest.raises(ValueError):
+        await tickets.create_panel(GUILD, CHANNEL, "Help", [ours["id"], theirs["id"]])
+
+    panel = await tickets.create_panel(GUILD, CHANNEL, "Help", [ours["id"]])
+    with pytest.raises(ValueError):
+        await tickets.update_panel(GUILD, panel["id"], type_ids=[theirs["id"]])
+    assert (await tickets.update_panel(GUILD, panel["id"]))["id"] == panel["id"]  # type: ignore[index]
+
+    # A type a panel still shows can't be deleted.
+    assert not await tickets.delete_type(GUILD, ours["id"])
+    await tickets.delete_panel(GUILD, panel["id"])
+    assert await tickets.delete_type(GUILD, ours["id"])
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_with_nothing_to_change(tickets: TicketRepository):
+    support = await tickets.create_type(GUILD, "Support")
+    ticket = await tickets.create_ticket(GUILD, support["id"], USER, {})
+    assert (await tickets.update_ticket(ticket["id"]))["number"] == 1  # type: ignore[index]
