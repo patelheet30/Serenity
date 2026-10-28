@@ -44,7 +44,9 @@ def test_module_choices_cover_every_module():
         assert set(choices(command, "module").values()) == {m.value for m in ModuleType}
 
 
-def test_module_hook_gates_subgroup_commands(client):
-    """The plugin-wide require_module hook reaches /ticket type subcommands."""
-    hooks = [h.__name__ for h in tickets.type_create._resolve_hooks()]
-    assert "module_check_hook" in hooks
+def test_module_hook_gates_every_ticket_command(client):
+    """The plugin-wide require_module hook reaches every /ticket command, subgroups included."""
+    commands = list(tickets.plugin.walk_commands(hikari.CommandType.SLASH, callable_only=True))
+    assert commands
+    for command in commands:
+        assert "module_check_hook" in [h.__name__ for h in command._resolve_hooks()], command.name
