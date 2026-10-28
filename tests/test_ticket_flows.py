@@ -382,8 +382,9 @@ async def test_transfer_changes_who_can_see_the_ticket(service: TicketService):
 
     moved = await service.transfer(ticket, support, billing, BOB)
     assert moved["type_id"] == billing["id"]
-    edit = service.rest.edit_channel.call_args.kwargs
-    assert edit["name"] == "billing-1"
+    move, rename = (c.kwargs for c in service.rest.edit_channel.call_args_list)
+    assert rename["name"] == "billing-1"
+    edit = move
     roles = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.ROLE}
     users = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.MEMBER}
     assert roles == {GUILD, other_role} and users == {ALICE, CAROL}
