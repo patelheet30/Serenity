@@ -266,3 +266,21 @@ async def test_a_raise_during_recording_is_kept():
     )
     await tasks._record_due_effectiveness(repo, now=400)
     assert tasks._PENDING_EFFECT[CHANNEL] == newer
+
+
+@pytest.mark.asyncio
+async def test_background_tasks_wait_for_startup(monkeypatch):
+    """on_started waits for arc's startup hooks (which register the dependencies)."""
+    started = asyncio.Event()
+    client = MagicMock()
+    client.wait_until_started = AsyncMock(side_effect=started.wait)
+    monkeypatch.setattr(type(tasks.plugin), "client", property(lambda self: client))
+    for loop in ("update_slowmode", "aggregate_historical_patterns", "aggregate_hourly_analytics", "cleanup_old_data"):
+        monkeypatch.setattr(tasks, loop, MagicMock())
+
+    run = asyncio.create_task(tasks.on_started(MagicMock()))
+    await asyncio.sleep(0)
+    client.get_type_dependency.assert_not_called()  # still waiting
+    started.set()
+    await run
+    tasks.update_slowmode.start.assert_called_once()
