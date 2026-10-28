@@ -134,3 +134,19 @@ async def test_duplicate_types_on_a_panel_are_listed_once():
     service = AsyncMock()
     service.resolve_type.side_effect = lambda _, name: {"id": {"a": 1, "b": 2}[name]}
     assert await resolve_type_list(service, 1, "a, b, a") == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_tickets_module_cant_be_enabled_outside_the_allowlist(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from serenity.core.modules import ModuleManager, ModuleType
+    from serenity.utils.errors import ConfigurationError
+
+    repo = AsyncMock()
+    manager = ModuleManager(repo)
+    monkeypatch.setenv("TICKETS_GUILDS", "1")
+    await manager.enable_module(1, ModuleType.TICKETS)
+    with pytest.raises(ConfigurationError, match="isn't available"):
+        await manager.enable_module(2, ModuleType.TICKETS)
+    repo.set_module_enabled.assert_awaited_once()
