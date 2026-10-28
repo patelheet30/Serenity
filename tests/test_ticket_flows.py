@@ -349,3 +349,55 @@ async def test_ticket_flows_are_logged(service: TicketService):
     assert not await service.request_transcript_deletion(ticket["id"], ALICE)
     kinds = [c.kwargs["kind"] for c in service.logging.log_ticket_event.call_args_list]
     assert kinds == ["opened", "claimed", "closed", "deletion_requested"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_changes_who_can_see_the_ticket(service: TicketService):
+    other_role = 1_241_890_335_472_164_907
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    billing = await service.repo.create_type(GUILD, "Billing", staff_role_ids=[other_role])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.claim(ticket, BOB, announce=False)
+    guest = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(CAROL), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    opener = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(ALICE), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.cache.get_guild_channel.return_value = MagicMock(
+        permission_overwrites={ALICE: opener, CAROL: guest}
+    )
+    service.cache.get_member.return_value = None
+
+    moved = await service.transfer(ticket, support, billing, BOB)
+    assert moved["type_id"] == billing["id"]
+    edit = service.rest.edit_channel.call_args.kwargs
+    assert edit["name"] == "billing-1"
+    roles = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.ROLE}
+    users = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.MEMBER}
+    assert roles == {GUILD, other_role} and users == {ALICE, CAROL}
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
+    with pytest.raises(TicketError, match="already"):
+        await service.transfer(moved, billing, billing, BOB)
+
+
+@pytest.mark.asyncio
+async def test_priority_renames_and_opener_cant_be_removed(service: TicketService):
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+
+    updated = await service.set_priority(ticket, support, "urgent", BOB)
+    assert updated["priority"] == "urgent"
+    assert service.rest.edit_channel.call_args.kwargs["name"] == "urgent-support-1"
+    await service.set_priority(updated, support, "normal", BOB)
+    assert service.rest.edit_channel.call_args.kwargs["name"] == "support-1"
+
+    with pytest.raises(TicketError, match="opener"):
+        await service.remove_member(ticket, ALICE, BOB)
+    await service.add_member(ticket, support, CAROL, BOB)
+    await service.remove_member(ticket, CAROL, BOB)
+    kinds = [e["kind"] for e in await service.repo.list_events(ticket["id"])]
+    assert kinds == ["opened", "priority", "priority", "member_added", "member_removed"]
