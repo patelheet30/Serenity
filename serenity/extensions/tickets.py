@@ -452,9 +452,10 @@ async def unclaim(ctx: arc.GatewayContext, service: TicketService = arc.inject()
         raise TicketError("Nobody has claimed this ticket.")
     if current["assignee_id"] != ctx.user.id and not member_permissions(member) & hikari.Permissions.MANAGE_GUILD:
         raise TicketError(f"Only <@{current['assignee_id']}> or an admin can unclaim this ticket.")
-    await service.unclaim(
+    if not await service.unclaim(
         current, ctx.user.id, f"↩️ <@{current['assignee_id']}> is no longer handling this ticket."
-    )
+    ):
+        raise TicketError("Someone else claimed this ticket a moment ago.")
     await ctx.respond("✅ Unclaimed.", flags=hikari.MessageFlag.EPHEMERAL)
 
 

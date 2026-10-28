@@ -505,8 +505,10 @@ class TicketService:
             await self.rest.create_message(ticket["channel_id"], text, user_mentions=[user_id])
         return updated
 
-    async def unclaim(self, ticket: dict, actor_id: Optional[int], note: str) -> None:
-        await self.repo.unclaim(ticket["id"])
+    async def unclaim(self, ticket: dict, actor_id: Optional[int], note: str) -> bool:
+        """Unassign `ticket`'s assignee, unless someone else has claimed it since."""
+        if await self.repo.unclaim(ticket["id"], expected=ticket["assignee_id"]) is None:
+            return False
         await self.repo.add_event(
             ticket["id"], "unclaimed", actor_id, {"previous": ticket["assignee_id"]}
         )
@@ -517,6 +519,7 @@ class TicketService:
         )
         if ticket["channel_id"]:
             await self.rest.create_message(ticket["channel_id"], note, role_mentions=True)
+        return True
 
     async def on_message(self, event: hikari.GuildMessageCreateEvent) -> None:
         """Count replies in ticket channels; a first staff reply claims in reply mode."""
@@ -538,12 +541,15 @@ class TicketService:
         """Unclaim tickets whose opener has waited too long, and ping the type's staff."""
         for ticket in await self.repo.due_for_unclaim(now):
             roles = " ".join(f"<@&{r}>" for r in ticket["staff_role_ids"])
-            await self.unclaim(
-                ticket,
-                None,
-                f"⏰ No staff reply for {ticket['auto_unclaim_hours']}h, so <@{ticket['assignee_id']}> "
-                f"was unassigned. {roles}".strip(),
-            )
+            try:
+                await self.unclaim(
+                    ticket,
+                    None,
+                    f"⏰ No staff reply for {ticket['auto_unclaim_hours']}h, so <@{ticket['assignee_id']}> "
+                    f"was unassigned. {roles}".strip(),
+                )
+            except Exception:  # one deleted or locked channel can't hold up the rest
+                logger.exception(f"Auto-unclaim failed for ticket {ticket['id']}")
 
     # Closing
 
