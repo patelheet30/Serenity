@@ -365,6 +365,22 @@ class TicketRepository:
             type_id,
         )
 
+    async def last_opened_at(self, guild_id: int, opener_id: int) -> Optional[int]:
+        """When this member last opened a ticket here, open or closed (the open cooldown)."""
+        pool = self._require_pool()
+        return await pool.fetchval(
+            "SELECT MAX(opened_at) FROM tickets WHERE guild_id = $1 AND opener_id = $2",
+            guild_id,
+            opener_id,
+        )
+
+    async def count_opened_since(self, guild_id: int, since: int) -> int:
+        """Tickets opened here since a time, open or closed (the raid brake)."""
+        pool = self._require_pool()
+        return await pool.fetchval(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = $1 AND opened_at >= $2", guild_id, since
+        )
+
     async def open_ticket_channels(self) -> list[int]:
         """Every open ticket's channel, across guilds (the bot's in-memory lookup set)."""
         pool = self._require_pool()

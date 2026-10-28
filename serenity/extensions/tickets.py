@@ -1014,6 +1014,73 @@ async def settings_retention(
     )
 
 
+@settings_group.include
+@arc.slash_subcommand("cooldown", "How long a member waits between opening tickets.")
+async def settings_cooldown(
+    ctx: arc.GatewayContext,
+    minutes: arc.Option[int, arc.IntParams("Minutes (0 turns it off).", min=0, max=1440)],
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(guild_id, open_cooldown_minutes=minutes)
+    await ctx.respond(
+        f"✅ Members can open a ticket every {minutes} minutes." if minutes
+        else "✅ There's no cooldown between tickets.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("requirements", "What a member needs before they can open tickets.")
+async def settings_requirements(
+    ctx: arc.GatewayContext,
+    account_age_days: arc.Option[
+        Optional[int], arc.IntParams("Minimum Discord account age in days (0: none).", min=0, max=365)
+    ] = None,
+    role: arc.Option[Optional[hikari.Role], arc.RoleParams("A role they need.")] = None,
+    no_role: arc.Option[bool, arc.BoolParams("Stop requiring a role.")] = False,
+    service: TicketService = arc.inject(),
+) -> None:
+    # ponytail: server-wide; per-type requirements come with the dashboard's type editor.
+    guild_id = require_manage_guild(ctx)
+    changes: dict = {}
+    if account_age_days is not None:
+        changes["min_account_age_days"] = account_age_days
+    if role or no_role:
+        changes["required_role_id"] = None if no_role else role.id  # type: ignore[union-attr]
+    if not changes:
+        raise TicketError("Nothing to change.")
+    await service.update_settings(guild_id, **changes)
+    settings = await service.settings(guild_id)
+    age, role_id = settings.get("min_account_age_days", 0), settings.get("required_role_id")
+    needs = [f"an account at least {age} days old"] if age else []
+    needs += [f"the <@&{role_id}> role"] if role_id else []
+    await ctx.respond(
+        f"✅ Opening a ticket needs {' and '.join(needs)}." if needs
+        else "✅ Anyone can open a ticket.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("raid-brake", "Pause opening when too many tickets open at once (also resumes).")
+async def settings_raid_brake(
+    ctx: arc.GatewayContext,
+    tickets: arc.Option[int, arc.IntParams("Pause once this many open (0 turns it off).", min=0, max=100)],
+    minutes: arc.Option[int, arc.IntParams("Within this many minutes.", min=1, max=60)] = 5,
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(guild_id, raid_limit=tickets, raid_window_minutes=minutes)
+    await service.resume_opening(guild_id)
+    await ctx.respond(
+        f"✅ Opening pauses if {tickets} tickets open within {minutes} minutes; staff are pinged in "
+        "the ticket log with a button to resume." if tickets
+        else "✅ The raid brake is off.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 def schedule_from(text: str) -> Optional[list]:
     """A parsed schedule; "default" is None, so a type follows the server's hours again."""
     if text.strip().lower() == "default":
@@ -1131,7 +1198,7 @@ async def open_from_panel(
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
     # Checked before the form too, so nobody fills one in only to be refused.
-    await service.check_can_open(guild_id, interaction.user.id, ticket_type)
+    await service.check_can_open(guild_id, interaction.member, ticket_type)  # type: ignore[arg-type]
 
     asked = asked_fields(ticket_type)
     typed = [f for f in asked if field_type(f) not in PICKED]
@@ -1340,6 +1407,18 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(interaction.values[0]))
         elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
             await submit_form(interaction, service, int(target))
+        elif action == "resume" and isinstance(interaction, hikari.ComponentInteraction):
+            if not interaction.member or not interaction.member.permissions & (
+                hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
+            ):
+                raise TicketError("You need **Manage Server** to resume opening tickets.")
+            await service.resume_opening(interaction.guild_id)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE,
+                f"✅ {interaction.user.mention} resumed opening tickets.",
+                components=[],
+                role_mentions=False,
+            )
         elif action == "pick" and isinstance(interaction, hikari.ComponentInteraction):
             type_id, key = target.split(":", 1)
             draft = service.get_draft((interaction.guild_id, interaction.user.id, int(type_id)))

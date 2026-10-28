@@ -5,7 +5,7 @@ import math
 import re
 import time
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 
@@ -33,6 +33,7 @@ PRIORITIES = ("low", "normal", "high", "urgent")
 CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
+RAID_PAUSED = "Opening tickets is paused because a lot were opened at once. Please try again later."
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 DEFAULT_OFF_HOURS = (
     "Hi {user}, our support team is away right now, so a reply may take a while. "
@@ -628,15 +629,12 @@ class TicketService:
 
     # Support hours
 
-    async def _settings(self, guild_id: int) -> dict:
-        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
-
     async def panel_status(self, guild_id: int) -> Optional[str]:
         """The panels' status line, if the server has support hours or away mode set.
 
         ponytail: the server's schedule only; a type with its own hours isn't shown separately.
         """
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, None, datetime.now(timezone.utc))
         if status is None:  # no line without a schedule, e.g. once away mode has ended
             return "🟢 Online" if settings.get("schedule") else None
@@ -654,7 +652,7 @@ class TicketService:
 
     async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
         """The auto-reply for a ticket opened now, or None while support is open."""
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
         if status is None:
             return None
@@ -678,25 +676,73 @@ class TicketService:
         config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
         return int(config.settings.get("retention_days", DEFAULT_RETENTION_DAYS))
 
-    async def check_can_open(self, guild_id: int, user_id: int, ticket_type: dict) -> None:
+    async def settings(self, guild_id: int) -> dict:
+        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
+
+    async def update_settings(self, guild_id: int, **changes) -> None:
+        await self.modules.repo.merge_module_settings(guild_id, ModuleType.TICKETS, changes)
+
+    async def check_can_open(self, guild_id: int, member: hikari.Member, ticket_type: dict) -> None:
         """Raise if this member may not open a ticket of this type right now."""
-        if await self.repo.get_blacklist_entry(guild_id, user_id):
+        if await self.repo.get_blacklist_entry(guild_id, member.id):
             raise TicketError("You can't open tickets in this server.")
+        settings = await self.settings(guild_id)
+        if settings.get("raid_paused"):
+            raise TicketError(RAID_PAUSED)
+        role = settings.get("required_role_id")
+        if role and role not in member.role_ids:
+            raise TicketError(f"You need the <@&{role}> role to open tickets.")
+        age = settings.get("min_account_age_days", 0)
+        if age and member.created_at > datetime.now(timezone.utc) - timedelta(days=age):
+            raise TicketError(f"Your account needs to be at least {age} days old to open tickets.")
         limit = ticket_type["open_limit"]
-        if await self.repo.count_open(guild_id, user_id, ticket_type["id"]) >= limit:
+        if await self.repo.count_open(guild_id, member.id, ticket_type["id"]) >= limit:
             raise TicketError(
                 f"You already have {'an open' if limit == 1 else f'{limit} open'} "
                 f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
             )
         if not ticket_type["open_off_hours"]:
             # The schedule decides; away mode only adds its auto-reply.
-            settings = await self._settings(guild_id)
             schedule = effective_schedule(ticket_type["schedule"], settings)
             if not within_hours(schedule, settings.get("timezone", "UTC"), datetime.now(timezone.utc)):
-                notice = await self.off_hours_notice(guild_id, ticket_type, user_id)
+                notice = await self.off_hours_notice(guild_id, ticket_type, member.id)
                 raise TicketError(
                     f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
                 )
+        now = int(time.time())
+        if cooldown := settings.get("open_cooldown_minutes", 0):
+            last = await self.repo.last_opened_at(guild_id, member.id)
+            if last and last + cooldown * 60 > now:
+                raise TicketError(f"You can open another ticket <t:{last + cooldown * 60}:R>.")
+        if raid_limit := settings.get("raid_limit", 0):
+            minutes = settings.get("raid_window_minutes", 5)
+            # A resume starts the count afresh (opened_at is whole seconds, so from the next one).
+            since = max(now - minutes * 60, settings.get("raid_resumed_at", -1) + 1)
+            opened = await self.repo.count_opened_since(guild_id, since)
+            if opened >= raid_limit:
+                # Latched only once staff have the alert and its Resume button; with no ticket log
+                # the brake still refuses opens, and lifts by itself as the burst leaves the window.
+                # ponytail: the pre-form check runs outside the open lock, so two members tripping
+                # it at the same instant can post two alerts; harmless.
+                if await self.raid_alert(guild_id, opened, minutes, ticket_type):
+                    await self.update_settings(guild_id, raid_paused=True)
+                raise TicketError(RAID_PAUSED)
+
+    async def raid_alert(self, guild_id: int, opened: int, minutes: int, ticket_type: dict) -> bool:
+        """Tell staff in the ticket log that the raid brake tripped, with a button to resume."""
+        if not self.logging:
+            return False
+        row = self.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.SUCCESS, "ticket:resume:0", label="Resume opening tickets"
+        )
+        return await self.logging.log_ticket_raid_brake(
+            guild_id=guild_id, opened=opened, minutes=minutes,
+            role_ids=ticket_type["staff_role_ids"], component=row,
+        )
+
+    async def resume_opening(self, guild_id: int) -> None:
+        """Lift the raid brake; only tickets opened from now on count towards the next one."""
+        await self.update_settings(guild_id, raid_paused=False, raid_resumed_at=int(time.time()))
 
     def overwrites(
         self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]
@@ -769,7 +815,7 @@ class TicketService:
         """Create a ticket and its channel, and post the welcome message."""
         fields = check_answers(asked_fields(ticket_type), fields)  # before anything is created
         async with self._open_locks[guild_id]:
-            await self.check_can_open(guild_id, member.id, ticket_type)
+            await self.check_can_open(guild_id, member, ticket_type)
             ticket = await self.repo.create_ticket(
                 guild_id, ticket_type["id"], member.id, fields, identity_values(ticket_type, fields)
             )
