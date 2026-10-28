@@ -317,9 +317,7 @@ class TicketService:
         return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
 
     async def update_settings(self, guild_id: int, **changes) -> None:
-        await self.modules.update_module_settings(
-            guild_id, ModuleType.TICKETS, {**await self.settings(guild_id), **changes}
-        )
+        await self.modules.repo.merge_module_settings(guild_id, ModuleType.TICKETS, changes)
 
     async def check_can_open(self, guild_id: int, member: hikari.Member, ticket_type: dict) -> None:
         """Raise if this member may not open a ticket of this type right now."""
@@ -347,24 +345,33 @@ class TicketService:
                 raise TicketError(f"You can open another ticket <t:{last + cooldown * 60}:R>.")
         if raid_limit := settings.get("raid_limit", 0):
             minutes = settings.get("raid_window_minutes", 5)
-            opened = await self.repo.count_opened_since(guild_id, now - minutes * 60)
+            # A resume starts the count afresh (opened_at is whole seconds, so from the next one).
+            since = max(now - minutes * 60, settings.get("raid_resumed_at", -1) + 1)
+            opened = await self.repo.count_opened_since(guild_id, since)
             if opened >= raid_limit:
+                # Latched only once staff have the alert and its Resume button; with no ticket log
+                # the brake still refuses opens, and lifts by itself as the burst leaves the window.
                 # ponytail: the pre-form check runs outside the open lock, so two members tripping
                 # it at the same instant can post two alerts; harmless.
-                await self.update_settings(guild_id, raid_paused=True)
-                await self.raid_alert(guild_id, opened, minutes, ticket_type)
+                if await self.raid_alert(guild_id, opened, minutes, ticket_type):
+                    await self.update_settings(guild_id, raid_paused=True)
                 raise TicketError(RAID_PAUSED)
 
-    async def raid_alert(self, guild_id: int, opened: int, minutes: int, ticket_type: dict) -> None:
+    async def raid_alert(self, guild_id: int, opened: int, minutes: int, ticket_type: dict) -> bool:
         """Tell staff in the ticket log that the raid brake tripped, with a button to resume."""
-        if self.logging:
-            row = self.rest.build_message_action_row().add_interactive_button(
-                hikari.ButtonStyle.SUCCESS, "ticket:resume:0", label="Resume opening tickets"
-            )
-            await self.logging.log_ticket_raid_brake(
-                guild_id=guild_id, opened=opened, minutes=minutes,
-                role_ids=ticket_type["staff_role_ids"], component=row,
-            )
+        if not self.logging:
+            return False
+        row = self.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.SUCCESS, "ticket:resume:0", label="Resume opening tickets"
+        )
+        return await self.logging.log_ticket_raid_brake(
+            guild_id=guild_id, opened=opened, minutes=minutes,
+            role_ids=ticket_type["staff_role_ids"], component=row,
+        )
+
+    async def resume_opening(self, guild_id: int) -> None:
+        """Lift the raid brake; only tickets opened from now on count towards the next one."""
+        await self.update_settings(guild_id, raid_paused=False, raid_resumed_at=int(time.time()))
 
     def overwrites(
         self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]

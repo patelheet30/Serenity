@@ -598,5 +598,19 @@ async def test_a_burst_of_opens_trips_the_raid_brake(service: TicketService):
     service.logging.log_ticket_raid_brake.assert_awaited_once()
     assert await service.repo.get_ticket(GUILD, 3) is None
 
-    await service.update_settings(GUILD, raid_paused=False, raid_limit=0)
+    # Resuming counts afresh, so the burst still in the window doesn't trip it again.
+    await service.resume_opening(GUILD)
     await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    service.logging.log_ticket_raid_brake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_raid_brake_without_a_ticket_log_refuses_but_does_not_latch(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    await service.update_settings(GUILD, cooldown_unrelated=1)
+    await service.update_settings(GUILD, raid_limit=1)
+    assert (await service.settings(GUILD))["cooldown_unrelated"] == 1  # merged, not replaced
+    await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    with pytest.raises(TicketError, match="paused"):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    assert not (await service.settings(GUILD)).get("raid_paused")

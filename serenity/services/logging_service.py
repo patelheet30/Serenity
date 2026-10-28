@@ -147,10 +147,11 @@ class LoggingService:
         channel_id: Optional[int] = None,
         user_id: Optional[int] = None,
         **message: Any,
-    ) -> None:
+    ) -> bool:
         """
         Check the repository to see if this log type is configured, then send the embed.
         Errors are caught and logged so they never bubble up to the event handler.
+        Returns whether it was sent.
         """
 
         try:
@@ -161,10 +162,11 @@ class LoggingService:
                 user_id=user_id
             )
             if not should_log or target_channel_id is None:
-                return
+                return False
 
             await self._rest.create_message(target_channel_id, embed=embed, **message)
             LOG_EVENTS_SENT.labels(guild_id=str(guild_id), event=log_event).inc()
+            return True
         except hikari.ForbiddenError:
             logger.warning(f"Missing permissions to send {log_type} log in guild {guild_id}")
         except hikari.NotFoundError:
@@ -176,6 +178,7 @@ class LoggingService:
             logger.error(
                 f"Failed to send {log_type} log for guild {guild_id}: {exc}", exc_info=True
             )
+        return False
 
     async def log_message_delete(self, event: hikari.MessageDeleteEvent) -> None:
         """Log a single message deletion using Hikari's cached message."""
@@ -786,7 +789,7 @@ class LoggingService:
         minutes: int,
         role_ids: list[int],
         component: hikari.api.ComponentBuilder,
-    ) -> None:
+    ) -> bool:
         """Too many tickets opened at once, so opening is paused; pings staff in the Ticket log."""
         embed = hikari.Embed(
             title="🚨 Ticket raid brake",
@@ -797,7 +800,7 @@ class LoggingService:
             color=_RED,
             timestamp=_now(),
         )
-        await self._send(
+        return await self._send(
             log_event="ticket_raid_brake",
             guild_id=guild_id,
             log_type="ticket",

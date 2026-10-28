@@ -721,18 +721,26 @@ async def settings_cooldown(
 async def settings_requirements(
     ctx: arc.GatewayContext,
     account_age_days: arc.Option[
-        int, arc.IntParams("Minimum Discord account age in days (0: none).", min=0, max=365)
-    ] = 0,
-    role: arc.Option[Optional[hikari.Role], arc.RoleParams("A role they need (leave out: none).")] = None,
+        Optional[int], arc.IntParams("Minimum Discord account age in days (0: none).", min=0, max=365)
+    ] = None,
+    role: arc.Option[Optional[hikari.Role], arc.RoleParams("A role they need.")] = None,
+    no_role: arc.Option[bool, arc.BoolParams("Stop requiring a role.")] = False,
     service: TicketService = arc.inject(),
 ) -> None:
     # ponytail: server-wide; per-type requirements come with the dashboard's type editor.
     guild_id = require_manage_guild(ctx)
-    await service.update_settings(
-        guild_id, min_account_age_days=account_age_days, required_role_id=role.id if role else None
-    )
-    needs = [f"an account at least {account_age_days} days old"] if account_age_days else []
-    needs += [f"the {role.mention} role"] if role else []
+    changes: dict = {}
+    if account_age_days is not None:
+        changes["min_account_age_days"] = account_age_days
+    if role or no_role:
+        changes["required_role_id"] = None if no_role else role.id  # type: ignore[union-attr]
+    if not changes:
+        raise TicketError("Nothing to change.")
+    await service.update_settings(guild_id, **changes)
+    settings = await service.settings(guild_id)
+    age, role_id = settings.get("min_account_age_days", 0), settings.get("required_role_id")
+    needs = [f"an account at least {age} days old"] if age else []
+    needs += [f"the <@&{role_id}> role"] if role_id else []
     await ctx.respond(
         f"✅ Opening a ticket needs {' and '.join(needs)}." if needs
         else "✅ Anyone can open a ticket.",
@@ -749,9 +757,8 @@ async def settings_raid_brake(
     service: TicketService = arc.inject(),
 ) -> None:
     guild_id = require_manage_guild(ctx)
-    await service.update_settings(
-        guild_id, raid_limit=tickets, raid_window_minutes=minutes, raid_paused=False
-    )
+    await service.update_settings(guild_id, raid_limit=tickets, raid_window_minutes=minutes)
+    await service.resume_opening(guild_id)
     await ctx.respond(
         f"✅ Opening pauses if {tickets} tickets open within {minutes} minutes; staff are pinged in "
         "the ticket log with a button to resume." if tickets
@@ -895,7 +902,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
                 hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
             ):
                 raise TicketError("You need **Manage Server** to resume opening tickets.")
-            await service.update_settings(interaction.guild_id, raid_paused=False)
+            await service.resume_opening(interaction.guild_id)
             await interaction.create_initial_response(
                 hikari.ResponseType.MESSAGE_UPDATE,
                 f"✅ {interaction.user.mention} resumed opening tickets.",
