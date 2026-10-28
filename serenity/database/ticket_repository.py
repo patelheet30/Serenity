@@ -27,6 +27,7 @@ TYPE_COLUMNS = (
     "transcripts",
     "retention_days",
     "auto_unclaim_hours",
+    "auto_close_hours",
     "schedule",
     "open_off_hours",
 )
@@ -288,7 +289,9 @@ class TicketRepository:
 
     async def update_ticket(self, ticket_id: int, /, **values: Any) -> Optional[dict]:
         pool = self._require_pool()
-        allowed = ("type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at")
+        allowed = (
+            "type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at", "close_warned_at"
+        )
         sets, params = [], [ticket_id]
         for key, value in values.items():
             if key not in allowed:
@@ -417,6 +420,20 @@ class TicketRepository:
             WHERE t.status = 'open' AND t.assignee_id IS NOT NULL AND t.waiting_on = 'staff'
             AND ty.auto_unclaim_hours IS NOT NULL
             AND t.last_activity_at < $1 - ty.auto_unclaim_hours * 3600""",
+            now,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
+    async def due_for_auto_close(self, now: int) -> list[dict]:
+        """Tickets waiting on their opener for longer than the type's auto-close hours, by the
+        wall clock. The caller discounts time outside support hours."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, ty.auto_close_hours
+            FROM tickets t JOIN ticket_types ty ON ty.id = t.type_id
+            WHERE t.status = 'open' AND t.waiting_on = 'opener'
+            AND ty.auto_close_hours IS NOT NULL
+            AND t.last_activity_at < $1 - ty.auto_close_hours * 3600""",
             now,
         )
         return [_decode(r) for r in rows]  # type: ignore[misc]

@@ -634,3 +634,64 @@ async def test_waiting_on_flips_edit_the_topic_at_most_once_per_interval(service
     await asyncio.sleep(0.01)
     assert service.rest.edit_channel.await_count == 1  # the next edit waits out the interval
     assert list(service._topic_tasks) == [channel]  # one pending edit for the whole burst
+
+
+def warnings_sent(service: TicketService) -> int:
+    return sum("closes automatically" in str(c.args) for c in service.rest.create_message.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_auto_close_warns_then_closes_and_never_while_waiting_on_staff(service: TicketService):
+    support = await service.repo.create_type(
+        GUILD, "Support", staff_role_ids=[STAFF_ROLE], auto_close_hours=24, transcripts=False
+    )
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.auto_close(ticket["last_activity_at"] + 1000 * 3600)  # waiting on staff: never
+    assert warnings_sent(service) == 0
+
+    await service.on_message(message(ticket["channel_id"], staff(BOB, "bob")))
+    quiet = (await service.repo.get_ticket_by_id(ticket["id"]))["last_activity_at"]  # type: ignore[index]
+    await service.auto_close(quiet + 23 * 3600)
+    assert warnings_sent(service) == 0
+    await service.auto_close(quiet + 24 * 3600 + 1)
+    await service.auto_close(quiet + 24 * 3600 + 2)
+    assert warnings_sent(service) == 1  # once
+
+    await service.auto_close(quiet + 35 * 3600)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["status"] == "open"  # type: ignore[index]
+    await service.auto_close(quiet + 36 * 3600 + 2)
+    closed = await service.repo.get_ticket_by_id(ticket["id"])
+    assert closed["status"] == "closed" and closed["close_reason"].startswith("Auto-closed")  # type: ignore[index]
+    assert "auto_closed" in [e["kind"] for e in await service.repo.list_events(ticket["id"])]
+
+
+@pytest.mark.asyncio
+async def test_auto_close_skips_stages_with_it_off_and_pauses_outside_support_hours(service: TicketService):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from serenity.services.ticket_hours import parse_schedule
+
+    def london(*args: int) -> int:
+        return int(datetime(*args, tzinfo=ZoneInfo("Europe/London")).timestamp())
+
+    await service.modules.get_module_config(GUILD, ModuleType.TICKETS)
+    await service.modules.update_module_settings(
+        GUILD, ModuleType.TICKETS,
+        {"schedule": parse_schedule("mon-fri 09:00-17:00"), "timezone": "Europe/London"},
+    )
+    sales = await service.repo.create_type(
+        GUILD, "Sales", auto_close_hours=2, transcripts=False, stages=SALES_STAGES
+    )
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), sales, {})
+    friday = london(2026, 10, 23, 16)  # an hour before closing time
+    await service.repo.update_ticket(ticket["id"], waiting_on="opener", last_activity_at=friday)
+
+    await service.auto_close(london(2026, 10, 26, 8))  # Monday 08:00, after the DST change: 1h counted
+    assert warnings_sent(service) == 0
+    await service.auto_close(london(2026, 10, 26, 10))  # 2h counted
+    assert warnings_sent(service) == 1
+
+    await service.repo.update_ticket(ticket["id"], stage="Paid", close_warned_at=None)
+    await service.auto_close(london(2026, 11, 30, 10))
+    assert warnings_sent(service) == 1  # Paid has auto-close off

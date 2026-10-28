@@ -100,7 +100,8 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
     category = f"<#{ticket_type['category_id']}>" if ticket_type["category_id"] else "None"
     questions = "\n".join(f"• {f['label']}" for f in ticket_type["fields"]) or "None"
     retention = ticket_type["retention_days"]
-    stages = " → ".join(
+    auto_close = ticket_type["auto_close_hours"]
+    stages =" → ".join(
         s["name"] + (" ✓" if s["terminal"] else "") for s in ticket_type["stages"]
     ) or "None"
     return (
@@ -109,7 +110,8 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
         f"Claiming: {ticket_type['claim_mode']} · Open limit: {ticket_type['open_limit']}\n"
         f"Channel name: `{ticket_type['name_template']}`\n"
         f"Hours: {format_schedule(ticket_type['schedule']) if ticket_type['schedule'] else 'server default'}"
-        f" · Outside hours: {'can open' if ticket_type['open_off_hours'] else 'closed'}\n"
+        f" · Outside hours: {'can open' if ticket_type['open_off_hours'] else 'closed'}"
+        f" · Auto-close: {f'after {auto_close}h quiet' if auto_close else 'off'}\n"
         f"Transcripts: {'on' if ticket_type['transcripts'] else 'off'}"
         f" · Retention: {'server default' if retention is None else 'until deleted' if retention == 0 else f'{retention} days'}\n"
         f"Stages: {stages}\n"
@@ -201,6 +203,10 @@ async def type_edit(
         Optional[int],
         arc.IntParams("Unclaim after this many hours of staff silence (0 = never).", min=0, max=168),
     ] = None,
+    auto_close_hours: arc.Option[
+        Optional[int],
+        arc.IntParams("Close after this many support hours without the opener replying (0 = never).", min=0, max=720),
+    ] = None,
     hours: arc.Option[
         Optional[str],
         arc.StrParams('Own support hours, e.g. "mon-fri 09:00-17:00" ("default" = the server\'s).', max_length=200),
@@ -233,6 +239,8 @@ async def type_edit(
         values["fields"] = [] if questions.strip().lower() == "none" else parse_questions(questions)
     if auto_unclaim_hours is not None:
         values["auto_unclaim_hours"] = auto_unclaim_hours or None
+    if auto_close_hours is not None:
+        values["auto_close_hours"] = auto_close_hours or None
     if hours is not None:
         values["schedule"] = None if hours.strip().lower() == "default" else schedule_from(hours)
     if not values:
@@ -1127,6 +1135,14 @@ async def auto_unclaim(service: TicketService) -> None:
         logger.exception("Ticket auto-unclaim failed")
 
 
+@arc.utils.interval_loop(minutes=10)
+async def auto_close(service: TicketService) -> None:
+    try:
+        await service.auto_close(int(time.time()))
+    except Exception:
+        logger.exception("Ticket auto-close failed")
+
+
 @arc.utils.interval_loop(minutes=1)
 async def panel_statuses(service: TicketService) -> None:
     try:
@@ -1151,6 +1167,7 @@ async def on_started(_: hikari.StartedEvent) -> None:
     auto_unclaim.start(service=service)
     purge_transcripts.start(service=service)
     panel_statuses.start(service=service)
+    auto_close.start(service=service)
 
 
 @plugin.listen()
@@ -1180,5 +1197,6 @@ def unload(client: arc.GatewayClient) -> None:
     auto_unclaim.stop()
     purge_transcripts.stop()
     panel_statuses.stop()
+    auto_close.stop()
     if plugin.name in client.plugins:
         client.remove_plugin(plugin)
