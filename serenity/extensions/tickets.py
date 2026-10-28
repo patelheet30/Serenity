@@ -411,9 +411,8 @@ async def blacklist_add(
     reason: arc.Option[Optional[str], arc.StrParams("Why (staff only).", max_length=500)] = None,
     repo: TicketRepository = arc.inject(),
 ) -> None:
-    if not ctx.guild_id:
-        raise TicketError("This command can only be used in a server.")
-    if not await repo.blacklist_add(ctx.guild_id, user.id, ctx.user.id, reason):
+    guild_id = require_manage_guild(ctx)
+    if not await repo.blacklist_add(guild_id, user.id, ctx.user.id, reason):
         raise TicketError(f"{user.mention} is already blocked from opening tickets.")
     await ctx.respond(
         f"🚫 {user.mention} can no longer open tickets.", flags=hikari.MessageFlag.EPHEMERAL
@@ -427,9 +426,8 @@ async def blacklist_remove(
     user: arc.Option[hikari.User, arc.UserParams("Who to unblock.")],
     repo: TicketRepository = arc.inject(),
 ) -> None:
-    if not ctx.guild_id:
-        raise TicketError("This command can only be used in a server.")
-    if not await repo.blacklist_remove(ctx.guild_id, user.id):
+    guild_id = require_manage_guild(ctx)
+    if not await repo.blacklist_remove(guild_id, user.id):
         raise TicketError(f"{user.mention} isn't blocked.")
     await ctx.respond(f"✅ {user.mention} can open tickets again.", flags=hikari.MessageFlag.EPHEMERAL)
 
