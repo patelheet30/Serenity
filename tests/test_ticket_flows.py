@@ -9,7 +9,7 @@ import hikari
 import pytest
 from hikari.impl import MessageActionRowBuilder
 
-from serenity.core.modules import ModuleManager
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.repository import Repository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import TicketError, TicketService
@@ -27,7 +27,7 @@ def member(user_id: int, name: str) -> MagicMock:
 
 
 @pytest.fixture
-def service(pg_repo: Repository) -> TicketService:
+def service(pg_repo: Repository):
     assert pg_repo.pool is not None
     ids = itertools.count(1_300_000_000_000_000_000)
     rest = AsyncMock()
@@ -40,7 +40,10 @@ def service(pg_repo: Repository) -> TicketService:
     rest.create_guild_text_channel.side_effect = create_channel
     cache = MagicMock()
     cache.get_me.return_value = None
-    return TicketService(TicketRepository(pg_repo.pool), rest, cache, ModuleManager(pg_repo))
+    service = TicketService(TicketRepository(pg_repo.pool), rest, cache, ModuleManager(pg_repo))
+    yield service
+    for task in service._topic_tasks.values():  # pending topic edits, before the pool closes
+        task.cancel()
 
 
 @pytest.mark.asyncio
@@ -614,3 +617,289 @@ async def test_raid_brake_without_a_ticket_log_refuses_but_does_not_latch(servic
     with pytest.raises(TicketError, match="paused"):
         await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
     assert not (await service.settings(GUILD)).get("raid_paused")
+
+
+T2_ROLE = 1_241_890_335_472_164_910
+T3_ROLE = 1_241_890_335_472_164_911
+DEV_ROLE = 1_241_890_335_472_164_912
+
+
+async def ladder(service: TicketService) -> dict:
+    """Support with T1 (its staff) → T2 → T3, and Developers off to the side."""
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    t1 = await service.repo.create_tier(support["id"], name="T1", position=1, role_ids=[STAFF_ROLE])
+    await service.repo.create_tier(support["id"], name="T2", position=2, role_ids=[T2_ROLE], reping_minutes=30)
+    await service.repo.create_tier(support["id"], name="T3", position=3, role_ids=[T3_ROLE], requires_reason=True)
+    dev = await service.repo.create_tier(support["id"], name="Developers", position=9, role_ids=[DEV_ROLE])
+    await service.repo.update_tier(t1["id"], can_summon=[dev["id"]])
+    return support
+
+
+def in_role(user_id: int, name: str, role: int) -> MagicMock:
+    m = member(user_id, name)
+    m.role_ids = [role]
+    return m
+
+
+@pytest.mark.asyncio
+async def test_t1_t2_t3_escalation_credits_all_three(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+    dave = 1_029_384_756_102_938_478
+
+    await service.on_message(message(channel, staff(BOB, "bob")))  # T1 claims by replying
+    current, full = await service.ticket_here(channel)
+    current = await service.escalate(current, full, BOB, None, None)
+    overwrite = service.rest.edit_permission_overwrite.call_args
+    assert overwrite.args[1] == T2_ROLE and overwrite.kwargs["target_type"] == hikari.PermissionOverwriteType.ROLE
+    ping = service.rest.create_message.call_args
+    assert f"<@&{T2_ROLE}>" in ping.args[1] and ping.kwargs["role_mentions"] == [T2_ROLE]
+
+    await service.on_message(message(channel, in_role(CAROL, "carol", T2_ROLE)))  # T2 picks it up
+    current, full = await service.ticket_here(channel)
+    assert current["assignee_id"] == CAROL and current["tier_pinged_at"] is None
+
+    with pytest.raises(TicketError, match="needs a reason"):
+        await service.escalate(current, full, CAROL, None, None)
+    await service.escalate(current, full, CAROL, None, "needs a refund")
+    await service.on_message(message(channel, in_role(dave, "dave", T3_ROLE)))
+    current, full = await service.ticket_here(channel)
+    assert current["assignee_id"] == dave
+
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    await service.close(current, full, dave, "done")
+    handlers = {h["user_id"]: h["credited"] for h in await service.repo.list_handlers(ticket["id"])}
+    assert handlers == {BOB: True, CAROL: True, dave: True}
+
+
+@pytest.mark.asyncio
+async def test_a_tier_cant_summon_a_tier_it_isnt_allowed_to(service: TicketService):
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+
+    with pytest.raises(TicketError, match=r"T1\*\* can't summon \*\*T3"):
+        await service.escalate(current, full, BOB, "T3", "skip the queue")
+    with pytest.raises(TicketError, match="no tier called"):
+        await service.escalate(current, full, BOB, "Nope", None)
+    moved = await service.escalate(current, full, BOB, "developers", None)  # sideways, allowed
+    assert moved["tier_id"] == full["tiers"][3]["id"]
+
+    current, full = await service.ticket_here(ticket["channel_id"])
+    with pytest.raises(TicketError, match="already the top tier"):
+        await service.escalate(current, full, BOB, None, None)
+
+
+@pytest.mark.asyncio
+async def test_deescalate_reping_and_reassign(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+    current, full = await service.ticket_here(channel)
+    with pytest.raises(TicketError, match="hasn't been escalated"):
+        await service.deescalate(current, full, BOB, "back")
+    assert not service.can_reassign(staff(BOB, "bob"), current, full)
+
+    escalated = await service.escalate(current, full, BOB, None, None)
+    assert service.can_reassign(in_role(CAROL, "carol", T2_ROLE), escalated, full)
+    assert not service.can_reassign(staff(BOB, "bob"), escalated, full)
+
+    # Unanswered: re-pinged once 30 minutes have passed, then not again for another 30.
+    await service.reping_tiers(escalated["tier_pinged_at"] + 29 * 60)
+    pings = service.rest.create_message.await_count
+    await service.reping_tiers(escalated["tier_pinged_at"] + 31 * 60)
+    assert service.rest.create_message.await_count == pings + 1
+    assert "Nobody from **T2**" in service.rest.create_message.call_args.args[1]
+    await service.reping_tiers(escalated["tier_pinged_at"] + 32 * 60)
+    assert service.rest.create_message.await_count == pings + 1
+
+    current, full = await service.ticket_here(channel)
+    back = await service.deescalate(current, full, CAROL, "just a password reset")
+    assert back["tier_id"] == full["tiers"][0]["id"] and back["tier_pinged_at"] is None
+    assert "back to **T1**" in service.rest.create_message.call_args.args[1]
+    with pytest.raises(TicketError, match="hasn't been escalated"):
+        await service.deescalate(back, full, BOB, "again")
+
+
+@pytest.mark.asyncio
+async def test_claiming_or_closing_ends_the_re_pings_and_button_mode_never_claims_on_reply(
+    service: TicketService, monkeypatch
+):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    await service.repo.update_type(GUILD, support["id"], claim_mode="button")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+    await service.claim(current, BOB, announce=False)
+    escalated = await service.escalate(current, full, BOB, None, None)
+
+    await service.on_message(message(ticket["channel_id"], in_role(CAROL, "carol", T2_ROLE)))
+    after = await service.repo.get_ticket_by_id(ticket["id"])
+    assert after["assignee_id"] == BOB and after["tier_pinged_at"] is not None  # type: ignore[index]
+
+    await service.claim(after, CAROL, by=CAROL, announce=False)  # the tier takes it with /ticket assign
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_pinged_at"] is None  # type: ignore[index]
+
+    await service.repo.update_ticket(ticket["id"], tier_pinged_at=escalated["tier_pinged_at"])
+    await service.repo.close_ticket(ticket["id"], BOB, None)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_pinged_at"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_tier_schema_constraints(service: TicketService):
+    import asyncpg
+
+    support = await ladder(service)
+    tid = support["id"]
+    with pytest.raises(asyncpg.UniqueViolationError) as raced:  # one tier per rung
+        await service.repo.create_tier(tid, name="Other", position=2)
+    ctx = MagicMock(respond=AsyncMock())  # a lost race reads as one, not as a duplicate type
+    from serenity.extensions.tickets import on_error
+
+    await on_error(ctx, raced.value)
+    assert "tier name or position" in ctx.respond.call_args.args[0]
+    with pytest.raises(asyncpg.UniqueViolationError):  # names are unique case-insensitively
+        await service.repo.create_tier(tid, name="t2", position=5)
+    for minutes in (0, -5):  # 0 would re-ping every sweep
+        with pytest.raises(asyncpg.CheckViolationError):
+            await service.repo.create_tier(tid, name="Zero", position=6, reping_minutes=minutes)
+
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+    escalated = await service.escalate(current, full, BOB, None, None)
+    await service.repo.delete_tier(escalated["tier_id"])
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_id"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_invalid_ign_creates_nothing_and_identity_links_tickets_across_types(
+    service: TicketService,
+):
+    from serenity.services.ticket_service import set_field
+
+    ign = set_field([], "IGN", "pattern", options=r"[A-Za-z0-9_]{3,16}", identity=True)
+    appeal = await service.repo.create_type(GUILD, "Appeal", fields=ign)
+    report = await service.repo.create_type(
+        GUILD, "Report", fields=set_field(ign, "Verdict", "short", staff_only=True)
+    )
+
+    with pytest.raises(TicketError, match="IGN"):
+        await service.open_ticket(GUILD, member(ALICE, "alice"), appeal, {"ign": "no spaces!"})
+    assert service.rest.create_guild_text_channel.await_count == 0
+    assert await service.repo.get_ticket(GUILD, 1) is None
+
+    first = await service.open_ticket(GUILD, member(ALICE, "alice"), appeal, {"ign": "Notch_2"})
+    second = await service.open_ticket(GUILD, member(BOB, "bob"), report, {"ign": "notch_2"})
+    other = await service.open_ticket(GUILD, member(CAROL, "carol"), report, {"ign": "Jeb_"})
+    linked = await service.repo.linked_tickets(second["id"])
+    assert [t["id"] for t in linked] == [first["id"]] and linked[0]["linked_by"] == ["ign"]
+    welcome = service.rest.create_message.call_args_list[-1].kwargs["embed"]
+    assert [f.name for f in welcome.fields] == ["IGN"]  # the staff-only Verdict isn't shown
+
+    # Staff fix the IGN: the links follow, and the staff-only field is saved.
+    edited = await service.edit_fields(other, report, {"ign": "NOTCH_2", "verdict": "banned"}, BOB)
+    assert edited["fields"] == {"ign": "NOTCH_2", "verdict": "banned"}
+    assert {t["id"] for t in await service.repo.linked_tickets(first["id"])} == {second["id"], other["id"]}
+    with pytest.raises(TicketError, match="IGN"):
+        await service.edit_fields(other, report, {"ign": "x"}, BOB)
+
+    # Verdict is removed from the type: its answer stays out of the opener's transcript.
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    doc = await service.build_transcript(edited, {**report, "fields": ign})
+    assert doc["fields"] == {"IGN": "NOTCH_2"} and doc["staff_fields"] == {"verdict": "banned"}
+
+
+@pytest.mark.asyncio
+async def test_off_hours_auto_reply_and_types_closed_outside_hours(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    urgent = await service.repo.create_type(GUILD, "Urgent", open_off_hours=False)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    assert "off_hours_notice" not in ticket  # nothing configured: always open
+
+    await service.modules.get_module_config(GUILD, ModuleType.TICKETS)
+    await service.modules.update_module_settings(
+        GUILD, ModuleType.TICKETS, {"away": {"until": None, "note": "Back after the holidays"}}
+    )
+    ticket = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    notice = ticket["off_hours_notice"]
+    assert f"<@{BOB}>" in notice and "Back after the holidays" in notice
+    assert service.rest.create_message.call_args.args == (ticket["channel_id"], notice)
+
+    # Away mode alone doesn't refuse a type that's closed outside hours: the schedule decides.
+    opened = await service.open_ticket(GUILD, member(ALICE, "alice"), urgent, {})
+    assert "Back after the holidays" in opened["off_hours_notice"]
+
+    from datetime import datetime, timezone
+
+    tomorrow_only: list = [[] for _ in range(7)]
+    tomorrow_only[(datetime.now(timezone.utc).weekday() + 1) % 7] = [[0, 1440]]
+    urgent = await service.repo.update_type(GUILD, urgent["id"], schedule=tomorrow_only)
+    with pytest.raises(TicketError, match="only be opened during support hours"):
+        await service.open_ticket(GUILD, member(CAROL, "carol"), urgent, {})  # type: ignore[arg-type]
+
+
+SALES_STAGES = [
+    {"name": "Inquiry", "color": None, "terminal": False, "auto_close": True},
+    {"name": "Quoted", "color": 0x57F287, "terminal": False, "auto_close": True},
+    {"name": "Paid", "color": None, "terminal": True, "auto_close": False},
+]
+
+
+@pytest.mark.asyncio
+async def test_stages_start_first_move_with_history_and_reset_on_transfer(service: TicketService):
+    service.cache.get_member.return_value = None
+    sales = await service.repo.create_type(GUILD, "Sales", staff_role_ids=[STAFF_ROLE], stages=SALES_STAGES)
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), sales, {})
+    assert ticket["stage"] == "Inquiry"
+    assert "Inquiry" in service.rest.create_guild_text_channel.call_args.kwargs["topic"]
+
+    with pytest.raises(TicketError, match="no stage called"):
+        await service.set_stage(ticket, sales, "Shipped", BOB)
+    with pytest.raises(TicketError, match="already at"):
+        await service.set_stage(ticket, sales, "inquiry", BOB)
+
+    quoted = await service.set_stage(ticket, sales, "quoted", BOB)
+    assert quoted["stage"] == "Quoted"
+    assert not service.rest.create_message.call_args.kwargs["components"]  # not terminal: no close offer
+    paid = await service.set_stage(quoted, sales, "Paid", BOB)
+    [row] = service.rest.create_message.call_args.kwargs["components"]
+    assert row.components[0].custom_id == f"ticket:closeas:{ticket['id']}"
+
+    history = [e["data"] for e in await service.repo.list_events(ticket["id"]) if e["kind"] == "stage"]
+    assert history == [{"from": "Inquiry", "to": "Quoted"}, {"from": "Quoted", "to": "Paid"}]
+
+    service.cache.get_guild_channel.return_value = MagicMock(permission_overwrites={})
+    moved = await service.transfer(paid, sales, support, BOB)
+    assert moved["stage"] is None  # Support has no workflow
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_flips_edit_the_topic_at_most_once_per_interval(service: TicketService):
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+
+    await service.on_message(message(channel, staff(BOB, "bob")))  # now waiting on the opener
+    for _ in range(200):  # no edit yet, so it runs straight away; wait for it, up to 2s
+        if service.rest.edit_channel.await_count:
+            break
+        await asyncio.sleep(0.01)
+    service.rest.edit_channel.assert_awaited_once_with(channel, topic="Ticket #1 · Support · waiting on member")
+
+    await service.on_message(message(channel, member(ALICE, "alice")))  # back to staff
+    await service.on_message(message(channel, staff(BOB, "bob")))
+    await asyncio.sleep(0.01)
+    assert service.rest.edit_channel.await_count == 1  # the next edit waits out the interval
+    assert list(service._topic_tasks) == [channel]  # one pending edit for the whole burst
