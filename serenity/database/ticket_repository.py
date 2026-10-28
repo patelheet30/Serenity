@@ -10,7 +10,7 @@ from serenity.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # asyncpg returns JSONB as text unless the pool has a codec; the pool is shared, so decode here.
-_JSON_COLUMNS = ("fields", "stages", "data", "document")
+_JSON_COLUMNS = ("fields", "stages", "data", "document", "schedule")
 
 # Columns a ticket type can be created or updated with.
 TYPE_COLUMNS = (
@@ -27,7 +27,13 @@ TYPE_COLUMNS = (
     "transcripts",
     "retention_days",
     "auto_unclaim_hours",
+    "ratings",
+    "schedule",
+    "open_off_hours",
 )
+
+# Columns a tier can be created or updated with.
+TIER_COLUMNS = ("name", "position", "role_ids", "can_summon", "requires_reason", "reping_minutes")
 
 
 def _decode(row: Optional[asyncpg.Record]) -> Optional[dict]:
@@ -209,6 +215,12 @@ class TicketRepository:
         rows = await pool.fetch("SELECT message_id FROM ticket_panels WHERE message_id IS NOT NULL")
         return [r["message_id"] for r in rows]
 
+    async def panel_guilds(self) -> list[int]:
+        """Guilds with a posted panel, whose support status the panels show."""
+        pool = self._require_pool()
+        rows = await pool.fetch("SELECT DISTINCT guild_id FROM ticket_panels WHERE message_id IS NOT NULL")
+        return [r["guild_id"] for r in rows]
+
     async def forget_panel_message(self, message_id: int) -> Optional[dict]:
         """The panel's message was deleted by hand: keep the panel, unpost it."""
         pool = self._require_pool()
@@ -221,9 +233,15 @@ class TicketRepository:
     # Tickets
 
     async def create_ticket(
-        self, guild_id: int, type_id: int, opener_id: int, fields: dict[str, str]
+        self,
+        guild_id: int,
+        type_id: int,
+        opener_id: int,
+        fields: dict[str, str],
+        identity: Optional[dict[str, str]] = None,
     ) -> dict:
-        """Insert a ticket with the guild's next number (no channel yet)."""
+        """Insert a ticket with the guild's next number (no channel yet), and its identity
+        values (normalised identity-field answers, by key)."""
         pool = self._require_pool()
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
@@ -231,8 +249,9 @@ class TicketRepository:
             # means a case and a ticket in one guild can briefly wait on each other.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
             row = await conn.fetchrow(
-                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at)
-                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5
+                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at, stage)
+                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5,
+                       (SELECT stages -> 0 ->> 'name' FROM ticket_types WHERE id = $2)  -- the first stage
                 FROM tickets WHERE guild_id = $1
                 HAVING EXISTS (SELECT 1 FROM ticket_types WHERE id = $2 AND guild_id = $1)
                 RETURNING *""",
@@ -250,7 +269,67 @@ class TicketRepository:
                 opener_id,
                 now,
             )
+            await self._set_identity(conn, row["id"], guild_id, identity or {})
         return _decode(row)  # type: ignore[return-value]
+
+    async def _set_identity(
+        self, conn: asyncpg.Connection, ticket_id: int, guild_id: int, identity: dict[str, str]
+    ) -> None:
+        await conn.execute("DELETE FROM ticket_identity WHERE ticket_id = $1", ticket_id)
+        await conn.executemany(
+            "INSERT INTO ticket_identity (ticket_id, guild_id, field_key, value) VALUES ($1, $2, $3, $4)",
+            [(ticket_id, guild_id, key, value) for key, value in identity.items()],
+        )
+
+    async def update_fields(
+        self, ticket_id: int, guild_id: int, fields: dict[str, str], identity: dict[str, str]
+    ) -> dict:
+        pool = self._require_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE tickets SET fields = $2 WHERE id = $1 RETURNING *",
+                ticket_id,
+                _encode("fields", fields),
+            )
+            await self._set_identity(conn, ticket_id, guild_id, identity)
+        return _decode(row)  # type: ignore[return-value]
+
+    async def linked_tickets(self, ticket_id: int, limit: int = 10) -> list[dict]:
+        """Other tickets, of any type, sharing an identity value with this one; newest first.
+        Each has `linked_by`: the field keys they share."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, ty.name AS type_name,
+                array_agg(other.field_key ORDER BY other.field_key) AS linked_by
+            FROM ticket_identity mine
+            JOIN ticket_identity other ON other.guild_id = mine.guild_id
+                AND other.field_key = mine.field_key AND other.value = mine.value
+                AND other.ticket_id <> mine.ticket_id
+            JOIN tickets t ON t.id = other.ticket_id
+            JOIN ticket_types ty ON ty.id = t.type_id
+            WHERE mine.ticket_id = $1
+            GROUP BY t.id, ty.name ORDER BY t.opened_at DESC, t.id DESC LIMIT $2""",
+            ticket_id,
+            limit,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
+    async def opener_tickets(
+        self, guild_id: int, opener_id: int, exclude_id: int, limit: int = 5
+    ) -> tuple[list[dict], int]:
+        """A member's other tickets, newest first, and how many there are in all."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, ty.name AS type_name, COUNT(*) OVER () AS total
+            FROM tickets t JOIN ticket_types ty ON ty.id = t.type_id
+            WHERE t.guild_id = $1 AND t.opener_id = $2 AND t.id <> $3
+            ORDER BY t.opened_at DESC, t.id DESC LIMIT $4""",
+            guild_id,
+            opener_id,
+            exclude_id,
+            limit,
+        )
+        return [_decode(r) for r in rows], rows[0]["total"] if rows else 0  # type: ignore[misc]
 
     async def delete_ticket(self, ticket_id: int) -> None:
         """Undo a ticket whose channel couldn't be created."""
@@ -279,7 +358,10 @@ class TicketRepository:
 
     async def update_ticket(self, ticket_id: int, /, **values: Any) -> Optional[dict]:
         pool = self._require_pool()
-        allowed = ("type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at")
+        allowed = (
+            "type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at",
+            "tier_id", "tier_pinged_at",
+        )
         sets, params = [], [ticket_id]
         for key, value in values.items():
             if key not in allowed:
@@ -303,6 +385,22 @@ class TicketRepository:
             type_id,
         )
 
+    async def last_opened_at(self, guild_id: int, opener_id: int) -> Optional[int]:
+        """When this member last opened a ticket here, open or closed (the open cooldown)."""
+        pool = self._require_pool()
+        return await pool.fetchval(
+            "SELECT MAX(opened_at) FROM tickets WHERE guild_id = $1 AND opener_id = $2",
+            guild_id,
+            opener_id,
+        )
+
+    async def count_opened_since(self, guild_id: int, since: int) -> int:
+        """Tickets opened here since a time, open or closed (the raid brake)."""
+        pool = self._require_pool()
+        return await pool.fetchval(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = $1 AND opened_at >= $2", guild_id, since
+        )
+
     async def open_ticket_channels(self) -> list[int]:
         """Every open ticket's channel, across guilds (the bot's in-memory lookup set)."""
         pool = self._require_pool()
@@ -322,8 +420,9 @@ class TicketRepository:
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window.
-                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3
+                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window,
+                # and it answers an escalation: the tier stops being re-pinged.
+                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' {"" if force else "AND assignee_id IS NULL"}
                 RETURNING *""",
                 ticket_id,
@@ -355,7 +454,7 @@ class TicketRepository:
         )
         return _decode(row)
 
-    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> dict:
+    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> Optional[dict]:
         """Count a message: staff replies join the credit chain and hand the turn to the opener."""
         pool = self._require_pool()
         now = int(time.time())
@@ -380,7 +479,7 @@ class TicketRepository:
                 "opener" if staff else "staff",
                 staff,
             )
-        return _decode(row)  # type: ignore[return-value]
+        return _decode(row)
 
     async def list_handlers(self, ticket_id: int) -> list[dict]:
         pool = self._require_pool()
@@ -412,6 +511,62 @@ class TicketRepository:
         )
         return [_decode(r) for r in rows]  # type: ignore[misc]
 
+    # Escalation tiers
+
+    async def list_tiers(self, type_id: int) -> list[dict]:
+        """A type's ladder, lowest tier first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM ticket_tiers WHERE type_id = $1 ORDER BY position", type_id
+        )
+        return [dict(r) for r in rows]
+
+    async def create_tier(self, type_id: int, /, **values: Any) -> dict:
+        pool = self._require_pool()
+        columns = ["type_id", "created_at"]
+        params: list[Any] = [type_id, int(time.time())]
+        for key, value in values.items():
+            if key not in TIER_COLUMNS:
+                raise ValueError(f"Unknown ticket tier column: {key}")
+            columns.append(key)
+            params.append(value)
+        placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+        row = await pool.fetchrow(
+            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({placeholders}) RETURNING *",
+            *params,
+        )
+        return dict(row)
+
+    async def update_tier(self, tier_id: int, /, **values: Any) -> Optional[dict]:
+        pool = self._require_pool()
+        sets, params = [], [tier_id]
+        for key, value in values.items():
+            if key not in TIER_COLUMNS:
+                raise ValueError(f"Unknown ticket tier column: {key}")
+            params.append(value)
+            sets.append(f"{key} = ${len(params)}")
+        row = await pool.fetchrow(
+            f"UPDATE ticket_tiers SET {', '.join(sets)} WHERE id = $1 RETURNING *", *params
+        )
+        return dict(row) if row else None
+
+    async def delete_tier(self, tier_id: int) -> None:
+        pool = self._require_pool()
+        await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
+
+    async def due_for_reping(self, now: int) -> list[dict]:
+        """Escalated tickets their tier hasn't picked up within its re-ping time."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, tr.name AS tier_name, tr.role_ids AS tier_role_ids, tr.reping_minutes
+            FROM tickets t JOIN ticket_tiers tr ON tr.id = t.tier_id
+            WHERE t.status = 'open' AND t.tier_pinged_at IS NOT NULL
+            AND tr.reping_minutes IS NOT NULL
+            AND t.tier_pinged_at < $1 - tr.reping_minutes * 60""",
+            now,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
     # Closing and reopening
 
     async def close_ticket(
@@ -423,7 +578,7 @@ class TicketRepository:
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """UPDATE tickets SET status = 'closed', closed_at = $2, closed_by = $3,
-                close_reason = $4, channel_id = NULL
+                close_reason = $4, channel_id = NULL, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' RETURNING *""",
                 ticket_id,
                 now,
@@ -517,14 +672,20 @@ class TicketRepository:
     async def save_transcript(
         self, ticket_id: int, guild_id: int, document: dict, expires_at: Optional[int]
     ) -> None:
-        """Store (or, after a reopen, replace) a ticket's transcript."""
+        """Store (or, after a reopen, replace) a ticket's transcript. A case made from the ticket
+        holds it as evidence, unless it's already held."""
         pool = self._require_pool()
         await pool.execute(
-            """INSERT INTO ticket_transcripts (ticket_id, guild_id, document, created_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5)
+            """INSERT INTO ticket_transcripts
+            (ticket_id, guild_id, document, created_at, expires_at, held_by_case_number)
+            VALUES ($1, $2, $3, $4, $5,
+                (SELECT MAX(case_number) FROM mod_cases WHERE source_ticket_id = $1))
             ON CONFLICT (ticket_id) DO UPDATE SET
             document = EXCLUDED.document, created_at = EXCLUDED.created_at,
-            expires_at = EXCLUDED.expires_at""",
+            expires_at = EXCLUDED.expires_at,
+            held_by_case_number = COALESCE(
+                ticket_transcripts.held_by_case_number, EXCLUDED.held_by_case_number
+            )""",
             ticket_id,
             guild_id,
             _encode("document", document),
@@ -683,6 +844,33 @@ class TicketRepository:
             "DELETE FROM ticket_webhook_deliveries WHERE created_at < $1", before
         )
         return int(status.split()[-1])
+
+    # Ratings
+
+    async def add_rating(
+        self, ticket_id: int, user_id: int, rating: int, comment: Optional[str], /
+    ) -> Optional[dict]:
+        """Rate a closed ticket, crediting its credited handlers; None if it's already rated."""
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            """INSERT INTO ticket_ratings (ticket_id, guild_id, user_id, rating, comment, handler_ids, created_at)
+            SELECT t.id, t.guild_id, $2, $3, $4,
+                ARRAY(SELECT user_id FROM ticket_handlers WHERE ticket_id = t.id AND credited ORDER BY joined_at, user_id),
+                $5
+            FROM tickets t WHERE t.id = $1
+            ON CONFLICT (ticket_id) DO NOTHING RETURNING *""",
+            ticket_id,
+            user_id,
+            rating,
+            comment,
+            int(time.time()),
+        )
+        return dict(row) if row else None
+
+    async def get_rating(self, ticket_id: int, /) -> Optional[dict]:
+        pool = self._require_pool()
+        row = await pool.fetchrow("SELECT * FROM ticket_ratings WHERE ticket_id = $1", ticket_id)
+        return dict(row) if row else None
 
     # Blacklist
 

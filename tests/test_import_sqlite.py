@@ -101,6 +101,7 @@ async def test_import_copies_and_coerces(pg_repo: Repository, tmp_path):
     assert case["duration_sections"] == 180  # TEXT '180' in SQLite
     assert case["is_active"] is True
     assert case["target_user_id"] == USER
+    assert case["source_ticket_id"] is None  # Postgres-only column, not in SQLite
 
     config = await pg_repo.get_guild_config(GUILD)
     assert (config.is_enabled, config.default_threshold) == (False, 25)
