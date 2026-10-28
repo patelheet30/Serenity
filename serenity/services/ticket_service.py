@@ -422,8 +422,12 @@ class TicketService:
             try:
                 await self.repo.set_ticket_channel(ticket["id"], channel.id)
             except BaseException:  # don't leave a channel and an open ticket nobody can find
-                await self.rest.delete_channel(channel.id)
-                await self.repo.delete_ticket(ticket["id"])
+                try:
+                    await self.rest.delete_channel(channel.id)
+                except hikari.HTTPError:
+                    logger.exception(f"Couldn't remove the channel of failed ticket {ticket['id']}")
+                finally:
+                    await self.repo.delete_ticket(ticket["id"])
                 raise
             self.open_channels.add(channel.id)
             ticket["channel_id"] = channel.id
