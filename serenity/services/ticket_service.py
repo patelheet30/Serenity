@@ -675,6 +675,8 @@ class TicketService:
         ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
         staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
         updated = await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
+        if updated is None:  # the ticket was rolled back (failed open) a moment ago
+            return
         if updated["waiting_on"] != ticket["waiting_on"]:
             self.schedule_topic(event.channel_id)
         if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]

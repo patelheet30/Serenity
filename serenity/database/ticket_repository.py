@@ -367,7 +367,7 @@ class TicketRepository:
         )
         return _decode(row)
 
-    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> dict:
+    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> Optional[dict]:
         """Count a message: staff replies join the credit chain and hand the turn to the opener."""
         pool = self._require_pool()
         now = int(time.time())
@@ -392,7 +392,7 @@ class TicketRepository:
                 "opener" if staff else "staff",
                 staff,
             )
-        return _decode(row)  # type: ignore[return-value]
+        return _decode(row)
 
     async def list_handlers(self, ticket_id: int) -> list[dict]:
         pool = self._require_pool()
