@@ -836,7 +836,7 @@ async def ask_picks(
     answers: dict[str, str],
 ) -> None:
     """The dropdown and member questions, as select menus, after the text form."""
-    service.drafts[(interaction.guild_id, interaction.user.id, ticket_type["id"])] = answers  # type: ignore[index]
+    service.save_draft((interaction.guild_id, interaction.user.id, ticket_type["id"]), answers)  # type: ignore[arg-type]
     rows: list[hikari.api.MessageActionRowBuilder] = []
     for f in asked_fields(ticket_type):
         kind = field_type(f)
@@ -894,15 +894,15 @@ async def submit_form(
 async def submit_picks(
     interaction: hikari.ComponentInteraction, service: TicketService, type_id: int
 ) -> None:
-    draft = service.drafts.get((interaction.guild_id, interaction.user.id, type_id))  # type: ignore[arg-type]
-    if draft is None:
-        raise TicketError("This form expired. Press the panel button again.")
+    key = (interaction.guild_id, interaction.user.id, type_id)
+    draft = service.get_draft(key)  # type: ignore[arg-type]
     ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
     answers = check_answers(asked_fields(ticket_type), draft)
-    del service.drafts[(interaction.guild_id, interaction.user.id, type_id)]  # type: ignore[arg-type]
     await create_and_confirm(interaction, service, ticket_type, answers)
+    # Only now: if the open was refused (open limit, blacklist), a retry keeps the answers.
+    service.drafts.pop(key, None)  # type: ignore[arg-type]
 
 
 async def edit_fields_form(
@@ -1000,9 +1000,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await submit_form(interaction, service, int(target))
         elif action == "pick" and isinstance(interaction, hikari.ComponentInteraction):
             type_id, key = target.split(":", 1)
-            draft = service.drafts.get((interaction.guild_id, interaction.user.id, int(type_id)))
-            if draft is None:
-                raise TicketError("This form expired. Press the panel button again.")
+            draft = service.get_draft((interaction.guild_id, interaction.user.id, int(type_id)))
             draft[key] = interaction.values[0] if interaction.values else ""
             await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_UPDATE)
         elif action == "submit" and isinstance(interaction, hikari.ComponentInteraction):

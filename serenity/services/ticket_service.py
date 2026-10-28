@@ -6,7 +6,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 
 import hikari
@@ -49,6 +49,8 @@ PICKED = ("select", "user")  # asked with select menus after the form, since mod
 MAX_PICKED = 4  # those menus' rows, plus the row with the Open button
 MAX_OPTIONS = 25  # options in one select menu
 MAX_LENGTH = {"paragraph": 1000}  # answer length; 100 for everything else
+DRAFT_TTL = 15 * 60  # seconds a half-filled form waits for its dropdown picks
+MAX_DRAFTS = 1000  # half-filled forms kept at once, across guilds
 
 
 def field_type(field: dict) -> str:
@@ -60,6 +62,45 @@ def _field_key(label: str, fields: list[dict]) -> str:
     while key in {f["key"] for f in fields}:
         key += "_"
     return key
+
+
+MAX_OPEN_REPEATS = 3  # on a 100-character answer, at most ~100^3 steps
+
+
+def _slow_pattern(parsed: Any) -> bool:
+    """Whether a parsed regex can backtrack badly. Patterns run on the event loop, and Python's
+    re has no timeout, so the shapes behind catastrophic backtracking are refused up front:
+    a repeat or `|` inside an open-ended repeat, backreferences, and many open-ended repeats.
+
+    ponytail: reads re's private parse tree and is deliberately strict; a `regex`-module
+    timeout would allow more if admins need richer patterns.
+    """
+    from re import _constants as c  # type: ignore[attr-defined]
+
+    open_repeats = 0
+
+    def walk(items: Any, in_repeat: bool) -> bool:
+        nonlocal open_repeats
+        for op, av in items:
+            if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
+                _, high, sub = av
+                if in_repeat and high > 1:
+                    return True
+                open_ended = high == c.MAXREPEAT
+                open_repeats += open_ended
+                if walk(sub, in_repeat or open_ended):
+                    return True
+            elif op == c.BRANCH:
+                if in_repeat or any(walk(branch, in_repeat) for branch in av[1]):
+                    return True
+            elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
+                return True
+            elif op in (c.SUBPATTERN, c.ATOMIC_GROUP, c.ASSERT, c.ASSERT_NOT):
+                if walk(av[-1], in_repeat):
+                    return True
+        return False
+
+    return walk(parsed, False) or open_repeats > MAX_OPEN_REPEATS
 
 
 def parse_questions(text: str) -> list[dict]:
@@ -115,9 +156,15 @@ def set_field(
         if not options:
             raise TicketError("A pattern field needs its regular expression in `options`.")
         try:
-            re.compile(options)
+            slow = len(options) > 200 or _slow_pattern(re._parser.parse(options))  # type: ignore[attr-defined]
         except re.error as exc:
             raise TicketError(f"That pattern isn't a valid regular expression: {exc}.") from None
+        if slow:
+            raise TicketError(
+                "That pattern could take too long to check. Keep it simple: no repeats inside "
+                "repeats (like `(a+)*`), no `|` inside a repeat, no backreferences, and at most "
+                f"{MAX_OPEN_REPEATS} open-ended repeats (`*`, `+`, `{{2,}}`)."
+            )
         field["pattern"] = options
     if identity:
         field["identity"] = True
@@ -173,7 +220,7 @@ def check_answer(field: dict, value: str) -> str:
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise TicketError(f"**{label}** must be a link starting with https://.")
     elif kind == "pattern":
-        # ponytail: the admin's regex runs on at most 100 characters, which bounds a slow one.
+        # set_field refused slow shapes, and the answer is at most 100 characters.
         if not re.fullmatch(field["pattern"], value):
             raise TicketError(f"**{label}** isn't in the expected format.")
     elif kind == "select":
@@ -346,9 +393,27 @@ class TicketService:
         # The creation queue: one ticket channel at a time per guild, so limits are checked
         # against settled counts and overflow categories aren't created twice.
         self._open_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # Form answers waiting on the opener's dropdown/member picks, by (guild, user, type).
+        # Form answers waiting on the opener's dropdown/member picks, by (guild, user, type), with
+        # when they were saved. Oldest first, so expiry and the cap only ever drop from the front.
         # ponytail: in memory; a restart drops half-filled forms and the member starts again.
-        self.drafts: dict[tuple[int, int, int], dict[str, str]] = {}
+        self.drafts: dict[tuple[int, int, int], tuple[float, dict[str, str]]] = {}
+
+    def save_draft(self, key: tuple[int, int, int], answers: dict[str, str]) -> None:
+        """Keep a form's answers for DRAFT_TTL, replacing that member's earlier form of the type.
+        Expired drafts are dropped here, and past MAX_DRAFTS the oldest go first."""
+        now = time.monotonic()
+        self.drafts.pop(key, None)
+        for old, (saved, _) in list(self.drafts.items()):
+            if now - saved < DRAFT_TTL and len(self.drafts) < MAX_DRAFTS:
+                break
+            del self.drafts[old]
+        self.drafts[key] = (now, answers)
+
+    def get_draft(self, key: tuple[int, int, int]) -> dict[str, str]:
+        draft = self.drafts.get(key)
+        if draft is None or time.monotonic() - draft[0] >= DRAFT_TTL:
+            raise TicketError("This form expired. Press the panel button again.")
+        return draft[1]
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
