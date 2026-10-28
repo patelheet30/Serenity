@@ -259,6 +259,10 @@ def test_parse_duration():
         (r"(foo|bar)+", True),  # | inside a repeat
         (r"(\w)\1", True),  # backreference
         (r".*.*.*.*x", True),  # too many open-ended repeats
+        (r"(a+){6}b", True),  # inside a bounded repeat: still exponential
+        (r"(a{0,2}){16}b", True),
+        (r"(a|aa){8}b", True),
+        (r"(\d{3}-){2}\d{4}", False),  # a fixed-size repeat inside a bounded one is fine
     ],
 )
 def test_slow_patterns_are_refused(pattern, slow):
