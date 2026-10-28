@@ -288,6 +288,102 @@ class TicketRepository:
         )
         return [r["channel_id"] for r in rows]
 
+    # Claiming and the credit chain
+
+    async def claim(self, ticket_id: int, user_id: int, *, force: bool = False) -> Optional[dict]:
+        """Assign the ticket to `user_id`: only if unassigned, unless `force` (a reassign).
+
+        Returns the updated ticket, or None if someone else already has it.
+        """
+        pool = self._require_pool()
+        now = int(time.time())
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window.
+                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3
+                WHERE id = $1 AND status = 'open' {"" if force else "AND assignee_id IS NULL"}
+                RETURNING *""",
+                ticket_id,
+                user_id,
+                now,
+            )
+            if row is None:
+                return None
+            await conn.execute(
+                """INSERT INTO ticket_handlers (ticket_id, user_id, role, joined_at)
+                VALUES ($1, $2, 'claimed', $3)
+                ON CONFLICT (ticket_id, user_id) DO UPDATE SET role = 'claimed'""",
+                ticket_id,
+                user_id,
+                now,
+            )
+        return _decode(row)
+
+    async def unclaim(self, ticket_id: int) -> Optional[dict]:
+        """Clear the assignee. They stay in the credit chain for what they already did."""
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            "UPDATE tickets SET assignee_id = NULL WHERE id = $1 RETURNING *", ticket_id
+        )
+        return _decode(row)
+
+    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> dict:
+        """Count a message: staff replies join the credit chain and hand the turn to the opener."""
+        pool = self._require_pool()
+        now = int(time.time())
+        async with pool.acquire() as conn, conn.transaction():
+            if staff:
+                await conn.execute(
+                    """INSERT INTO ticket_handlers (ticket_id, user_id, role, message_count, joined_at)
+                    VALUES ($1, $2, 'assisted', 1, $3)
+                    ON CONFLICT (ticket_id, user_id) DO UPDATE SET
+                    message_count = ticket_handlers.message_count + 1""",
+                    ticket_id,
+                    author_id,
+                    now,
+                )
+            row = await conn.fetchrow(
+                """UPDATE tickets SET last_activity_at = $2, waiting_on = $3,
+                first_response_at = CASE WHEN $4 THEN COALESCE(first_response_at, $2)
+                                         ELSE first_response_at END
+                WHERE id = $1 RETURNING *""",
+                ticket_id,
+                now,
+                "opener" if staff else "staff",
+                staff,
+            )
+        return _decode(row)  # type: ignore[return-value]
+
+    async def list_handlers(self, ticket_id: int) -> list[dict]:
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM ticket_handlers WHERE ticket_id = $1 ORDER BY joined_at, user_id",
+            ticket_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def credit_handlers(
+        self, ticket_id: int, conn: Optional[asyncpg.Connection] = None
+    ) -> None:
+        """On close: one handled credit for each handler who sent at least one message."""
+        await (conn or self._require_pool()).execute(
+            "UPDATE ticket_handlers SET credited = message_count >= 1 WHERE ticket_id = $1",
+            ticket_id,
+        )
+
+    async def due_for_unclaim(self, now: int) -> list[dict]:
+        """Claimed tickets whose opener has waited longer than the type's auto-unclaim hours."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, ty.auto_unclaim_hours, ty.staff_role_ids
+            FROM tickets t JOIN ticket_types ty ON ty.id = t.type_id
+            WHERE t.status = 'open' AND t.assignee_id IS NOT NULL AND t.waiting_on = 'staff'
+            AND ty.auto_unclaim_hours IS NOT NULL
+            AND t.last_activity_at < $1 - ty.auto_unclaim_hours * 3600""",
+            now,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
     # Events and notes
 
     async def add_event(

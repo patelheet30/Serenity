@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import arc
@@ -8,7 +9,12 @@ import hikari
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleNotEnabledError, ModuleType
 from serenity.database.ticket_repository import TicketRepository
-from serenity.services.ticket_service import TicketError, TicketService, parse_questions
+from serenity.services.ticket_service import (
+    TicketError,
+    TicketService,
+    member_permissions,
+    parse_questions,
+)
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
 
@@ -415,6 +421,46 @@ async def blacklist_remove(
     await ctx.respond(f"✅ {user.mention} can open tickets again.", flags=hikari.MessageFlag.EPHEMERAL)
 
 
+@ticket.include
+@arc.slash_subcommand("claim", "Take this ticket.")
+async def claim(ctx: arc.GatewayContext, service: TicketService = arc.inject()) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.claim(current, ctx.user.id, announce=False)
+    await ctx.respond(f"🙋 {ctx.user.mention} claimed this ticket.")
+
+
+@ticket.include
+@arc.slash_subcommand("unclaim", "Give this ticket back to the queue.")
+async def unclaim(ctx: arc.GatewayContext, service: TicketService = arc.inject()) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    member = service.require_staff(ctx.member, ticket_type)
+    if current["assignee_id"] is None:
+        raise TicketError("Nobody has claimed this ticket.")
+    if current["assignee_id"] != ctx.user.id and not member_permissions(member) & hikari.Permissions.MANAGE_GUILD:
+        raise TicketError(f"Only <@{current['assignee_id']}> or an admin can unclaim this ticket.")
+    await service.unclaim(
+        current, ctx.user.id, f"↩️ <@{current['assignee_id']}> is no longer handling this ticket."
+    )
+    await ctx.respond("✅ Unclaimed.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@ticket.include
+@arc.slash_subcommand("assign", "Give this ticket to a staff member (admins).")
+async def assign(
+    ctx: arc.GatewayContext,
+    member: arc.Option[hikari.Member, arc.MemberParams("Who should handle it.")],
+    service: TicketService = arc.inject(),
+) -> None:
+    require_manage_guild(ctx)
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(member, ticket_type)
+    await service.claim(current, member.id, by=ctx.user.id, announce=False)
+    await ctx.respond(
+        f"📌 Assigned this ticket to {member.mention}.", user_mentions=[member.id]
+    )
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -517,6 +563,13 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(interaction.values[0]))
         elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
             await submit_form(interaction, service, int(target))
+        elif action == "claim":
+            current, ticket_type = await service.ticket_here(interaction.channel_id)
+            service.require_staff(interaction.member, ticket_type)
+            await service.claim(current, interaction.user.id, announce=False)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE, f"🙋 {interaction.user.mention} claimed this ticket."
+            )
         else:
             await reply(interaction, "This button isn't available yet.")
     except TicketError as exc:
@@ -524,6 +577,24 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     except Exception:
         logger.exception(f"Ticket component {interaction.custom_id} failed")
         await reply(interaction, "❌ Something went wrong. Please try again.")
+
+
+@plugin.listen()
+async def on_message(event: hikari.GuildMessageCreateEvent) -> None:
+    await plugin.client.get_type_dependency(TicketService).on_message(event)
+
+
+@arc.utils.interval_loop(minutes=10)
+async def auto_unclaim(service: TicketService) -> None:
+    try:
+        await service.auto_unclaim(int(time.time()))
+    except Exception:
+        logger.exception("Ticket auto-unclaim failed")
+
+
+@plugin.listen()
+async def on_started(_: hikari.StartedEvent) -> None:
+    auto_unclaim.start(service=plugin.client.get_type_dependency(TicketService))
 
 
 @plugin.listen()
@@ -540,4 +611,5 @@ def load(client: arc.GatewayClient) -> None:
 
 @arc.unloader
 def unload(client: arc.GatewayClient) -> None:
+    auto_unclaim.stop()
     client.remove_plugin(plugin)

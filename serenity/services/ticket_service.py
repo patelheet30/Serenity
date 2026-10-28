@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Optional, Sequence
 
 import hikari
+import toolbox
 
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
@@ -85,6 +86,15 @@ def is_staff(
     if permissions & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
         return True
     return any(role in ticket_type["staff_role_ids"] for role in role_ids)
+
+
+def member_permissions(member: hikari.Member) -> hikari.Permissions:
+    if isinstance(member, hikari.InteractionMember):
+        return member.permissions
+    try:
+        return toolbox.calculate_permissions(member)
+    except Exception:  # roles missing from the cache
+        return hikari.Permissions.NONE
 
 
 class TicketService:
@@ -367,3 +377,77 @@ class TicketService:
             user_mentions=[opener.id],
             role_mentions=ticket_type["staff_role_ids"],
         )
+
+    # Claiming
+
+    async def ticket_here(self, channel_id: int) -> tuple[dict, dict]:
+        """The open ticket in this channel and its type."""
+        ticket = await self.repo.get_ticket_by_channel(channel_id)
+        if ticket is None or ticket["status"] != "open":
+            raise TicketError("This isn't an open ticket channel.")
+        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+        return ticket, ticket_type  # type: ignore[return-value]
+
+    def is_staff(self, member: hikari.Member, ticket_type: dict) -> bool:
+        return is_staff(ticket_type, member.role_ids, member_permissions(member))
+
+    def require_staff(self, member: Optional[hikari.Member], ticket_type: dict) -> hikari.Member:
+        if member is None or not self.is_staff(member, ticket_type):
+            raise TicketError(f"Only **{ticket_type['name']}** staff can do that.")
+        return member
+
+    async def claim(
+        self, ticket: dict, user_id: int, *, by: Optional[int] = None, announce: bool = True
+    ) -> dict:
+        """Give the ticket to `user_id`. `by` is the admin reassigning it, if it isn't them."""
+        updated = await self.repo.claim(ticket["id"], user_id, force=by is not None)
+        if updated is None:
+            current = await self.repo.get_ticket_by_id(ticket["id"])
+            assignee = current["assignee_id"] if current else None
+            raise TicketError(f"<@{assignee}> already has this ticket." if assignee else "This ticket is closed.")
+        await self.repo.add_event(
+            ticket["id"], "assigned" if by else "claimed", by or user_id, {"assignee": user_id}
+        )
+        if announce and ticket["channel_id"]:
+            text = (
+                f"📌 <@{by}> assigned this ticket to <@{user_id}>."
+                if by
+                else f"🙋 <@{user_id}> claimed this ticket."
+            )
+            await self.rest.create_message(ticket["channel_id"], text, user_mentions=[user_id])
+        return updated
+
+    async def unclaim(self, ticket: dict, actor_id: Optional[int], note: str) -> None:
+        await self.repo.unclaim(ticket["id"])
+        await self.repo.add_event(
+            ticket["id"], "unclaimed", actor_id, {"previous": ticket["assignee_id"]}
+        )
+        if ticket["channel_id"]:
+            await self.rest.create_message(ticket["channel_id"], note, role_mentions=True)
+
+    async def on_message(self, event: hikari.GuildMessageCreateEvent) -> None:
+        """Count replies in ticket channels; a first staff reply claims in reply mode."""
+        if event.channel_id not in self.open_channels or event.is_bot or event.member is None:
+            return
+        ticket = await self.repo.get_ticket_by_channel(event.channel_id)
+        if ticket is None or ticket["status"] != "open":
+            return
+        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
+        await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
+        if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]
+            try:
+                await self.claim(ticket, event.author_id, announce=False)
+            except TicketError:
+                pass  # someone claimed it a moment ago
+
+    async def auto_unclaim(self, now: int) -> None:
+        """Unclaim tickets whose opener has waited too long, and ping the type's staff."""
+        for ticket in await self.repo.due_for_unclaim(now):
+            roles = " ".join(f"<@&{r}>" for r in ticket["staff_role_ids"])
+            await self.unclaim(
+                ticket,
+                None,
+                f"⏰ No staff reply for {ticket['auto_unclaim_hours']}h, so <@{ticket['assignee_id']}> "
+                f"was unassigned. {roles}".strip(),
+            )
