@@ -423,6 +423,7 @@ async def test_close_survives_a_channel_deleted_by_hand(service: TicketService):
     assert (await service.repo.get_transcript(ticket["id"]))["document"]["messages"] == []  # type: ignore[index]
 
 
+@pytest.mark.asyncio
 async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support")
     service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
