@@ -150,3 +150,96 @@ async def test_tickets_module_cant_be_enabled_outside_the_allowlist(monkeypatch)
     with pytest.raises(ConfigurationError, match="isn't available"):
         await manager.enable_module(2, ModuleType.TICKETS)
     repo.set_module_enabled.assert_awaited_once()
+
+
+IGN = r"[A-Za-z0-9_]{3,16}"
+
+
+def test_typed_fields_are_checked_with_friendly_errors():
+    from serenity.services.ticket_service import check_answers, set_field
+
+    fields = set_field([], "Minecraft IGN", "pattern", options=IGN, identity=True)
+    fields = set_field(fields, "Budget", "number", required=False)
+    fields = set_field(fields, "Due", "date", required=False)
+    fields = set_field(fields, "Region", "select", options="EU, NA, EU")
+    fields = set_field(fields, "Link", "url", required=False)
+    assert fields[3]["options"] == ["EU", "NA"]
+
+    ok = check_answers(fields, {"minecraft_ign": "Notch_2", "budget": "1,000", "region": "na"})
+    assert ok == {"minecraft_ign": "Notch_2", "budget": "1,000", "due": "", "region": "NA", "link": ""}
+
+    with pytest.raises(TicketError) as exc:
+        check_answers(fields, {"minecraft_ign": "not an ign!", "budget": "lots", "due": "soon",
+                               "region": "Mars", "link": "example.com"})
+    problems = str(exc.value).splitlines()
+    assert len(problems) == 5 and "Minecraft IGN" in problems[0] and "EU, NA" in problems[3]
+    with pytest.raises(TicketError, match="Please answer \\*\\*Region"):
+        check_answers(fields, {"minecraft_ign": "Notch"})
+
+
+def test_set_field_replaces_by_label_and_enforces_limits():
+    from serenity.services.ticket_service import check_answers, set_field
+
+    fields = set_field([], "Order", "short")
+    fields = set_field(fields, "order", "number", staff_only=True)  # replaced, key kept
+    assert len(fields) == 1 and fields[0]["key"] == "order" and fields[0]["required"] is False
+    assert check_answers([set_field([], "Who", "user")[0]], {"who": "<@!123>"}) == {"who": "123"}
+
+    with pytest.raises(TicketError, match="regular expression"):
+        set_field([], "IGN", "pattern", options="([")
+    with pytest.raises(TicketError, match="dropdown needs"):
+        set_field([], "Region", "select")
+    picks: list[dict] = []
+    for i in range(4):
+        picks = set_field(picks, f"Pick {i}", "user")
+    with pytest.raises(TicketError, match="at most 4"):
+        set_field(picks, "Pick 5", "user")
+    assert len(set_field(picks, "Pick 5", "user", staff_only=True)) == 5  # never asked: no menu
+    with pytest.raises(TicketError, match="at most 5"):
+        set_field(set_field(picks, "Pick 5", "short"), "Six", "short")
+
+
+@pytest.mark.asyncio
+async def test_dropdown_questions_follow_the_form(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from serenity.extensions import tickets
+    from serenity.services.ticket_service import set_field
+
+    fields = set_field(set_field([], "IGN", "pattern", options=IGN), "Region", "select", options="EU,NA")
+    ticket_type = {"id": 7, "name": "Appeal", "fields": fields}
+    service = _service()
+    service.repo.get_type.return_value = ticket_type
+    created = AsyncMock()
+    monkeypatch.setattr(tickets, "create_and_confirm", created)
+
+    form = MagicMock(spec=hikari.ModalInteraction, guild_id=1, user=MagicMock(id=2))
+    form.create_initial_response = AsyncMock()
+    monkeypatch.setattr(tickets, "modal_values", lambda _: {"ign": "bad ign!"})
+    with pytest.raises(TicketError, match="IGN"):  # checked before the dropdowns are shown
+        await tickets.submit_form(form, service, 7)
+    monkeypatch.setattr(tickets, "modal_values", lambda _: {"ign": "Notch"})
+    await tickets.submit_form(form, service, 7)
+    rows = form.create_initial_response.call_args.kwargs["components"]
+    assert [r.build()[0]["components"][0]["custom_id"] for r in rows] == ["ticket:pick:7:region", "ticket:submit:7"]
+
+    press = MagicMock(spec=hikari.ComponentInteraction, guild_id=1, user=MagicMock(id=2))
+    with pytest.raises(TicketError, match="Region"):
+        await tickets.submit_picks(press, service, 7)
+    service.drafts[(1, 2, 7)]["region"] = "NA"  # what the pick handler stores
+    await tickets.submit_picks(press, service, 7)
+    assert created.call_args.args[3] == {"ign": "Notch", "region": "NA"}
+    assert service.drafts == {}
+
+
+def test_staff_only_answers_stay_out_of_the_openers_copy():
+    from serenity.services.ticket_service import render_transcript
+
+    document = {
+        "ticket": {"number": 1, "type": "Support", "opener_id": 1, "opened_at": 0},
+        "fields": {"Order": "A-1"},
+        "staff_fields": {"Refund approved": "yes"},
+        "messages": [],
+    }
+    assert "Refund approved" not in render_transcript(document, staff=False)
+    assert "Refund approved (staff): yes" in render_transcript(document, staff=True)

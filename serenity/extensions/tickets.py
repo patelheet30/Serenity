@@ -12,12 +12,18 @@ from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleTy
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
+    PICKED,
     PRIORITIES,
     TicketError,
     TicketService,
+    asked_fields,
+    check_answers,
+    field_type,
     member_permissions,
     parse_questions,
+    placeholder,
     render_transcript,
+    set_field,
 )
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -28,6 +34,16 @@ _GREEN = hikari.Color(0x57F287)
 _BLUE = hikari.Color(0x5865F2)
 
 CLAIM_MODES = {"First staff reply": "reply", "Claim button": "button", "Both": "both"}
+FIELD_KINDS = {
+    "Short text": "short",
+    "Paragraph": "paragraph",
+    "Number": "number",
+    "Date": "date",
+    "Dropdown": "select",
+    "Link": "url",
+    "Member": "user",
+    "Pattern (regex)": "pattern",
+}
 
 # Staff-only by default; server admins can grant /ticket to their staff roles in
 # Server Settings → Integrations. Openers use the buttons inside their ticket instead.
@@ -89,10 +105,21 @@ async def type_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list
 TypeOption = arc.Option[str, arc.StrParams("The ticket type.", autocomplete_with=type_names)]
 
 
+def describe_field(field: dict) -> str:
+    flags = [field_type(field)]
+    if field.get("staff_only"):
+        flags.append("staff only")
+    elif not field["required"]:
+        flags.append("optional")
+    if field.get("identity"):
+        flags.append("links tickets")
+    return ", ".join(flags)
+
+
 def describe_type(ticket_type: dict, service: TicketService) -> str:
     roles = ", ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"]) or "Manage Server only"
     category = f"<#{ticket_type['category_id']}>" if ticket_type["category_id"] else "None"
-    questions = "\n".join(f"• {f['label']}" for f in ticket_type["fields"]) or "None"
+    questions = "\n".join(f"• {f['label']} ({describe_field(f)})" for f in ticket_type["fields"]) or "None"
     retention = ticket_type["retention_days"]
     return (
         f"**{service.type_label(ticket_type)}**\n"
@@ -248,6 +275,50 @@ async def type_staff(
     await ctx.respond(
         f"✅ {role.mention} {'no longer handles' if removed else 'now handles'} "
         f"**{ticket_type['name']}** tickets. (Open tickets keep their current access.)",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
+@arc.slash_subcommand("field", "Add, change or remove one field of a ticket type's form.")
+async def type_field(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    label: arc.Option[str, arc.StrParams("The question; an existing one is replaced.", max_length=45)],
+    kind: arc.Option[str, arc.StrParams("What the answer is.", choices=FIELD_KINDS)] = "short",
+    required: arc.Option[bool, arc.BoolParams("The opener must answer it.")] = True,
+    options: arc.Option[
+        Optional[str],
+        arc.StrParams("Dropdown: options separated by commas. Pattern: the regex.", max_length=1000),
+    ] = None,
+    identity: arc.Option[
+        bool, arc.BoolParams("Link tickets with the same answer (e.g. an IGN), across types.")
+    ] = False,
+    staff_only: arc.Option[bool, arc.BoolParams("Never asked; staff fill it in.")] = False,
+    remove: arc.Option[bool, arc.BoolParams("Remove this field instead.")] = False,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    fields: list[dict] = ticket_type["fields"]
+    if remove:
+        kept = [f for f in fields if f["label"].lower() != label.strip().lower()]
+        if len(kept) == len(fields):
+            raise TicketError(f"**{ticket_type['name']}** has no field called “{label}”.")
+        fields = kept
+    else:
+        fields = set_field(
+            fields, label, kind, required=required, options=options, identity=identity,
+            staff_only=staff_only,
+        )
+    updated = await repo.update_type(guild_id, ticket_type["id"], fields=fields)
+    if updated is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="✅ Ticket type updated", description=describe_type(updated, service), color=_GREEN
+        ),
         flags=hikari.MessageFlag.EPHEMERAL,
     )
 
@@ -725,23 +796,74 @@ async def open_from_panel(
     # Checked before the form too, so nobody fills one in only to be refused.
     await service.check_can_open(guild_id, interaction.user.id, ticket_type)
 
-    if not ticket_type["fields"]:
+    asked = asked_fields(ticket_type)
+    typed = [f for f in asked if field_type(f) not in PICKED]
+    if typed:
+        await interaction.create_modal_response(
+            ticket_type["name"][:45], f"ticket:form:{type_id}", components=text_inputs(service, typed)
+        )
+    elif asked:
+        await ask_picks(interaction, service, ticket_type, {})
+    else:
         await create_and_confirm(interaction, service, ticket_type, {})
-        return
-    rows = [
+
+
+def text_inputs(
+    service: TicketService, fields: list[dict], values: Optional[dict[str, str]] = None
+) -> list[hikari.api.ModalActionRowBuilder]:
+    """A modal's rows for `fields`, prefilled from `values`. Picked fields are typed in here (staff
+    editing) and checked like any other answer."""
+    return [
         service.rest.build_modal_action_row().add_text_input(
             f["key"],
             f["label"],
             style=hikari.TextInputStyle.PARAGRAPH
-            if f["style"] == "paragraph"
+            if field_type(f) == "paragraph"
             else hikari.TextInputStyle.SHORT,
+            placeholder=placeholder(f),
+            value=(values or {}).get(f["key"]) or hikari.UNDEFINED,
             required=f["required"],
             max_length=f.get("max_length", 1000),
         )
-        for f in ticket_type["fields"]
+        for f in fields
     ]
-    await interaction.create_modal_response(
-        ticket_type["name"][:45], f"ticket:form:{type_id}", components=rows
+
+
+async def ask_picks(
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    service: TicketService,
+    ticket_type: dict,
+    answers: dict[str, str],
+) -> None:
+    """The dropdown and member questions, as select menus, after the text form."""
+    service.drafts[(interaction.guild_id, interaction.user.id, ticket_type["id"])] = answers  # type: ignore[index]
+    rows: list[hikari.api.MessageActionRowBuilder] = []
+    for f in asked_fields(ticket_type):
+        kind = field_type(f)
+        if kind not in PICKED:
+            continue
+        custom_id = f"ticket:pick:{ticket_type['id']}:{f['key']}"
+        row = service.rest.build_message_action_row()
+        if kind == "user":
+            row.add_select_menu(
+                hikari.ComponentType.USER_SELECT_MENU, custom_id, placeholder=f["label"],
+                min_values=int(f["required"]),
+            )
+        else:
+            menu = row.add_text_menu(custom_id, placeholder=f["label"], min_values=int(f["required"]))
+            for option in f["options"]:
+                menu.add_option(option, option)
+        rows.append(row)
+    rows.append(
+        service.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.PRIMARY, f"ticket:submit:{ticket_type['id']}", label="Open ticket"
+        )
+    )
+    await interaction.create_initial_response(
+        hikari.ResponseType.MESSAGE_CREATE,
+        f"**{ticket_type['name']}**: a few more questions, then press **Open ticket**.",
+        components=rows,
+        flags=hikari.MessageFlag.EPHEMERAL,
     )
 
 
@@ -760,12 +882,58 @@ async def submit_form(
     ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
-    answers = modal_values(interaction)
-    fields = {f["key"]: answers.get(f["key"], "") for f in ticket_type["fields"]}
-    missing = [f["label"] for f in ticket_type["fields"] if f["required"] and not fields[f["key"]]]
-    if missing:
-        raise TicketError(f"Please answer: {', '.join(missing)}.")
-    await create_and_confirm(interaction, service, ticket_type, fields)
+    asked = asked_fields(ticket_type)
+    typed = [f for f in asked if field_type(f) not in PICKED]
+    answers = check_answers(typed, modal_values(interaction))  # an invalid answer stops here
+    if len(typed) < len(asked):
+        await ask_picks(interaction, service, ticket_type, answers)
+    else:
+        await create_and_confirm(interaction, service, ticket_type, answers)
+
+
+async def submit_picks(
+    interaction: hikari.ComponentInteraction, service: TicketService, type_id: int
+) -> None:
+    draft = service.drafts.get((interaction.guild_id, interaction.user.id, type_id))  # type: ignore[arg-type]
+    if draft is None:
+        raise TicketError("This form expired. Press the panel button again.")
+    ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
+    if ticket_type is None:
+        raise TicketError("That ticket type no longer exists.")
+    answers = check_answers(asked_fields(ticket_type), draft)
+    del service.drafts[(interaction.guild_id, interaction.user.id, type_id)]  # type: ignore[arg-type]
+    await create_and_confirm(interaction, service, ticket_type, answers)
+
+
+async def edit_fields_form(
+    interaction: hikari.ComponentInteraction, service: TicketService, ticket_id: int
+) -> None:
+    current, ticket_type = await ticket_for(service, interaction, ticket_id)
+    service.require_staff(interaction.member, ticket_type)
+    if not ticket_type["fields"]:
+        raise TicketError(f"**{ticket_type['name']}** tickets have no fields.")
+    await interaction.create_modal_response(
+        f"Ticket #{current['number']}",
+        f"ticket:fieldsave:{ticket_id}",
+        components=text_inputs(service, ticket_type["fields"], current["fields"]),
+    )
+
+
+async def save_fields(
+    interaction: hikari.ModalInteraction, service: TicketService, ticket_id: int
+) -> None:
+    current, ticket_type = await ticket_for(service, interaction, ticket_id)
+    service.require_staff(interaction.member, ticket_type)
+    updated = await service.edit_fields(
+        current, ticket_type, modal_values(interaction), interaction.user.id
+    )
+    if interaction.message and interaction.message.embeds:  # the welcome message the button is on
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_UPDATE,
+            embed=service.show_answers(interaction.message.embeds[0], updated, ticket_type),
+        )
+    else:
+        await reply(interaction, "✅ Fields saved.")
 
 
 async def create_and_confirm(
@@ -830,6 +998,19 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(interaction.values[0]))
         elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
             await submit_form(interaction, service, int(target))
+        elif action == "pick" and isinstance(interaction, hikari.ComponentInteraction):
+            type_id, key = target.split(":", 1)
+            draft = service.drafts.get((interaction.guild_id, interaction.user.id, int(type_id)))
+            if draft is None:
+                raise TicketError("This form expired. Press the panel button again.")
+            draft[key] = interaction.values[0] if interaction.values else ""
+            await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_UPDATE)
+        elif action == "submit" and isinstance(interaction, hikari.ComponentInteraction):
+            await submit_picks(interaction, service, int(target))
+        elif action == "fields" and isinstance(interaction, hikari.ComponentInteraction):
+            await edit_fields_form(interaction, service, int(target))
+        elif action == "fieldsave" and isinstance(interaction, hikari.ModalInteraction):
+            await save_fields(interaction, service, int(target))
         elif action == "claim":
             current, ticket_type = await service.ticket_here(interaction.channel_id)
             service.require_staff(interaction.member, ticket_type)

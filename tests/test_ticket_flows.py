@@ -557,3 +557,36 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_invalid_ign_creates_nothing_and_identity_links_tickets_across_types(
+    service: TicketService,
+):
+    from serenity.services.ticket_service import set_field
+
+    ign = set_field([], "IGN", "pattern", options=r"[A-Za-z0-9_]{3,16}", identity=True)
+    appeal = await service.repo.create_type(GUILD, "Appeal", fields=ign)
+    report = await service.repo.create_type(
+        GUILD, "Report", fields=set_field(ign, "Verdict", "short", staff_only=True)
+    )
+
+    with pytest.raises(TicketError, match="IGN"):
+        await service.open_ticket(GUILD, member(ALICE, "alice"), appeal, {"ign": "no spaces!"})
+    assert service.rest.create_guild_text_channel.await_count == 0
+    assert await service.repo.get_ticket(GUILD, 1) is None
+
+    first = await service.open_ticket(GUILD, member(ALICE, "alice"), appeal, {"ign": "Notch_2"})
+    second = await service.open_ticket(GUILD, member(BOB, "bob"), report, {"ign": "notch_2"})
+    other = await service.open_ticket(GUILD, member(CAROL, "carol"), report, {"ign": "Jeb_"})
+    linked = await service.repo.linked_tickets(second["id"])
+    assert [t["id"] for t in linked] == [first["id"]] and linked[0]["linked_by"] == ["ign"]
+    welcome = service.rest.create_message.call_args_list[-1].kwargs["embed"]
+    assert [f.name for f in welcome.fields] == ["IGN"]  # the staff-only Verdict isn't shown
+
+    # Staff fix the IGN: the links follow, and the staff-only field is saved.
+    edited = await service.edit_fields(other, report, {"ign": "NOTCH_2", "verdict": "banned"}, BOB)
+    assert edited["fields"] == {"ign": "NOTCH_2", "verdict": "banned"}
+    assert {t["id"] for t in await service.repo.linked_tickets(first["id"])} == {second["id"], other["id"]}
+    with pytest.raises(TicketError, match="IGN"):
+        await service.edit_fields(other, report, {"ign": "x"}, BOB)
