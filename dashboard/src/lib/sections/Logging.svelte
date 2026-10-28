@@ -31,9 +31,12 @@
 		mod: { n: 'Mod', d: 'Every moderation case' },
 		ticket: { n: 'Ticket', d: 'Tickets opened, claimed, closed and reopened' }
 	};
-	const KEYS = Object.keys(TYPES);
 
 	let data: Logging | null = $state(null);
+	// The log types this server has (the ticket log only where Tickets is available).
+	const KEYS: string[] = $derived(
+		(data as Logging | null)?.types.map((t) => t.type) ?? Object.keys(TYPES)
+	);
 	let modules: Modules | null = $state(null);
 	let settingUp = $state(false);
 	// Targets added this visit stay listed even when every box is cleared, so they can be re-ticked.
