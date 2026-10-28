@@ -31,6 +31,7 @@ ticket = plugin.include_slash_group(
 )
 type_group = ticket.include_subgroup("type", "Configure the kinds of ticket members can open.")
 panel_group = ticket.include_subgroup("panel", "Post the messages members open tickets from.")
+blacklist_group = ticket.include_subgroup("blacklist", "Stop members from opening tickets.")
 
 PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
 MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
@@ -396,6 +397,35 @@ async def panel_list(
     )
 
 
+@blacklist_group.include
+@arc.slash_subcommand("add", "Stop a member from opening tickets.")
+async def blacklist_add(
+    ctx: arc.GatewayContext,
+    user: arc.Option[hikari.User, arc.UserParams("Who to block.")],
+    reason: arc.Option[Optional[str], arc.StrParams("Why (staff only).", max_length=500)] = None,
+    repo: TicketRepository = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    if not await repo.blacklist_add(guild_id, user.id, ctx.user.id, reason):
+        raise TicketError(f"{user.mention} is already blocked from opening tickets.")
+    await ctx.respond(
+        f"🚫 {user.mention} can no longer open tickets.", flags=hikari.MessageFlag.EPHEMERAL
+    )
+
+
+@blacklist_group.include
+@arc.slash_subcommand("remove", "Let a member open tickets again.")
+async def blacklist_remove(
+    ctx: arc.GatewayContext,
+    user: arc.Option[hikari.User, arc.UserParams("Who to unblock.")],
+    repo: TicketRepository = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    if not await repo.blacklist_remove(guild_id, user.id):
+        raise TicketError(f"{user.mention} isn't blocked.")
+    await ctx.respond(f"✅ {user.mention} can open tickets again.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -407,18 +437,76 @@ async def reply(interaction: hikari.PartialInteraction, content: str) -> None:
         await interaction.create_initial_response(
             hikari.ResponseType.MESSAGE_CREATE, content, flags=hikari.MessageFlag.EPHEMERAL
         )
-    except hikari.BadRequestError:  # already acknowledged (deferred or answered)
-        await interaction.execute(content, flags=hikari.MessageFlag.EPHEMERAL)
+    except hikari.BadRequestError:  # already acknowledged: replace the "thinking…" message
+        await interaction.edit_initial_response(content)
 
 
 async def open_from_panel(
     interaction: hikari.ComponentInteraction, service: TicketService, type_id: int
 ) -> None:
+    guild_id: int = interaction.guild_id  # type: ignore[assignment]
+    ticket_type = await service.repo.get_type(guild_id, type_id)
+    if ticket_type is None:
+        raise TicketError("That ticket type no longer exists.")
+    # Checked before the form too, so nobody fills one in only to be refused.
+    await service.check_can_open(guild_id, interaction.user.id, ticket_type)
+
+    if not ticket_type["fields"]:
+        await create_and_confirm(interaction, service, ticket_type, {})
+        return
+    rows = [
+        service.rest.build_modal_action_row().add_text_input(
+            f["key"],
+            f["label"],
+            style=hikari.TextInputStyle.PARAGRAPH
+            if f["style"] == "paragraph"
+            else hikari.TextInputStyle.SHORT,
+            required=f["required"],
+            max_length=f.get("max_length", 1000),
+        )
+        for f in ticket_type["fields"]
+    ]
+    await interaction.create_modal_response(
+        ticket_type["name"][:45], f"ticket:form:{type_id}", components=rows
+    )
+
+
+def modal_values(interaction: hikari.ModalInteraction) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for row in interaction.components:
+        for component in getattr(row, "components", [row]):
+            if getattr(component, "custom_id", None) and hasattr(component, "value"):
+                values[component.custom_id] = (component.value or "").strip()
+    return values
+
+
+async def submit_form(
+    interaction: hikari.ModalInteraction, service: TicketService, type_id: int
+) -> None:
     ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
-    # ponytail: placeholder until the open flow lands
-    await reply(interaction, f"Opening **{ticket_type['name']}** tickets is coming soon.")
+    answers = modal_values(interaction)
+    fields = {f["key"]: answers.get(f["key"], "") for f in ticket_type["fields"]}
+    missing = [f["label"] for f in ticket_type["fields"] if f["required"] and not fields[f["key"]]]
+    if missing:
+        raise TicketError(f"Please answer: {', '.join(missing)}.")
+    await create_and_confirm(interaction, service, ticket_type, fields)
+
+
+async def create_and_confirm(
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    service: TicketService,
+    ticket_type: dict,
+    fields: dict[str, str],
+) -> None:
+    await interaction.create_initial_response(
+        hikari.ResponseType.DEFERRED_MESSAGE_CREATE, flags=hikari.MessageFlag.EPHEMERAL
+    )
+    ticket = await service.open_ticket(
+        interaction.guild_id, interaction.member, ticket_type, fields  # type: ignore[arg-type]
+    )
+    await interaction.edit_initial_response(f"✅ Your ticket is open: <#{ticket['channel_id']}>")
 
 
 @plugin.listen()
@@ -438,8 +526,10 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(target))
         elif action == "menu" and isinstance(interaction, hikari.ComponentInteraction):
             await open_from_panel(interaction, service, int(interaction.values[0]))
+        elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
+            await submit_form(interaction, service, int(target))
         else:
-            logger.warning(f"Unknown ticket component {interaction.custom_id}")
+            await reply(interaction, "This button isn't available yet.")
     except TicketError as exc:
         await reply(interaction, f"❌ {exc}")
     except Exception:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import re
+from collections import defaultdict
 from typing import Optional, Sequence
 
 import hikari
 
-from serenity.core.modules import ModuleManager
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
@@ -15,6 +17,18 @@ logger = get_logger(__name__)
 MAX_FIELDS = 5  # a Discord modal holds at most five inputs
 MAX_LABEL = 45  # and each input's label is at most 45 characters
 PANEL_COLOR = hikari.Color(0x5865F2)
+CATEGORY_LIMIT = 50  # channels Discord allows in one category
+DEFAULT_RETENTION_DAYS = 30
+
+# What the opener and staff can do in a ticket channel.
+TICKET_MEMBER_ALLOW = (
+    hikari.Permissions.VIEW_CHANNEL
+    | hikari.Permissions.SEND_MESSAGES
+    | hikari.Permissions.READ_MESSAGE_HISTORY
+    | hikari.Permissions.ATTACH_FILES
+    | hikari.Permissions.EMBED_LINKS
+)
+BOT_ALLOW = TICKET_MEMBER_ALLOW | hikari.Permissions.MANAGE_CHANNELS | hikari.Permissions.MANAGE_MESSAGES
 
 
 class TicketError(SerenityError):
@@ -41,6 +55,27 @@ def parse_questions(text: str) -> list[dict]:
             {"key": key, "label": label, "style": "paragraph", "required": True, "max_length": 1000}
         )
     return fields
+
+
+def render_channel_name(
+    template: str, *, type_name: str, number: int, username: str, fields: dict[str, str]
+) -> str:
+    """A ticket's channel name from its type's template, made safe for Discord."""
+
+    def field(match: re.Match) -> str:
+        return fields.get(match.group(1), "")[:20]
+
+    name = re.sub(r"\{field:([a-z0-9_]+)\}", field, template)
+    name = name.replace("{type}", type_name).replace("{number}", str(number))
+    name = name.replace("{user}", username)
+    name = re.sub(r"[^\w-]+", "-", name.lower()).strip("-")
+    name = re.sub(r"-{2,}", "-", name)[:100]
+    return name or f"ticket-{number}"
+
+
+def overflow_name(base: str, index: int) -> str:
+    """The category tickets overflow into once `base` is full: "Support 2", "Support 3", ..."""
+    return base if index == 1 else f"{base} {index}"
 
 
 def is_staff(
@@ -71,6 +106,9 @@ class TicketService:
         self.open_channels: set[int] = set()
         # Posted panel messages, so a deleted message only costs a query if it was a panel.
         self.panel_messages: set[int] = set()
+        # The creation queue: one ticket channel at a time per guild, so limits are checked
+        # against settled counts and overflow categories aren't created twice.
+        self._open_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
@@ -170,3 +208,174 @@ class TicketService:
                     await self.post_panel(panel)
                 except (TicketError, hikari.HTTPError) as exc:  # one broken panel can't stop the rest
                     logger.warning(f"Couldn't refresh ticket panel {panel['id']}: {exc}")
+
+    # Opening
+
+    async def retention_days(self, guild_id: int, ticket_type: dict) -> int:
+        """Days a transcript of this type is kept; 0 means until deleted."""
+        if ticket_type["retention_days"] is not None:
+            return ticket_type["retention_days"]
+        config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
+        return int(config.settings.get("retention_days", DEFAULT_RETENTION_DAYS))
+
+    async def check_can_open(self, guild_id: int, user_id: int, ticket_type: dict) -> None:
+        """Raise if this member may not open a ticket of this type right now."""
+        if await self.repo.get_blacklist_entry(guild_id, user_id):
+            raise TicketError("You can't open tickets in this server.")
+        limit = ticket_type["open_limit"]
+        if await self.repo.count_open(guild_id, user_id, ticket_type["id"]) >= limit:
+            raise TicketError(
+                f"You already have {'an open' if limit == 1 else f'{limit} open'} "
+                f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
+            )
+
+    def overwrites(
+        self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]
+    ) -> list[hikari.PermissionOverwrite]:
+        ows = [
+            hikari.PermissionOverwrite(
+                id=hikari.Snowflake(guild_id),  # @everyone
+                type=hikari.PermissionOverwriteType.ROLE,
+                deny=hikari.Permissions.VIEW_CHANNEL,
+            )
+        ]
+        ows += [
+            hikari.PermissionOverwrite(
+                id=hikari.Snowflake(role), type=hikari.PermissionOverwriteType.ROLE,
+                allow=TICKET_MEMBER_ALLOW,
+            )
+            for role in ticket_type["staff_role_ids"]
+        ]
+        ows += [
+            hikari.PermissionOverwrite(
+                id=hikari.Snowflake(user), type=hikari.PermissionOverwriteType.MEMBER,
+                allow=TICKET_MEMBER_ALLOW,
+            )
+            for user in member_ids
+        ]
+        me = self.cache.get_me()
+        if me:
+            ows.append(
+                hikari.PermissionOverwrite(
+                    id=me.id, type=hikari.PermissionOverwriteType.MEMBER, allow=BOT_ALLOW
+                )
+            )
+        return ows
+
+    async def _category(self, guild_id: int, base_id: Optional[int]) -> Optional[int]:
+        """Where a new ticket channel goes: the type's category, or its first overflow with room.
+
+        ponytail: counts come from the cache, which can trail a just-created channel by a moment;
+        if Discord rejects a 51st channel the open fails with a retryable error.
+        """
+        if base_id is None:
+            return None
+        channels = list(self.cache.get_guild_channels_view_for_guild(guild_id).values())
+        base = next((c for c in channels if c.id == base_id), None)
+        if base is None:
+            raise TicketError("This ticket type's category no longer exists. Ask an admin to fix it.")
+
+        def children(category_id: int) -> int:
+            return sum(1 for c in channels if c.parent_id == category_id)
+
+        by_name = {c.name: c for c in channels if c.type == hikari.ChannelType.GUILD_CATEGORY}
+        for index in range(1, 11):
+            category = base if index == 1 else by_name.get(overflow_name(base.name or "", index))
+            if category is None:
+                created = await self.rest.create_guild_category(
+                    guild_id,
+                    overflow_name(base.name or "Tickets", index),
+                    position=base.position + index - 1,
+                    permission_overwrites=list(base.permission_overwrites.values()),
+                    reason="Ticket category full",
+                )
+                return created.id
+            if children(category.id) < CATEGORY_LIMIT:
+                return category.id
+        raise TicketError("Every ticket category is full. Ask an admin to close some tickets.")
+
+    async def open_ticket(
+        self, guild_id: int, member: hikari.Member, ticket_type: dict, fields: dict[str, str]
+    ) -> dict:
+        """Create a ticket and its channel, and post the welcome message."""
+        async with self._open_locks[guild_id]:
+            await self.check_can_open(guild_id, member.id, ticket_type)
+            ticket = await self.repo.create_ticket(guild_id, ticket_type["id"], member.id, fields)
+            try:
+                category_id = await self._category(guild_id, ticket_type["category_id"])
+                channel = await self.rest.create_guild_text_channel(
+                    guild_id,
+                    render_channel_name(
+                        ticket_type["name_template"],
+                        type_name=ticket_type["name"],
+                        number=ticket["number"],
+                        username=member.username,
+                        fields=fields,
+                    ),
+                    category=category_id if category_id is not None else hikari.UNDEFINED,
+                    permission_overwrites=self.overwrites(guild_id, ticket_type, [member.id]),
+                    topic=f"Ticket #{ticket['number']} · {ticket_type['name']} · opened by {member.username}",
+                    reason=f"Ticket #{ticket['number']} opened by {member.username}",
+                )
+            except BaseException as exc:
+                await self.repo.delete_ticket(ticket["id"])
+                if isinstance(exc, hikari.ForbiddenError):
+                    raise TicketError(
+                        "I couldn't create your ticket channel. An admin needs to give me "
+                        "Manage Channels and Manage Roles."
+                    ) from None
+                raise
+            try:
+                await self.repo.set_ticket_channel(ticket["id"], channel.id)
+            except BaseException:  # don't leave a channel and an open ticket nobody can find
+                try:
+                    await self.rest.delete_channel(channel.id)
+                except Exception:  # keep the original error as the one that surfaces
+                    logger.exception(f"Couldn't remove the channel of failed ticket {ticket['id']}")
+                finally:
+                    await self.repo.delete_ticket(ticket["id"])
+                raise
+            self.open_channels.add(channel.id)
+            ticket["channel_id"] = channel.id
+
+        try:
+            await self.post_welcome(ticket, ticket_type, member)
+        except Exception:  # Discord or the settings read: the ticket is open and the opener gets its link regardless
+            logger.exception(f"Couldn't post the welcome message for ticket {ticket['id']}")
+        return ticket
+
+    async def post_welcome(self, ticket: dict, ticket_type: dict, opener: hikari.User) -> None:
+        days = await self.retention_days(ticket["guild_id"], ticket_type)
+        if not ticket_type["transcripts"]:
+            privacy = "This ticket isn't recorded."
+        elif days == 0:
+            privacy = "This ticket is recorded; the transcript is kept until an admin deletes it."
+        else:
+            privacy = f"This ticket is recorded; the transcript is kept for {days} days after it closes."
+
+        embed = hikari.Embed(
+            title=f"{self.type_label(ticket_type)} · #{ticket['number']}",
+            description="Thanks for reaching out. Staff will be with you shortly.",
+            color=PANEL_COLOR,
+        )
+        labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
+        for key, answer in ticket["fields"].items():
+            embed.add_field(labels.get(key, key), answer[:1024] or "—")
+        embed.set_footer(privacy)
+
+        row = self.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.DANGER, f"ticket:close:{ticket['id']}", label="Close", emoji="🔒"
+        )
+        if ticket_type["claim_mode"] in ("button", "both"):
+            row.add_interactive_button(
+                hikari.ButtonStyle.SUCCESS, f"ticket:claim:{ticket['id']}", label="Claim", emoji="🙋"
+            )
+        staff = " ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"])
+        await self.rest.create_message(
+            ticket["channel_id"],
+            f"{opener.mention} {staff}".strip(),
+            embed=embed,
+            components=[row],
+            user_mentions=[opener.id],
+            role_mentions=ticket_type["staff_role_ids"],
+        )
