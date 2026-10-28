@@ -229,6 +229,8 @@ PLACEHOLDERS = {
     "{log_type}": "message",
     "{number}": "1",
     "{user_id}": str(USER),
+    "{panel_id}": "1",
+    "{pack}": "game",
 }
 
 
