@@ -116,7 +116,7 @@ async def view(client, ticket, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_opener_views_without_notes_after_leaving_and_others_get_404(client, closed, monkeypatch):
+async def test_opener_views_without_notes_after_leaving_and_others_get_404(client, closed):
     t1, _, t3 = closed.tickets  # USER opened #3 only
     gone = await client(member=False)  # USER left the server
     status, body = await view(gone, t3, cookies=COOKIES)
@@ -138,9 +138,6 @@ async def test_opener_views_without_notes_after_leaving_and_others_get_404(clien
     assert body["staff_fields"] == {"Risk": "high"} and len(body["events"]) == 2
     assert not body["can_delete"] and not body["can_rate"]
     assert (await view(await client(), t1, cookies=COOKIES))[1]["can_delete"]
-
-    monkeypatch.setenv("TICKETS_GUILDS", "")
-    assert (await view(gone, t3, cookies=COOKIES))[0] == 404
 
 
 @pytest.mark.asyncio

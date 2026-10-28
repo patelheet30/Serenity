@@ -79,10 +79,7 @@ def test_dashboard_labels_every_log_type():
     assert re.findall(r"^\t\t(\w+): \{", block.group(1), re.M) == LOG_TYPES
 
 
-def test_global_logging_choices_leave_out_the_ticket_log():
-    """/logging is global; until Tickets launches its choices mustn't advertise the ticket log."""
-    for command in (logging_ext.enable_log, logging_ext.disable_log):
+def test_logging_choices_include_the_ticket_log():
+    for command in (logging_ext.enable_log, logging_ext.disable_log, logging_ext.ignore_channel):
         option = command.options["log_type"].to_command_option()
-        assert "ticket" not in {c.value for c in option.choices or []}
-    option = logging_ext.ignore_channel.options["log_type"].to_command_option()
-    assert "ticket" not in {c.value for c in option.choices or []}
+        assert "ticket" in {c.value for c in option.choices or []}

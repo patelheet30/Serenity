@@ -2,8 +2,7 @@
 
 Managers (Manage Server) can use every route. Ticket staff, members holding a type's staff role
 or one of its tier roles, can use only `staff_routes`, and only see the tickets their roles reach
-(TicketAccess.can_see). auth_middleware enforces the routes and 404s them in servers outside
-TICKETS_GUILDS; handlers filter what they return with request[TICKET_ACCESS].
+(TicketAccess.can_see). auth_middleware enforces the routes; handlers filter what they return with request[TICKET_ACCESS].
 """
 
 from dataclasses import dataclass
@@ -11,7 +10,6 @@ from typing import Any, Optional
 
 from aiohttp import web
 
-from serenity.core.modules import ModuleType, module_available
 from serenity.dashboard.auth import Membership, NotInstalledError, access_level
 from serenity.dashboard.common import ACCESS, SESSION, TICKET_SVC, ApiError, guild_id
 from serenity.services.ticket_service import current_tier
@@ -55,8 +53,6 @@ async def ticket_access(
         return TicketAccess()
     if access_level(member.permissions):
         return TicketAccess(manager=True)
-    if not module_available(guild_id, ModuleType.TICKETS):
-        return TicketAccess()
     staff_types, tiers = set(), set()
     for row in await app[TICKET_SVC].repo.staff_roles(guild_id):
         if member.role_ids.intersection(row["staff_role_ids"]):

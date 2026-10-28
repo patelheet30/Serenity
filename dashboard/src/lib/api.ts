@@ -8,8 +8,8 @@ export type Guild = {
 	/** Ticket staff without Manage Server: only Tickets opens. */
 	staff: boolean;
 };
-/** What the user can open in a guild; `tickets` is false outside the Tickets allowlist. */
-export type Access = { level: 'manage' | 'staff'; tickets: boolean };
+/** What the user can open in a guild. */
+export type Access = { level: 'manage' | 'staff' };
 
 export type Channel = {
 	id: string;
