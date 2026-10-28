@@ -59,7 +59,7 @@ async def list_modules(
             color=hikari.Color(0x5865F2),
         )
 
-        core_modules = [ModuleType.SLOWMODE, ModuleType.MODERATION, ModuleType.LOGGING]
+        core_modules = list(ModuleType)
         core_status = []
 
         for mod in core_modules:
@@ -104,6 +104,7 @@ async def enable_module(
                 hikari.CommandChoice(name="Slowmode", value="slowmode"),
                 hikari.CommandChoice(name="Moderation", value="moderation"),
                 hikari.CommandChoice(name="Logging", value="logging"),
+                hikari.CommandChoice(name="Tickets", value="tickets"),
             ],
         ),
     ],
@@ -166,6 +167,12 @@ async def enable_module(
                 value="Use `/logging setup` to configure log channels.",
                 inline=False,
             )
+        elif module_type == ModuleType.TICKETS:
+            embed.add_field(
+                name="Next Steps",
+                value="Create a ticket type with `/ticket type create`, then post a panel with `/ticket panel post`.",
+                inline=False,
+            )
 
         await ctx.respond(embed=embed)
         logger.info(f"Enabled module {module} in guild {ctx.guild_id} by user {ctx.user.id}")
@@ -193,6 +200,7 @@ async def disable_module(
                 hikari.CommandChoice(name="Slowmode", value="slowmode"),
                 hikari.CommandChoice(name="Moderation", value="moderation"),
                 hikari.CommandChoice(name="Logging", value="logging"),
+                hikari.CommandChoice(name="Tickets", value="tickets"),
             ],
         ),
     ],

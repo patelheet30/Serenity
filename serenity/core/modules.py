@@ -19,6 +19,7 @@ class ModuleType(Enum):
     SLOWMODE = "slowmode"
     MODERATION = "moderation"
     LOGGING = "logging"
+    TICKETS = "tickets"
 
     # Future module types will be added here
 
@@ -38,6 +39,7 @@ MODULE_DEPENDENCIES: Dict[ModuleType, List[ModuleType]] = {
     ModuleType.SLOWMODE: [],
     ModuleType.LOGGING: [],
     ModuleType.MODERATION: [ModuleType.LOGGING],
+    ModuleType.TICKETS: [],
     # Future dependencies will be added here
 }
 
