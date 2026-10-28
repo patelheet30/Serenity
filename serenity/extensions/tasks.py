@@ -486,7 +486,9 @@ async def _update_pattern_stats(
 async def on_started(_: hikari.StartedEvent) -> None:
     """Start background tasks."""
 
-    await asyncio.sleep(2)
+    # StartedEvent can fire before main.py's startup hook has registered the dependencies
+    # (command sync runs first and can take seconds), so wait for arc's startup instead.
+    await plugin.client.wait_until_started()
 
     repo = plugin.client.get_type_dependency(Repository)
     engine = plugin.client.get_type_dependency(SlowmodeEngine)
