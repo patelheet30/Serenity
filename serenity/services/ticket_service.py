@@ -178,7 +178,7 @@ class TicketService:
             )
         except hikari.ForbiddenError:
             raise TicketError(
-                f"I can't post in <#{panel['channel_id']}>. Check my View Channel, "
+                f"I can't post or edit my panel message in <#{panel['channel_id']}>. Check my View Channel, "
                 "Send Messages and Embed Links permissions there."
             ) from None
         self.panel_messages.add(message.id)
