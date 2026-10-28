@@ -10,7 +10,7 @@ from serenity.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # asyncpg returns JSONB as text unless the pool has a codec; the pool is shared, so decode here.
-_JSON_COLUMNS = ("fields", "stages", "data", "document")
+_JSON_COLUMNS = ("fields", "stages", "data", "document", "schedule")
 
 # Columns a ticket type can be created or updated with.
 TYPE_COLUMNS = (
@@ -27,6 +27,8 @@ TYPE_COLUMNS = (
     "transcripts",
     "retention_days",
     "auto_unclaim_hours",
+    "schedule",
+    "open_off_hours",
 )
 
 
@@ -208,6 +210,12 @@ class TicketRepository:
         pool = self._require_pool()
         rows = await pool.fetch("SELECT message_id FROM ticket_panels WHERE message_id IS NOT NULL")
         return [r["message_id"] for r in rows]
+
+    async def panel_guilds(self) -> list[int]:
+        """Guilds with a posted panel, whose support status the panels show."""
+        pool = self._require_pool()
+        rows = await pool.fetch("SELECT DISTINCT guild_id FROM ticket_panels WHERE message_id IS NOT NULL")
+        return [r["guild_id"] for r in rows]
 
     async def forget_panel_message(self, message_id: int) -> Optional[dict]:
         """The panel's message was deleted by hand: keep the panel, unpost it."""

@@ -8,7 +8,7 @@ import hikari
 import pytest
 from hikari.impl import MessageActionRowBuilder
 
-from serenity.core.modules import ModuleManager
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.repository import Repository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import TicketError, TicketService
@@ -557,3 +557,23 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_off_hours_auto_reply_and_types_closed_outside_hours(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    urgent = await service.repo.create_type(GUILD, "Urgent", open_off_hours=False)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    assert "off_hours_notice" not in ticket  # nothing configured: always open
+
+    await service.modules.get_module_config(GUILD, ModuleType.TICKETS)
+    await service.modules.update_module_settings(
+        GUILD, ModuleType.TICKETS, {"away": {"until": None, "note": "Back after the holidays"}}
+    )
+    ticket = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    notice = ticket["off_hours_notice"]
+    assert f"<@{BOB}>" in notice and "Back after the holidays" in notice
+    assert service.rest.create_message.call_args.args == (ticket["channel_id"], notice)
+
+    with pytest.raises(TicketError, match="only be opened during support hours"):
+        await service.open_ticket(GUILD, member(ALICE, "alice"), urgent, {})

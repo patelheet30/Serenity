@@ -13,6 +13,7 @@ import toolbox
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
+from serenity.services.ticket_hours import format_schedule, offline_status
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -26,6 +27,10 @@ CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
+DEFAULT_OFF_HOURS = (
+    "Hi {user}, our support team is away right now, so a reply may take a while. "
+    "We're back {next_open}. Our hours: {hours}."
+)
 
 # What the opener and staff can do in a ticket channel.
 TICKET_MEMBER_ALLOW = (
@@ -183,6 +188,8 @@ class TicketService:
         # The creation queue: one ticket channel at a time per guild, so limits are checked
         # against settled counts and overflow categories aren't created twice.
         self._open_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # The support status each guild's panels last showed, so they're edited only when it changes.
+        self._panel_status: dict[int, Optional[str]] = {}
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
@@ -221,12 +228,14 @@ class TicketService:
     # Panels
 
     def build_panel(
-        self, panel: dict, types: list[dict]
+        self, panel: dict, types: list[dict], status: Optional[str] = None
     ) -> tuple[hikari.Embed, list[hikari.api.MessageActionRowBuilder]]:
         """The panel message: one button per type (5 per row), or a dropdown of them."""
         embed = hikari.Embed(
             title=panel["title"], description=panel["description"], color=PANEL_COLOR
         )
+        if status:
+            embed.add_field("Support", status)
         rows: list[hikari.api.MessageActionRowBuilder] = []
         if panel["style"] == "menu":
             menu = self.rest.build_message_action_row().add_text_menu(
@@ -257,7 +266,9 @@ class TicketService:
         types = await self._panel_types(panel)
         if not types:
             raise TicketError("A panel needs at least one ticket type.")
-        embed, rows = self.build_panel(panel, types)
+        status = await self.panel_status(panel["guild_id"])
+        self._panel_status[panel["guild_id"]] = status
+        embed, rows = self.build_panel(panel, types, status)
         try:
             if panel["message_id"]:
                 try:
@@ -303,6 +314,47 @@ class TicketService:
                 except (TicketError, hikari.HTTPError) as exc:  # one broken panel can't stop the rest
                     logger.warning(f"Couldn't refresh ticket panel {panel['id']}: {exc}")
 
+    # Support hours
+
+    async def _settings(self, guild_id: int) -> dict:
+        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
+
+    async def panel_status(self, guild_id: int) -> Optional[str]:
+        """The panels' status line, if the server has support hours or away mode set.
+
+        ponytail: the server's schedule only; a type with its own hours isn't shown separately.
+        """
+        settings = await self._settings(guild_id)
+        if not settings.get("schedule") and not settings.get("away"):
+            return None
+        status = offline_status(settings, None, datetime.now(timezone.utc))
+        if status is None:
+            return "🟢 Online"
+        return "🔴 Offline" + (f" · back <t:{int(status['back'].timestamp())}:R>" if status["back"] else "")
+
+    async def refresh_panel_statuses(self) -> None:
+        """Re-render panels whose support status changed: opening, closing, away mode ending."""
+        for guild_id in await self.repo.panel_guilds():
+            if await self.panel_status(guild_id) != self._panel_status.get(guild_id):
+                await self.refresh_panels(guild_id)  # records the new status
+
+    async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
+        """The auto-reply for a ticket opened now, or None while support is open."""
+        settings = await self._settings(guild_id)
+        status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
+        if status is None:
+            return None
+        schedule = ticket_type["schedule"] or settings.get("schedule")
+        hours = f"{format_schedule(schedule)} ({settings.get('timezone', 'UTC')})" if schedule else "not set"
+        back = int(status["back"].timestamp()) if status["back"] else None
+        text = (
+            (settings.get("off_hours_message") or DEFAULT_OFF_HOURS)
+            .replace("{user}", f"<@{user_id}>")
+            .replace("{hours}", hours)
+            .replace("{next_open}", f"<t:{back}:F> (<t:{back}:R>)" if back else "soon")
+        )
+        return f"{text}\n> {status['note']}" if status["note"] else text
+
     # Opening
 
     async def retention_days(self, guild_id: int, ticket_type: dict) -> int:
@@ -321,6 +373,12 @@ class TicketService:
             raise TicketError(
                 f"You already have {'an open' if limit == 1 else f'{limit} open'} "
                 f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
+            )
+        if not ticket_type["open_off_hours"] and (
+            notice := await self.off_hours_notice(guild_id, ticket_type, user_id)
+        ):
+            raise TicketError(
+                f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
             )
 
     def overwrites(
@@ -436,6 +494,13 @@ class TicketService:
             await self.post_welcome(ticket, ticket_type, member.id)
         except Exception:  # Discord or the settings read: the ticket is open and the opener gets its link regardless
             logger.exception(f"Couldn't post the welcome message for ticket {ticket['id']}")
+        try:
+            notice = await self.off_hours_notice(guild_id, ticket_type, member.id)
+            if notice:
+                await self.rest.create_message(ticket["channel_id"], notice, user_mentions=[member.id])
+                ticket["off_hours_notice"] = notice  # for the opener's confirmation too
+        except Exception:  # the ticket is open either way
+            logger.exception(f"Couldn't post the off-hours reply for ticket {ticket['id']}")
         await self.log(ticket, ticket_type, "opened", member.id)
         return ticket
 
