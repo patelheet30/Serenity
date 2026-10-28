@@ -519,10 +519,12 @@ async def test_database_not_initialized_error():
 
 
 @pytest.mark.asyncio
-async def test_minute_counts_match_message_rate(repo: Repository):
+async def test_minute_counts_match_message_rate(repo: Repository, monkeypatch):
     """The dashboard's newest sparkline bucket is exactly what /stats calls the 1-minute rate."""
     a, b, _ = OTHER_CHANNELS
     now = int(time.time())
+    # Frozen, or a second ticking over between here and the queries drops the now-60 messages.
+    monkeypatch.setattr(time, "time", lambda: now)
     for ts, n in [
         (now, 2),
         (now - 60, 3),
