@@ -442,7 +442,7 @@
 				<span>Ask openers for a rating</span>
 				<Toggle label="Ask {cur.name} openers to rate closed tickets" bind:checked={d.ratings} onchange={() => patch('ratings')} />
 			</div>
-			<p class="hint">Escalation tiers are edited with the tier ladder in <a href="/dashboard/{guildId}/tickets/settings">Settings</a>.</p>
+			<p class="hint">Escalation tiers are edited on the <a href="/dashboard/{guildId}/tickets/tiers">Tiers</a> page.</p>
 		</div>
 
 		<div class="dsec sec rowline">
