@@ -604,7 +604,14 @@ class TicketService:
             )
             days = await self.retention_days(ticket["guild_id"], ticket_type)
             expires = closed["closed_at"] + days * 86400 if days else None
-            await self.repo.save_transcript(ticket["id"], ticket["guild_id"], document, expires)
+            try:
+                await self.repo.save_transcript(ticket["id"], ticket["guild_id"], document, expires)
+            except Exception:  # the channel is kept, and it's the only copy: say where it is
+                logger.error(
+                    f"Transcript of ticket {ticket['id']} wasn't saved; its messages are still in "
+                    f"channel {ticket['channel_id']}"
+                )
+                raise
 
         if ticket["channel_id"]:
             self.open_channels.discard(ticket["channel_id"])
