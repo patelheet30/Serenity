@@ -203,3 +203,18 @@ async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: Ticket
 
     assert (await service.repo.get_ticket_by_id(first["id"]))["assignee_id"] == ALICE  # type: ignore[index]
     assert (await service.repo.get_ticket_by_id(second["id"]))["assignee_id"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    assert ticket["channel_id"] in service.open_channels
+
+    service.rest.create_message.side_effect = None
+    service.repo.set_ticket_channel = AsyncMock(side_effect=RuntimeError("db down"))
+    with pytest.raises(RuntimeError):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    service.rest.delete_channel.assert_awaited_once()
+    assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
