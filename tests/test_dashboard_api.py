@@ -14,7 +14,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from cryptography.fernet import Fernet
 
-from serenity.core.modules import ModuleType
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.dashboard import auth
 from serenity.dashboard.api import (
     CHANGES,
@@ -199,7 +199,8 @@ async def client_for():
     async def make(bot, repo=None):
         """The API with fake sessions and Discord. Routes that touch Postgres need `repo`."""
         pool = repo.pool if repo else None
-        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, MagicMock())
+        modules = ModuleManager(repo) if repo else MagicMock()
+        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, modules)
         api = build_api(bot, repo or MagicMock(pool=None), tickets)
         api[SESSIONS] = FakeSessions()
         api[CHANGES] = MagicMock()  # ChangeLog has its own tests
