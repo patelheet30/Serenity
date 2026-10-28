@@ -299,7 +299,7 @@ class TicketService:
             if panel["message_id"] and (type_id is None or type_id in panel["type_ids"]):
                 try:
                     await self.post_panel(panel)
-                except TicketError as exc:
+                except (TicketError, hikari.HTTPError) as exc:  # one broken panel can't stop the rest
                     logger.warning(f"Couldn't refresh ticket panel {panel['id']}: {exc}")
 
     # Opening

@@ -289,7 +289,8 @@ async def resolve_type_list(service: TicketService, guild_id: int, text: str) ->
         raise TicketError("List at least one ticket type, separated by commas.")
     if len(names) > MAX_PANEL_TYPES:
         raise TicketError(f"A panel can show at most {MAX_PANEL_TYPES} ticket types.")
-    return [(await service.resolve_type(guild_id, n))["id"] for n in names]
+    ids = [(await service.resolve_type(guild_id, n))["id"] for n in names]
+    return list(dict.fromkeys(ids))  # a type listed twice gets one button
 
 
 async def resolve_panel(repo: TicketRepository, guild_id: int, panel_id: int) -> dict:
@@ -323,7 +324,7 @@ async def panel_post(
     panel = await repo.create_panel(guild_id, channel.id, title, type_ids, description, style)
     try:
         panel = await service.post_panel(panel)
-    except TicketError:
+    except BaseException:  # cancelled too: don't leave an unposted panel behind
         await repo.delete_panel(guild_id, panel["id"])
         raise
     await ctx.respond(
@@ -811,6 +812,13 @@ async def on_started(_: hikari.StartedEvent) -> None:
 async def on_message_delete(event: hikari.GuildMessageDeleteEvent) -> None:
     """A panel deleted by hand stays configured; /ticket panel edit reposts it."""
     await plugin.client.get_type_dependency(TicketService).panel_message_deleted(event.message_id)
+
+
+@plugin.listen()
+async def on_bulk_message_delete(event: hikari.GuildBulkMessageDeleteEvent) -> None:
+    service = plugin.client.get_type_dependency(TicketService)
+    for message_id in event.message_ids:
+        await service.panel_message_deleted(message_id)
 
 
 @arc.loader
