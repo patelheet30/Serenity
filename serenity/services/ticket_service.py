@@ -434,7 +434,7 @@ class TicketService:
 
         try:
             await self.post_welcome(ticket, ticket_type, member.id)
-        except hikari.HTTPError:  # the ticket is open and the opener gets its link regardless
+        except Exception:  # Discord or the settings read: the ticket is open and the opener gets its link regardless
             logger.exception(f"Couldn't post the welcome message for ticket {ticket['id']}")
         await self.log(ticket, ticket_type, "opened", member.id)
         return ticket
