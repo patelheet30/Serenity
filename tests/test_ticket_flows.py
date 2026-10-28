@@ -498,6 +498,9 @@ async def test_priority_survives_reopen_and_rolls_back_without_permission(servic
     assert service.rest.create_guild_text_channel.call_args.args[1] == "urgent-support-1"
 
 
+
+
+@pytest.mark.asyncio
 async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support")
     service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
