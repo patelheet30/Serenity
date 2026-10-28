@@ -356,8 +356,11 @@ async def test_ticket_flows_are_logged(service: TicketService):
     assert not await service.request_transcript_deletion(ticket["id"], ALICE)
     kinds = [c.kwargs["kind"] for c in service.logging.log_ticket_event.call_args_list]
     assert kinds == ["opened", "claimed", "closed", "deletion_requested"]
+    closed_event = service.logging.log_ticket_event.call_args_list[2].kwargs
+    assert closed_event["channel_id"] == ticket["channel_id"]  # for channel ignores
 
 
+@pytest.mark.asyncio
 async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=1)
     first = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})

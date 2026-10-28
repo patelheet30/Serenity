@@ -636,7 +636,11 @@ class TicketService:
                 logger.warning(f"Couldn't delete the channel of closed ticket {ticket['id']}: {exc}")
 
         await self._dm_closed(closed, ticket_type, closed_by, reason, document)
-        await self.log(closed, ticket_type, "closed", closed_by, reason or "No reason given")
+        # closed has no channel any more; log the one it had, so channel ignores still apply.
+        await self.log(
+            {**closed, "channel_id": ticket["channel_id"]}, ticket_type, "closed", closed_by,
+            reason or "No reason given",
+        )
         return closed
 
     async def _dm_closed(
