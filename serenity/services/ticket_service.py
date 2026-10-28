@@ -85,7 +85,7 @@ def _slow_pattern(parsed: Any) -> bool:
         for op, av in items:
             if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
                 low, high, sub = av
-                if in_repeat and high > 1 and low != high:  # `{3}` can only match one way
+                if in_repeat and low != high:  # `{3}` can only match one way; `?` can't
                     return True
                 open_ended = high == c.MAXREPEAT
                 open_repeats += open_ended

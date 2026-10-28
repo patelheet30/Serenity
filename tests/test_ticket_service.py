@@ -253,6 +253,7 @@ async def test_dropdown_questions_follow_the_form(monkeypatch):
         (r"(a+){6}b", True),  # inside a bounded repeat: still exponential
         (r"(a{0,2}){16}b", True),
         (r"(a|aa){8}b", True),
+        (r"(a?){30}b", True),  # an optional inside a repeat: two paths per iteration
         (r"(\d{3}-){2}\d{4}", False),  # a fixed-size repeat inside a bounded one is fine
     ],
 )
