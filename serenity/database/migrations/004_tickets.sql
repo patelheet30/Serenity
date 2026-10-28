@@ -43,7 +43,7 @@ CREATE TABLE ticket_panels (
     CHECK (style IN ('buttons', 'menu'))
 );
 
-CREATE INDEX idx_ticket_panels_guild ON ticket_panels (guild_id);
+CREATE INDEX idx_ticket_panels_guild ON ticket_panels (guild_id, id);  -- list_panels' order
 CREATE INDEX idx_ticket_panels_message ON ticket_panels (message_id);
 
 CREATE TABLE tickets (
@@ -123,7 +123,7 @@ CREATE TABLE ticket_transcripts (
 
 CREATE INDEX idx_ticket_transcripts_expiry ON ticket_transcripts (expires_at)
     WHERE expires_at IS NOT NULL AND held_by_case_number IS NULL;
-CREATE INDEX idx_ticket_transcripts_deletion_requests ON ticket_transcripts (guild_id)
+CREATE INDEX idx_ticket_transcripts_deletion_requests ON ticket_transcripts (deletion_requested_at)
     WHERE deletion_requested_at IS NOT NULL;
 
 CREATE TABLE ticket_blacklist (
