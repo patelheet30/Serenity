@@ -109,6 +109,13 @@ def _build_case_embed(case: dict, target_tag: str, mod_tag: str) -> hikari.Embed
     embed.add_field("Status", status, inline=True)
     embed.add_field("Reason", case["reason"] or "No reason provided", inline=False)
 
+    if case.get("source_ticket_number"):
+        number = case["source_ticket_number"]
+        embed.add_field(
+            "Ticket", f"From ticket #{number}; its transcript is kept as evidence (`/ticket transcript get {number}`)",
+            inline=False,
+        )
+
     if case.get("duration_seconds"):
         embed.add_field("Duration", _format_duration(case["duration_seconds"]), inline=True)
 

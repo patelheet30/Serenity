@@ -590,3 +590,58 @@ async def test_invalid_ign_creates_nothing_and_identity_links_tickets_across_typ
     assert {t["id"] for t in await service.repo.linked_tickets(first["id"])} == {second["id"], other["id"]}
     with pytest.raises(TicketError, match="IGN"):
         await service.edit_fields(other, report, {"ign": "x"}, BOB)
+
+
+@pytest.mark.asyncio
+async def test_mod_action_links_the_case_and_holds_the_transcript(
+    service: TicketService, monkeypatch: pytest.MonkeyPatch
+):
+    from serenity.database.moderation_repository import ModerationRepository
+    from serenity.services import ticket_service
+    from serenity.services.moderation_service import ModerationService
+    from serenity.services.ticket_service import set_field
+
+    mod_repo = ModerationRepository(service.repo.pool)
+    mod = ModerationService(mod_repo, AsyncMock(), service.rest)
+    alice, bob = member(ALICE, "alice"), staff(BOB, "bob")
+    service.cache.get_member.side_effect = lambda _, user_id: {ALICE: alice}.get(user_id)
+    service.cache.get_roles_view_for_guild.return_value = {STAFF_ROLE: MagicMock(position=5)}
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+
+    fields = set_field([], "Who are you reporting?", "user")
+    report = await service.repo.create_type(GUILD, "Report", staff_role_ids=[STAFF_ROLE], fields=fields)
+    earlier = await service.open_ticket(GUILD, alice, report, {"who_are_you_reporting": str(CAROL)})
+    await service.close(earlier, report, BOB, None)  # type: ignore[arg-type]
+    ticket = await service.open_ticket(GUILD, alice, report, {"who_are_you_reporting": f"<@{CAROL}>"})
+    await mod_repo.create_case(GUILD, CAROL, BOB, "kick", "raid")
+    await service.repo.add_note(ticket["id"], BOB, "seen this before")
+
+    context = await service.staff_context(ticket, report, mod_repo)
+    text = {f.name: f.value for f in context.fields}
+    assert "#1 Report · closed" in text["Their other tickets"]
+    assert "seen this before" in text["Notes"]
+    records = [f.value for f in context.fields if f.name == "Moderation record"]
+    assert records[0].startswith(f"<@{ALICE}>\n0 active warnings")
+    assert records[1].startswith(f"<@{CAROL}>") and "kick" in records[1]  # the reported member
+    assert "Moderation record" not in {f.name for f in (await service.staff_context(ticket, report)).fields}
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    with pytest.raises(TicketError, match="Moderate Members"):  # staff, but not a moderator
+        await service.mod_action(ticket, report, bob, ALICE, "warn", "spam", None, mod, mod_repo)
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.MODERATE_MEMBERS)
+    case = await service.mod_action(ticket, report, bob, ALICE, "warn", "spam", None, mod, mod_repo)
+
+    linked = await mod_repo.get_case(GUILD, case)
+    assert linked is not None and linked["source_ticket_number"] == ticket["number"]
+    assert await mod_repo.get_warning_count(GUILD, ALICE) == 1
+    events = [e["kind"] for e in await service.repo.list_events(ticket["id"])]
+    assert "mod_action" in events
+
+    # The ticket had no transcript yet: closing it saves one already held, so it never expires.
+    await service.close(ticket, report, BOB, None)
+    transcript = await service.repo.get_transcript(ticket["id"])
+    assert transcript is not None and transcript["held_by_case_number"] == case
+    assert (await service.repo.get_transcript(earlier["id"]))["held_by_case_number"] is None  # type: ignore[index]
+    await service.repo.purge_expired_transcripts(now=transcript["expires_at"] + 1)
+    assert await service.repo.get_transcript(earlier["id"]) is None
+    assert await service.repo.get_transcript(ticket["id"]) is not None

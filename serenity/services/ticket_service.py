@@ -13,8 +13,10 @@ import hikari
 import toolbox
 
 from serenity.core.modules import ModuleManager, ModuleType
+from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
+from serenity.services.moderation_service import ModerationService
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -38,6 +40,25 @@ TICKET_MEMBER_ALLOW = (
     | hikari.Permissions.EMBED_LINKS
 )
 BOT_ALLOW = TICKET_MEMBER_ALLOW | hikari.Permissions.MANAGE_CHANNELS | hikari.Permissions.MANAGE_MESSAGES
+# A ticket's Mod action, and the permission the moderator needs for it (as for the slash commands).
+MOD_ACTIONS = {
+    "warn": hikari.Permissions.MODERATE_MEMBERS,
+    "timeout": hikari.Permissions.MODERATE_MEMBERS,
+    "kick": hikari.Permissions.KICK_MEMBERS,
+    "ban": hikari.Permissions.BAN_MEMBERS,
+}
+MAX_TIMEOUT = 28 * 86400  # Discord's limit
+
+
+def parse_duration(text: str) -> int:
+    """"30m", "2h" or "7d" in seconds, up to Discord's 28-day timeout limit."""
+    match = re.fullmatch(r"\s*(\d{1,4})\s*([mhd])\s*", text.lower())
+    if not match:
+        raise TicketError("Give the duration as minutes, hours or days, like 30m, 2h or 7d.")
+    seconds = int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400}[match.group(2)]
+    if not 60 <= seconds <= MAX_TIMEOUT:
+        raise TicketError("A timeout is between 1 minute and 28 days.")
+    return seconds
 
 
 class TicketError(SerenityError):
@@ -636,6 +657,9 @@ class TicketService:
             row.add_interactive_button(
                 hikari.ButtonStyle.SECONDARY, f"ticket:fields:{ticket['id']}", label="Edit fields", emoji="✏️"
             )
+        row.add_interactive_button(
+            hikari.ButtonStyle.SECONDARY, f"ticket:context:{ticket['id']}", label="Staff info", emoji="🔎"
+        )
         staff = " ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"])
         await self.rest.create_message(
             ticket["channel_id"],
@@ -670,6 +694,126 @@ class TicketService:
         changed = sorted(k for k in fields if fields[k] != ticket["fields"].get(k, ""))
         await self.repo.add_event(ticket["id"], "fields_edited", actor_id, {"keys": changed})
         return updated
+
+    # Staff context
+
+    async def staff_context(
+        self, ticket: dict, ticket_type: dict, mod_repo: Optional[ModerationRepository] = None
+    ) -> hikari.Embed:
+        """What staff should know about a ticket: who opened it, their other tickets, linked
+        tickets, notes, and (with `mod_repo`, when Moderation is on) everyone involved's record.
+        Sent ephemerally: the opener can see the channel."""
+        guild_id, opener_id = ticket["guild_id"], ticket["opener_id"]
+        embed = hikari.Embed(title=f"🔎 Ticket #{ticket['number']} · staff info", color=PANEL_COLOR)
+
+        about = [f"<@{opener_id}> · account made <t:{int(hikari.Snowflake(opener_id).created_at.timestamp())}:R>"]
+        opener = self.cache.get_member(guild_id, opener_id)
+        if opener is None:
+            try:
+                opener = await self.rest.fetch_member(guild_id, opener_id)
+            except hikari.NotFoundError:
+                about.append("Not in the server any more.")
+        if opener is not None:
+            about.append(f"Joined <t:{int(opener.joined_at.timestamp())}:R>")
+            roles = [f"<@&{r}>" for r in opener.role_ids if r != guild_id]
+            about.append(f"Roles: {' '.join(roles[:15]) or 'none'}")
+        embed.add_field("Opener", "\n".join(about)[:1024])
+
+        def line(t: dict) -> str:
+            when = t["closed_at"] or t["opened_at"]
+            state = "open" if t["status"] == "open" else "closed"
+            return f"#{t['number']} {t['type_name']} · {state} <t:{when}:R>"
+
+        previous, total = await self.repo.opener_tickets(guild_id, opener_id, ticket["id"])
+        history = "\n".join(line(t) for t in previous) or "None"
+        if total > len(previous):
+            history += f"\n…and {total - len(previous)} more"
+        embed.add_field("Their other tickets", history[:1024])
+
+        linked = await self.repo.linked_tickets(ticket["id"])
+        if linked:
+            embed.add_field(
+                "Linked tickets (same answers)",
+                "\n".join(f"{line(t)} · <@{t['opener_id']}> · {', '.join(t['linked_by'])}" for t in linked)[:1024],
+            )
+
+        notes = await self.repo.list_notes(ticket["id"])
+        if notes:
+            embed.add_field(
+                "Notes", "\n".join(f"<@{n['author_id']}>: {n['body'][:200]}" for n in notes[-5:])[:1024]
+            )
+
+        if mod_repo is not None:
+            involved = [opener_id] + [
+                int(ticket["fields"][f["key"]])
+                for f in ticket_type["fields"]
+                if field_type(f) == "user" and ticket["fields"].get(f["key"], "").isdigit()
+            ]
+            for user_id in list(dict.fromkeys(involved))[:4]:
+                warnings = await mod_repo.get_warning_count(guild_id, user_id)
+                cases = await mod_repo.get_user_cases(guild_id, user_id, limit=3)
+                record = [f"{warnings} active warning{'' if warnings == 1 else 's'}"] + [
+                    f"Case #{c['case_number']} {c['action']} <t:{c['created_at']}:R>: {(c['reason'] or '')[:80]}"
+                    for c in cases
+                ]
+                embed.add_field("Moderation record", f"<@{user_id}>\n" + "\n".join(record)[:1000])
+        return embed
+
+    def _top_role(self, member: hikari.Member) -> int:
+        roles = self.cache.get_roles_view_for_guild(member.guild_id)
+        return max((roles[r].position for r in member.role_ids if r in roles), default=0)
+
+    async def mod_action(
+        self,
+        ticket: dict,
+        ticket_type: dict,
+        moderator: hikari.Member,
+        target_id: int,
+        action: str,
+        reason: Optional[str],
+        duration: Optional[int],
+        mod: ModerationService,
+        mod_repo: ModerationRepository,
+    ) -> int:
+        """Warn, time out, kick or ban from a ticket. The case links to the ticket, and holds its
+        transcript as evidence (now if it has one from before a reopen, otherwise when it closes)."""
+        self.require_staff(moderator, ticket_type)
+        needed = MOD_ACTIONS[action]
+        if not member_permissions(moderator) & (needed | hikari.Permissions.ADMINISTRATOR):
+            raise TicketError(f"You need **{needed.name.replace('_', ' ').title()}** to {action} members.")  # type: ignore[union-attr]
+
+        guild_id = ticket["guild_id"]
+        target: Optional[hikari.Member] = self.cache.get_member(guild_id, target_id)
+        if target is None:
+            try:
+                target = await self.rest.fetch_member(guild_id, target_id)
+            except hikari.NotFoundError:
+                if action != "ban":
+                    raise TicketError(f"<@{target_id}> isn't in the server.") from None
+        if target is not None:
+            guild = self.cache.get_guild(guild_id)
+            me = self.cache.get_me()
+            if target.id == moderator.id or (me and target.id == me.id) or (guild and target.id == guild.owner_id):
+                raise TicketError("You can't moderate yourself, me or the server owner.")
+            if self._top_role(moderator) <= self._top_role(target):
+                raise TicketError("You can't moderate someone with an equal or higher role than yours.")
+
+        kwargs = {"guild_id": guild_id, "moderator": moderator, "reason": reason}
+        if action == "warn":
+            case, _ = await mod.warn(target=target, **kwargs)  # type: ignore[arg-type]
+        elif action == "timeout":
+            case = await mod.timeout(target=target, duration_seconds=duration or 3600, **kwargs)  # type: ignore[arg-type]
+        elif action == "kick":
+            case = await mod.kick(target=target, **kwargs)  # type: ignore[arg-type]
+        else:
+            case = await mod.ban(target=target or await self.rest.fetch_user(target_id), **kwargs)  # type: ignore[arg-type]
+
+        await mod_repo.set_case_source(guild_id, case, ticket["id"])
+        await self.repo.hold_transcript(ticket["id"], case)
+        await self.repo.add_event(
+            ticket["id"], "mod_action", moderator.id, {"case": case, "action": action, "user": target_id}
+        )
+        return case
 
     # Claiming
 

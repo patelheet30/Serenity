@@ -10,7 +10,9 @@ import hikari
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType, tickets_guilds
 from serenity.database.logging_repository import LoggingRepository
+from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.ticket_repository import TicketRepository
+from serenity.services.moderation_service import ModerationService
 from serenity.services.ticket_service import (
     PICKED,
     PRIORITIES,
@@ -20,6 +22,7 @@ from serenity.services.ticket_service import (
     check_answers,
     field_type,
     member_permissions,
+    parse_duration,
     parse_questions,
     placeholder,
     render_transcript,
@@ -677,6 +680,32 @@ async def note(
     )
 
 
+@plugin.include
+@arc.user_command("Ticket mod action", guilds=sorted(tickets_guilds()) or hikari.UNDEFINED)
+async def ticket_mod_action(
+    ctx: arc.GatewayContext, user: hikari.User, service: TicketService = arc.inject()
+) -> None:
+    """Right-click a member in a ticket: warn, time out, kick or ban, with the case linked."""
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    if not await service.modules.is_enabled(current["guild_id"], ModuleType.MODERATION):
+        raise TicketError("Turn on the **Moderation** module to take mod actions from tickets.")
+    row = service.rest.build_message_action_row()
+    for action, emoji in (("warn", "⚠️"), ("timeout", "⏱️"), ("kick", "👢"), ("ban", "🔨")):
+        row.add_interactive_button(
+            hikari.ButtonStyle.DANGER if action == "ban" else hikari.ButtonStyle.SECONDARY,
+            f"ticket:mod:{current['id']}:{user.id}:{action}",
+            label=action.title(),
+            emoji=emoji,
+        )
+    await ctx.respond(
+        f"Mod action on {user.mention} from ticket #{current['number']}. The case keeps this "
+        "ticket's transcript as evidence.",
+        component=row,
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 @transcript_group.include
 @arc.slash_subcommand("get", "Download a ticket's transcript, staff notes included.")
 async def transcript_get(
@@ -1011,6 +1040,52 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await edit_fields_form(interaction, service, int(target))
         elif action == "fieldsave" and isinstance(interaction, hikari.ModalInteraction):
             await save_fields(interaction, service, int(target))
+        elif action == "context" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            moderation = await service.modules.is_enabled(interaction.guild_id, ModuleType.MODERATION)
+            mod_repo = plugin.client.get_type_dependency(ModerationRepository) if moderation else None
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE,
+                embed=await service.staff_context(current, ticket_type, mod_repo),
+                flags=hikari.MessageFlag.EPHEMERAL,
+            )
+        elif action == "mod" and isinstance(interaction, hikari.ComponentInteraction):
+            ticket_id, _, mod_action = target.split(":")
+            current, ticket_type = await ticket_for(service, interaction, int(ticket_id))
+            service.require_staff(interaction.member, ticket_type)
+            rows = [
+                service.rest.build_modal_action_row().add_text_input(
+                    "reason", "Reason", required=False, max_length=500
+                )
+            ]
+            if mod_action == "timeout":
+                rows.insert(0, service.rest.build_modal_action_row().add_text_input(
+                    "duration", "Duration", placeholder="30m, 2h or 7d", max_length=10
+                ))
+            await interaction.create_modal_response(
+                f"{mod_action.title()} · ticket #{current['number']}", f"ticket:modgo:{target}", components=rows
+            )
+        elif action == "modgo" and isinstance(interaction, hikari.ModalInteraction):
+            ticket_id, user_id, mod_action = target.split(":")
+            current, ticket_type = await ticket_for(service, interaction, int(ticket_id))
+            values = modal_values(interaction)
+            duration = parse_duration(values["duration"]) if mod_action == "timeout" else None
+            if not await service.modules.is_enabled(interaction.guild_id, ModuleType.MODERATION):
+                raise TicketError("Turn on the **Moderation** module to take mod actions from tickets.")
+            await interaction.create_initial_response(
+                hikari.ResponseType.DEFERRED_MESSAGE_CREATE, flags=hikari.MessageFlag.EPHEMERAL
+            )
+            case = await service.mod_action(
+                current, ticket_type, interaction.member, int(user_id), mod_action,  # type: ignore[arg-type]
+                values.get("reason") or None, duration,
+                plugin.client.get_type_dependency(ModerationService),
+                plugin.client.get_type_dependency(ModerationRepository),
+            )
+            await interaction.edit_initial_response(
+                f"✅ Case #{case}: {mod_action} on <@{user_id}>. It's linked to ticket #{current['number']}, "
+                "and keeps its transcript as evidence."
+            )
         elif action == "claim":
             current, ticket_type = await service.ticket_here(interaction.channel_id)
             service.require_staff(interaction.member, ticket_type)
@@ -1055,7 +1130,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await service.close(current, ticket_type, interaction.user.id, "Opener agreed to close")
         else:
             await reply(interaction, "This button isn't available yet.")
-    except TicketError as exc:
+    except (TicketError, SerenityPermissionError) as exc:  # the latter from ModerationService
         await reply(interaction, f"❌ {exc}")
     except Exception:
         logger.exception(f"Ticket component {interaction.custom_id} failed")
