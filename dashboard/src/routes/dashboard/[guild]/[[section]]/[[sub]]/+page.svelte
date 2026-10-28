@@ -62,7 +62,7 @@
 
 	// Ticket commands work from any section, for everyone who can open Tickets here.
 	$effect(() => {
-		if (access?.tickets) return registerCommands(ticketCommands(guildId, access.level === 'manage'));
+		if (access) return registerCommands(ticketCommands(guildId, access.level === 'manage'));
 	});
 
 	/** After the bot creates channels (logging setup), so pickers show them by name. */
@@ -121,7 +121,7 @@
 		{:else if section.k === 'tickets'}
 			<Tickets {guildId} sub={page.params.sub} {channels} {staff} onerror={fail} />
 		{:else if section.k === 'overview'}
-			<Overview {guildId} guildName={guild.name} {channels} tickets={!!access?.tickets} onerror={fail} />
+			<Overview {guildId} guildName={guild.name} {channels} onerror={fail} />
 		{:else if section.k === 'cases'}
 			<Cases {guildId} onerror={fail} />
 		{:else if section.k === 'stats'}

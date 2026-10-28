@@ -19,17 +19,16 @@
 		cases: { cases: Case[] };
 		analytics: { changes: Record<'6h' | '24h', number> };
 		stats: { active: { timeouts: number; warnings: number } };
-		/** Where Tickets is available: the ticket stats' counts. */
-		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number } | null;
+		/** The ticket stats' counts; shown while the Tickets module is on. */
+		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number };
 	};
 
 	let {
 		guildId,
 		guildName,
 		channels,
-		tickets,
 		onerror
-	}: { guildId: string; guildName: string; channels: Channel[]; tickets: boolean; onerror: (e: unknown) => void } = $props();
+	}: { guildId: string; guildName: string; channels: Channel[]; onerror: (e: unknown) => void } = $props();
 
 	const MODULES: [string, IconName][] = [
 		['slowmode', 'slowmode'],
@@ -54,7 +53,7 @@
 			api<Data['cases']>(`${g}/cases`),
 			api<Data['stats']>(`${g}/modstats?days=7`),
 			api<Data['analytics']>(`${g}/slowmode/analytics`),
-			tickets ? api<Data['tickets']>(`${g}/tickets/stats?days=7`) : null
+			api<Data['tickets']>(`${g}/tickets/stats?days=7`)
 		]).then(
 			([slowmode, modules, logging, history, cases, stats, analytics, tickets]) =>
 				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics, tickets }),
@@ -175,7 +174,7 @@
 			{/if}
 		</section>
 
-		{#if d.tickets}
+		{#if d.modules.enabled.tickets}
 			{@const q = `/dashboard/${guildId}/tickets/queue`}
 			<section class="pane s12" aria-labelledby="tkT">
 				<div class="ph"><h2 id="tkT">Tickets</h2><span class="sp"></span><a class="btn sm ghost" href={q}>Open queue <Icon name="arrow" /></a></div>
