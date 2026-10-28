@@ -3,7 +3,14 @@
 import hikari
 import pytest
 
-from serenity.services.ticket_service import TicketError, is_staff, parse_questions
+from serenity.services.ticket_service import (
+    TicketError,
+    is_staff,
+    parse_color,
+    parse_questions,
+    render_topic,
+    with_stage,
+)
 
 
 def test_parse_questions():
@@ -25,6 +32,41 @@ def test_is_staff():
     assert is_staff(ticket_type, [], hikari.Permissions.MANAGE_GUILD)
 
 
+def test_with_stage_orders_and_replaces_in_place():
+    def names(stages):
+        return [s["name"] for s in stages]
+
+    stages = []
+    for name in ("Inquiry", "Quoted", "Paid"):
+        stages = with_stage(stages, {"name": name})
+    assert names(stages) == ["Inquiry", "Quoted", "Paid"]
+    assert names(with_stage(stages, {"name": "In progress"}, 3)) == ["Inquiry", "Quoted", "In progress", "Paid"]
+    # An existing name is replaced where it is, unless a position moves it.
+    replaced = with_stage(stages, {"name": "quoted", "terminal": True})
+    assert names(replaced) == ["Inquiry", "quoted", "Paid"] and replaced[1]["terminal"]
+    assert names(with_stage(stages, {"name": "Paid"}, 1)) == ["Paid", "Inquiry", "Quoted"]
+    assert names(with_stage(stages, {"name": "Late"}, 99))[-1] == "Late"
+    full = [{"name": str(i)} for i in range(25)]
+    with pytest.raises(TicketError):
+        with_stage(full, {"name": "one more"})
+    assert len(with_stage(full, {"name": "3"})) == 25
+
+
+def test_parse_color():
+    assert parse_color("#5865F2") == 0x5865F2
+    assert parse_color("ffffff") == 0xFFFFFF
+    for bad in ("blue", "#1000000", "-1"):
+        with pytest.raises(TicketError):
+            parse_color(bad)
+
+
+def test_render_topic():
+    ticket = {"number": 4, "stage": "Quoted", "waiting_on": "opener"}
+    assert render_topic(ticket, {"name": "Sales"}) == "Ticket #4 · Sales · Quoted · waiting on member"
+    ticket.update(stage=None, waiting_on="staff")
+    assert render_topic(ticket, {"name": "Sales"}) == "Ticket #4 · Sales · waiting on staff"
+
+
 def _service(rest=None, repo=None):
     from unittest.mock import AsyncMock, MagicMock
 
@@ -34,7 +76,9 @@ def _service(rest=None, repo=None):
 
     rest = rest or AsyncMock()
     rest.build_message_action_row = MagicMock(side_effect=MessageActionRowBuilder)
-    return TicketService(repo or AsyncMock(), rest, MagicMock(), AsyncMock())
+    modules = AsyncMock()
+    modules.get_module_config.return_value = MagicMock(settings={})
+    return TicketService(repo or AsyncMock(), rest, MagicMock(), modules)
 
 
 def _types(n):
@@ -369,3 +413,61 @@ def test_staff_only_answers_stay_out_of_the_openers_copy():
     }
     assert "Refund approved" not in render_transcript(document, staff=False)
     assert "Refund approved (staff): yes" in render_transcript(document, staff=True)
+
+
+@pytest.mark.asyncio
+async def test_panels_are_edited_only_when_the_support_status_changes():
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo = AsyncMock()
+    repo.list_types.return_value = _types(1)
+    repo.panel_guilds.return_value = [1]
+    repo.list_panels.return_value = [{"id": 1, "guild_id": 1, "channel_id": 2, "message_id": 10, "title": "Help",
+                                      "description": None, "style": "buttons", "type_ids": [1]}]
+    service = _service(repo=repo)
+    settings: dict = {"away": {"until": None, "note": None}}
+    service.modules.get_module_config.return_value = MagicMock(settings=settings)
+
+    await service.refresh_panel_statuses()
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 1
+    assert service.rest.edit_message.call_args.kwargs["embed"].fields[0].value == "🔴 Offline"
+
+    settings.pop("away")
+    settings["schedule"] = [[[0, 1440]]] * 7
+    service.rest.edit_message.side_effect = [hikari.BadRequestError("", {}, b""), None]
+    await service.refresh_panel_statuses()  # the edit fails, so the next sweep tries again
+    await service.refresh_panel_statuses()
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 3
+    assert service.rest.edit_message.call_args.kwargs["embed"].fields[0].value == "🟢 Online"
+    service.rest.edit_message.side_effect = None
+
+    # An away mode that ended by itself, with no schedule: the line goes.
+    settings.pop("schedule")
+    settings["away"] = {"until": 1, "note": None}
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 4
+    assert service.rest.edit_message.call_args.kwargs["embed"].fields == []
+
+    # After a restart nothing is known, so every guild is reconciled once, unconfigured or not.
+    service._panel_status.clear()
+    await service.refresh_panel_statuses()
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_one_broken_guild_doesnt_stop_the_panel_status_sweep():
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo = AsyncMock()
+    repo.panel_guilds.return_value = [1, 2]
+    repo.list_panels.return_value = []
+    service = _service(repo=repo)
+    service.modules.get_module_config.side_effect = [
+        MagicMock(settings={"schedule": [[]] * 7, "timezone": "Not/AZone"}),
+        MagicMock(settings={}),
+    ]
+    await service.refresh_panel_statuses()
+    repo.list_panels.assert_awaited_once_with(2)
