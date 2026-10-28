@@ -64,7 +64,7 @@ def _field_key(label: str, fields: list[dict]) -> str:
     return key
 
 
-MAX_OPEN_REPEATS = 3  # on a 100-character answer, at most ~100^3 steps
+MAX_OPEN_REPEATS = 3  # wide repeats (`*`, `+`, `{0,100}`): on 100 characters, ~100^3 steps
 MAX_VARIABLE_REPEATS = 6  # `?` and `{0,n}` too: each one can double the paths
 
 
@@ -88,8 +88,7 @@ def _slow_pattern(parsed: Any) -> bool:
                 low, high, sub = av
                 if in_repeat and low != high:  # `{3}` can only match one way; `?` can't
                     return True
-                open_ended = high == c.MAXREPEAT
-                open_repeats += open_ended
+                open_repeats += high - low > 1  # `{0,100}` splits an answer as many ways as `*`
                 variable_repeats += low != high
                 if walk(sub, in_repeat or high > 1):
                     return True
@@ -182,7 +181,7 @@ def set_field(
             raise TicketError(
                 "That pattern could take too long to check. Keep it simple: no repeats inside "
                 "repeats (like `(a+)*`), no `|` inside a repeat, no backreferences, and at most "
-                f"{MAX_OPEN_REPEATS} open-ended repeats (`*`, `+`, `{{2,}}`) and {MAX_VARIABLE_REPEATS} "
+                f"{MAX_OPEN_REPEATS} wide repeats (`*`, `+`, `{{0,100}}`) and {MAX_VARIABLE_REPEATS} "
                 "repeats in all (counting `?`)."
             )
         field["pattern"] = options
