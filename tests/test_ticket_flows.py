@@ -430,6 +430,12 @@ async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: Ti
     ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
     assert ticket["channel_id"] in service.open_channels
 
+    # A non-Discord failure while building the welcome (the settings read) is tolerated too.
+    service.rest.create_message.side_effect = None
+    service.retention_days = AsyncMock(side_effect=ValueError("bad setting"))
+    carol = await service.open_ticket(GUILD, member(ALICE + 5, "carol"), support, {})
+    assert carol["channel_id"] in service.open_channels
+
     service.rest.create_message.side_effect = None
     service.repo.set_ticket_channel = AsyncMock(side_effect=RuntimeError("db down"))
     with pytest.raises(RuntimeError):
