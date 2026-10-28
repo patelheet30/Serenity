@@ -94,3 +94,16 @@ def test_render_channel_name():
     assert render("!!!") == "ticket-12"
     assert len(render("x" * 200)) == 100
     assert [overflow_name("Support", i) for i in (1, 2)] == ["Support", "Support 2"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_type_name_is_a_friendly_error():
+    from unittest.mock import AsyncMock, MagicMock
+
+    import asyncpg
+
+    from serenity.extensions.tickets import on_error
+
+    ctx = MagicMock(respond=AsyncMock())
+    await on_error(ctx, asyncpg.UniqueViolationError("duplicate key"))
+    assert "already exists" in ctx.respond.call_args.args[0]
