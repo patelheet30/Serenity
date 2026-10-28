@@ -84,3 +84,15 @@ def test_module_hook_gates_every_ticket_command(client):
     assert commands
     for command in commands:
         assert "module_check_hook" in [h.__name__ for h in command._resolve_hooks()], command.name
+
+
+def test_type_hours_options_and_the_default_sentinel():
+    from serenity.services.ticket_service import TicketError
+
+    # Left out, neither touches the type; "default" clears the override to NULL, not a string.
+    assert default(tickets.type_edit, "hours") is None
+    assert default(tickets.type_edit, "open_off_hours") is None
+    assert tickets.schedule_from(" Default ") is None
+    assert tickets.schedule_from("mon 09:00-17:00")[0] == [[540, 1020]]
+    with pytest.raises(TicketError):
+        tickets.schedule_from("weekdays")

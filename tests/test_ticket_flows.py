@@ -575,5 +575,14 @@ async def test_off_hours_auto_reply_and_types_closed_outside_hours(service: Tick
     assert f"<@{BOB}>" in notice and "Back after the holidays" in notice
     assert service.rest.create_message.call_args.args == (ticket["channel_id"], notice)
 
+    # Away mode alone doesn't refuse a type that's closed outside hours: the schedule decides.
+    opened = await service.open_ticket(GUILD, member(ALICE, "alice"), urgent, {})
+    assert "Back after the holidays" in opened["off_hours_notice"]
+
+    from datetime import datetime, timezone
+
+    tomorrow_only: list = [[] for _ in range(7)]
+    tomorrow_only[(datetime.now(timezone.utc).weekday() + 1) % 7] = [[0, 1440]]
+    urgent = await service.repo.update_type(GUILD, urgent["id"], schedule=tomorrow_only)
     with pytest.raises(TicketError, match="only be opened during support hours"):
-        await service.open_ticket(GUILD, member(ALICE, "alice"), urgent, {})
+        await service.open_ticket(GUILD, member(CAROL, "carol"), urgent, {})  # type: ignore[arg-type]

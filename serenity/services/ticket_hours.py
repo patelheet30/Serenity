@@ -123,12 +123,17 @@ def business_seconds_between(schedule: Optional[Schedule], tz: str, start: datet
     return int(total)
 
 
+def effective_schedule(type_schedule: Optional[Schedule], settings: dict) -> Optional[Schedule]:
+    """A type's own schedule, else the server's (the Tickets module settings)."""
+    return type_schedule or settings.get("schedule")
+
+
 def offline_status(settings: dict, type_schedule: Optional[Schedule], now: datetime) -> Optional[dict]:
     """None while support is open; otherwise {"back": datetime or None, "note": str or None}.
 
     `settings` is the Tickets module's: "schedule", "timezone" and "away" ({"until", "note"}).
     """
-    schedule = type_schedule or settings.get("schedule")
+    schedule = effective_schedule(type_schedule, settings)
     tz = settings.get("timezone", "UTC")
     away = settings.get("away")
     if away and away.get("until") is not None and away["until"] <= now.timestamp():

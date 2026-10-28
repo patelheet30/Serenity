@@ -13,7 +13,12 @@ import toolbox
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
-from serenity.services.ticket_hours import format_schedule, offline_status
+from serenity.services.ticket_hours import (
+    effective_schedule,
+    format_schedule,
+    offline_status,
+    within_hours,
+)
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -189,6 +194,7 @@ class TicketService:
         # against settled counts and overflow categories aren't created twice.
         self._open_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         # The support status each guild's panels last showed, so they're edited only when it changes.
+        # A guild missing here hasn't been rendered since startup, so the first sweep reconciles it.
         self._panel_status: dict[int, Optional[str]] = {}
 
     async def load(self) -> None:
@@ -267,7 +273,6 @@ class TicketService:
         if not types:
             raise TicketError("A panel needs at least one ticket type.")
         status = await self.panel_status(panel["guild_id"])
-        self._panel_status[panel["guild_id"]] = status
         embed, rows = self.build_panel(panel, types, status)
         try:
             if panel["message_id"]:
@@ -275,6 +280,7 @@ class TicketService:
                     await self.rest.edit_message(
                         panel["channel_id"], panel["message_id"], embed=embed, components=rows
                     )
+                    self._panel_status[panel["guild_id"]] = status  # only once it's shown
                     return panel
                 except hikari.NotFoundError:  # deleted while we weren't looking: post a new one
                     self.panel_messages.discard(panel["message_id"])
@@ -287,6 +293,7 @@ class TicketService:
                 "Send Messages and Embed Links permissions there."
             ) from None
         self.panel_messages.add(message.id)
+        self._panel_status[panel["guild_id"]] = status
         return await self.repo.update_panel(  # type: ignore[return-value]
             panel["guild_id"], panel["id"], message_id=message.id
         )
@@ -325,18 +332,20 @@ class TicketService:
         ponytail: the server's schedule only; a type with its own hours isn't shown separately.
         """
         settings = await self._settings(guild_id)
-        if not settings.get("schedule") and not settings.get("away"):
-            return None
         status = offline_status(settings, None, datetime.now(timezone.utc))
-        if status is None:
-            return "🟢 Online"
+        if status is None:  # no line without a schedule, e.g. once away mode has ended
+            return "🟢 Online" if settings.get("schedule") else None
         return "🔴 Offline" + (f" · back <t:{int(status['back'].timestamp())}:R>" if status["back"] else "")
 
     async def refresh_panel_statuses(self) -> None:
         """Re-render panels whose support status changed: opening, closing, away mode ending."""
         for guild_id in await self.repo.panel_guilds():
-            if await self.panel_status(guild_id) != self._panel_status.get(guild_id):
-                await self.refresh_panels(guild_id)  # records the new status
+            try:
+                status = await self.panel_status(guild_id)
+                if guild_id not in self._panel_status or status != self._panel_status[guild_id]:
+                    await self.refresh_panels(guild_id)  # records the new status
+            except Exception:  # one broken guild can't stop the rest
+                logger.exception(f"Couldn't refresh the ticket panel status of guild {guild_id}")
 
     async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
         """The auto-reply for a ticket opened now, or None while support is open."""
@@ -344,7 +353,7 @@ class TicketService:
         status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
         if status is None:
             return None
-        schedule = ticket_type["schedule"] or settings.get("schedule")
+        schedule = effective_schedule(ticket_type["schedule"], settings)
         hours = f"{format_schedule(schedule)} ({settings.get('timezone', 'UTC')})" if schedule else "not set"
         back = int(status["back"].timestamp()) if status["back"] else None
         text = (
@@ -374,12 +383,15 @@ class TicketService:
                 f"You already have {'an open' if limit == 1 else f'{limit} open'} "
                 f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
             )
-        if not ticket_type["open_off_hours"] and (
-            notice := await self.off_hours_notice(guild_id, ticket_type, user_id)
-        ):
-            raise TicketError(
-                f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
-            )
+        if not ticket_type["open_off_hours"]:
+            # The schedule decides; away mode only adds its auto-reply.
+            settings = await self._settings(guild_id)
+            schedule = effective_schedule(ticket_type["schedule"], settings)
+            if not within_hours(schedule, settings.get("timezone", "UTC"), datetime.now(timezone.utc)):
+                notice = await self.off_hours_notice(guild_id, ticket_type, user_id)
+                raise TicketError(
+                    f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
+                )
 
     def overwrites(
         self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]
