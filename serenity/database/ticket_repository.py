@@ -555,6 +555,22 @@ class TicketRepository:
         pool = self._require_pool()
         await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
 
+    async def reorder_tiers(self, type_id: int, tier_ids: list[int]) -> None:
+        """Renumber a type's tiers 1, 2, ... in this order (all of them, lowest first)."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            # Off the ladder first, since (type_id, position) is unique at every step.
+            await conn.execute(
+                "UPDATE ticket_tiers SET position = -position WHERE type_id = $1", type_id
+            )
+            await conn.execute(
+                """UPDATE ticket_tiers t SET position = o.n
+                FROM unnest($2::bigint[]) WITH ORDINALITY AS o(id, n)
+                WHERE t.id = o.id AND t.type_id = $1""",
+                type_id,
+                tier_ids,
+            )
+
     async def staff_roles(self, guild_id: int) -> list[dict]:
         """Every type's staff roles, one row per tier (tier_id NULL for a type without tiers)."""
         pool = self._require_pool()

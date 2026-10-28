@@ -106,6 +106,20 @@ def next_open(schedule: Optional[Schedule], tz: str, now: datetime) -> Optional[
     return None
 
 
+def next_closed(schedule: Optional[Schedule], tz: str, now: datetime) -> Optional[datetime]:
+    """When support next closes: `now` if it is, None if it never does (no schedule, or 24/7)."""
+    if schedule is None:
+        return None
+    now = now.astimezone(timezone.utc)
+    zone = ZoneInfo(tz)
+    for _ in range(8):  # each step ends a range; only a range ending at midnight runs on
+        if not within_hours(schedule, tz, now):
+            return now
+        day = now.astimezone(zone).date()
+        now = next(end for start, end in _intervals(schedule, zone, day) if start <= now < end)
+    return None
+
+
 def business_seconds_between(schedule: Optional[Schedule], tz: str, start: datetime, end: datetime) -> int:
     """Seconds between `start` and `end` that fall within the schedule."""
     if end <= start:

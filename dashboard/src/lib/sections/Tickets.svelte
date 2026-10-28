@@ -25,6 +25,8 @@
 		{ k: 'transcripts', name: 'Transcripts', staff: true },
 		{ k: 'panels', name: 'Panels', staff: false },
 		{ k: 'types', name: 'Types', staff: false },
+		{ k: 'tiers', name: 'Tiers', staff: false },
+		{ k: 'hours', name: 'Hours', staff: false },
 		{ k: 'settings', name: 'Settings', staff: false },
 		{ k: 'webhooks', name: 'Webhooks', staff: false },
 		{ k: 'stats', name: 'Stats', staff: true }
