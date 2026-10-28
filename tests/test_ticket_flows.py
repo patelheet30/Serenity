@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +14,7 @@ from hikari.impl import MessageActionRowBuilder
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.repository import Repository
 from serenity.database.ticket_repository import TicketRepository
-from serenity.services.ticket_service import TicketError, TicketService
+from serenity.services.ticket_service import TicketError, TicketService, set_field
 
 GUILD = 1_103_276_413_850_812_416
 STAFF_ROLE = 1_241_890_335_472_164_906
@@ -562,6 +563,46 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_ticket_events_reach_subscribed_webhooks(service: TicketService, monkeypatch):
+    support = await service.repo.create_type(
+        GUILD, "Support", staff_role_ids=[STAFF_ROLE], transcripts=False, fields=set_field([], "q")
+    )
+    billing = await service.repo.create_type(GUILD, "Billing", staff_role_ids=[STAFF_ROLE])
+    monkeypatch.setattr("serenity.services.ticket_webhooks.check_url", AsyncMock())  # no DNS
+    every = await service.webhooks.add(GUILD, "https://hooks.example/all", [], None)
+    closes = await service.webhooks.add(GUILD, "https://hooks.example/c", ["ticket.closed"], support["id"])
+    await service.webhooks.add(GUILD, "https://hooks.example/b", [], billing["id"])
+    assert len(every["secret"]) == 64
+
+    sent = []
+
+    async def post(hook, event, delivery_id, body):
+        sent.append((hook["id"], event, json.loads(body)))
+        return 200, 12, None
+
+    monkeypatch.setattr(service.webhooks, "post", post)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {"q": "help"})
+    await service.close(ticket, support, BOB, "fixed")
+    await asyncio.gather(*service.webhooks._tasks)
+
+    assert sorted((h, e) for h, e, _ in sent) == [
+        (every["id"], "ticket.closed"),
+        (every["id"], "ticket.opened"),
+        (closes["id"], "ticket.closed"),
+    ]
+    body = next(b for h, e, b in sent if h == closes["id"])
+    assert body["ticket"]["number"] == 1 and body["ticket"]["status"] == "closed"
+    assert body["ticket"]["fields"] == {"q": "help"} and body["actor_id"] == str(BOB)
+    assert body["type"]["name"] == "Support"
+
+    hooks = {h["id"]: h for h in await service.repo.list_webhooks(GUILD)}
+    assert hooks[closes["id"]]["last_status"] == 200 and hooks[closes["id"]]["last_error"] is None
+    assert await service.repo.purge_webhook_deliveries(2**40) == 3
+    assert not await service.repo.remove_webhook(GUILD + 1, closes["id"])  # another server's
+    assert await service.repo.remove_webhook(GUILD, closes["id"])
 
 
 @pytest.mark.asyncio
