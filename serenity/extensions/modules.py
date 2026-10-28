@@ -34,6 +34,9 @@ async def on_command_error(ctx: arc.GatewayContext, exc: Exception) -> None:
 
 module = plugin.include_slash_group("module", "Module management commands.")
 
+# /module enable and disable offer every ModuleType, as /module list shows them.
+MODULE_CHOICES = {m.value.title(): m.value for m in ModuleType}
+
 
 @module.include
 @arc.slash_subcommand("list", "List all available modules and their status.")
@@ -100,12 +103,7 @@ async def enable_module(
         str,
         arc.StrParams(
             "The module to enable.",
-            choices=[
-                hikari.CommandChoice(name="Slowmode", value="slowmode"),
-                hikari.CommandChoice(name="Moderation", value="moderation"),
-                hikari.CommandChoice(name="Logging", value="logging"),
-                hikari.CommandChoice(name="Tickets", value="tickets"),
-            ],
+            choices=MODULE_CHOICES,
         ),
     ],
     manager: ModuleManager = arc.inject(),
@@ -196,12 +194,7 @@ async def disable_module(
         str,
         arc.StrParams(
             "The module to disable.",
-            choices=[
-                hikari.CommandChoice(name="Slowmode", value="slowmode"),
-                hikari.CommandChoice(name="Moderation", value="moderation"),
-                hikari.CommandChoice(name="Logging", value="logging"),
-                hikari.CommandChoice(name="Tickets", value="tickets"),
-            ],
+            choices=MODULE_CHOICES,
         ),
     ],
     manager: ModuleManager = arc.inject(),
