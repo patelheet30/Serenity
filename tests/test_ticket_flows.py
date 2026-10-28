@@ -257,9 +257,16 @@ async def test_transcript_retention_and_holds(service: TicketService):
     await service.repo.save_transcript(expired["id"], GUILD, {}, 100)
     await service.repo.save_transcript(held["id"], GUILD, {}, 100)
     await service.repo.hold_transcript(held["id"], 7)
+    for t in (kept, expired, held):
+        await service.repo.add_note(t["id"], BOB, "note")
 
     assert await service.repo.purge_expired_transcripts(now=200) == 1
     assert await service.repo.get_transcript(expired["id"]) is None
+    assert await service.repo.list_notes(expired["id"]) == []  # notes go with the transcript
+    assert len(await service.repo.list_notes(held["id"])) == 1
+
+    assert await service.repo.delete_transcript(kept["id"])
+    assert await service.repo.list_notes(kept["id"]) == []
     assert await service.repo.get_transcript(kept["id"]) is not None
     assert await service.repo.get_transcript(held["id"]) is not None
     assert await service.retention_days(GUILD, support) == 0
