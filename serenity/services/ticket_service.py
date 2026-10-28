@@ -5,14 +5,14 @@ import math
 import re
 import time
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 
 import hikari
 import toolbox
 
-from serenity.core.modules import ModuleManager, ModuleType
+from serenity.core.modules import ModuleManager, ModuleType, module_available
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
@@ -35,6 +35,9 @@ PRIORITIES = ("low", "normal", "high", "urgent")
 CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
+DEFAULT_RATING_WINDOW_DAYS = 7
+LOW_RATING = 2  # ratings at or below this alert the ticket log
+RAID_PAUSED = "Opening tickets is paused because a lot were opened at once. Please try again later."
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 DEFAULT_OFF_HOURS = (
     "Hi {user}, our support team is away right now, so a reply may take a while. "
@@ -448,10 +451,17 @@ def render_transcript(document: dict, *, staff: bool) -> str:
 def is_staff(
     ticket_type: dict, role_ids: Sequence[int], permissions: hikari.Permissions
 ) -> bool:
-    """Staff of a type: one of its staff roles, or Manage Server."""
+    """Staff of a type: one of its staff or tier roles (tiers come from full_type), or Manage Server."""
     if permissions & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
         return True
-    return any(role in ticket_type["staff_role_ids"] for role in role_ids)
+    staff = {*ticket_type["staff_role_ids"], *(r for t in ticket_type.get("tiers", ()) for r in t["role_ids"])}
+    return any(role in staff for role in role_ids)
+
+
+def current_tier(ticket: dict, ticket_type: dict) -> Optional[dict]:
+    """The tier a ticket is with: the one it was escalated to, else its type's lowest."""
+    tiers = ticket_type["tiers"]
+    return next((t for t in tiers if t["id"] == ticket["tier_id"]), tiers[0] if tiers else None)
 
 
 def member_permissions(member: hikari.Member) -> hikari.Permissions:
@@ -642,15 +652,12 @@ class TicketService:
 
     # Support hours
 
-    async def _settings(self, guild_id: int) -> dict:
-        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
-
     async def panel_status(self, guild_id: int) -> Optional[str]:
         """The panels' status line, if the server has support hours or away mode set.
 
         ponytail: the server's schedule only; a type with its own hours isn't shown separately.
         """
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, None, datetime.now(timezone.utc))
         if status is None:  # no line without a schedule, e.g. once away mode has ended
             return "🟢 Online" if settings.get("schedule") else None
@@ -668,7 +675,7 @@ class TicketService:
 
     async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
         """The auto-reply for a ticket opened now, or None while support is open."""
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
         if status is None:
             return None
@@ -692,25 +699,73 @@ class TicketService:
         config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
         return int(config.settings.get("retention_days", DEFAULT_RETENTION_DAYS))
 
-    async def check_can_open(self, guild_id: int, user_id: int, ticket_type: dict) -> None:
+    async def settings(self, guild_id: int) -> dict:
+        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
+
+    async def update_settings(self, guild_id: int, **changes) -> None:
+        await self.modules.repo.merge_module_settings(guild_id, ModuleType.TICKETS, changes)
+
+    async def check_can_open(self, guild_id: int, member: hikari.Member, ticket_type: dict) -> None:
         """Raise if this member may not open a ticket of this type right now."""
-        if await self.repo.get_blacklist_entry(guild_id, user_id):
+        if await self.repo.get_blacklist_entry(guild_id, member.id):
             raise TicketError("You can't open tickets in this server.")
+        settings = await self.settings(guild_id)
+        if settings.get("raid_paused"):
+            raise TicketError(RAID_PAUSED)
+        role = settings.get("required_role_id")
+        if role and role not in member.role_ids:
+            raise TicketError(f"You need the <@&{role}> role to open tickets.")
+        age = settings.get("min_account_age_days", 0)
+        if age and member.created_at > datetime.now(timezone.utc) - timedelta(days=age):
+            raise TicketError(f"Your account needs to be at least {age} days old to open tickets.")
         limit = ticket_type["open_limit"]
-        if await self.repo.count_open(guild_id, user_id, ticket_type["id"]) >= limit:
+        if await self.repo.count_open(guild_id, member.id, ticket_type["id"]) >= limit:
             raise TicketError(
                 f"You already have {'an open' if limit == 1 else f'{limit} open'} "
                 f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
             )
         if not ticket_type["open_off_hours"]:
             # The schedule decides; away mode only adds its auto-reply.
-            settings = await self._settings(guild_id)
             schedule = effective_schedule(ticket_type["schedule"], settings)
             if not within_hours(schedule, settings.get("timezone", "UTC"), datetime.now(timezone.utc)):
-                notice = await self.off_hours_notice(guild_id, ticket_type, user_id)
+                notice = await self.off_hours_notice(guild_id, ticket_type, member.id)
                 raise TicketError(
                     f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
                 )
+        now = int(time.time())
+        if cooldown := settings.get("open_cooldown_minutes", 0):
+            last = await self.repo.last_opened_at(guild_id, member.id)
+            if last and last + cooldown * 60 > now:
+                raise TicketError(f"You can open another ticket <t:{last + cooldown * 60}:R>.")
+        if raid_limit := settings.get("raid_limit", 0):
+            minutes = settings.get("raid_window_minutes", 5)
+            # A resume starts the count afresh (opened_at is whole seconds, so from the next one).
+            since = max(now - minutes * 60, settings.get("raid_resumed_at", -1) + 1)
+            opened = await self.repo.count_opened_since(guild_id, since)
+            if opened >= raid_limit:
+                # Latched only once staff have the alert and its Resume button; with no ticket log
+                # the brake still refuses opens, and lifts by itself as the burst leaves the window.
+                # ponytail: the pre-form check runs outside the open lock, so two members tripping
+                # it at the same instant can post two alerts; harmless.
+                if await self.raid_alert(guild_id, opened, minutes, ticket_type):
+                    await self.update_settings(guild_id, raid_paused=True)
+                raise TicketError(RAID_PAUSED)
+
+    async def raid_alert(self, guild_id: int, opened: int, minutes: int, ticket_type: dict) -> bool:
+        """Tell staff in the ticket log that the raid brake tripped, with a button to resume."""
+        if not self.logging:
+            return False
+        row = self.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.SUCCESS, "ticket:resume:0", label="Resume opening tickets"
+        )
+        return await self.logging.log_ticket_raid_brake(
+            guild_id=guild_id, opened=opened, minutes=minutes,
+            role_ids=ticket_type["staff_role_ids"], component=row,
+        )
+
+    async def resume_opening(self, guild_id: int) -> None:
+        """Lift the raid brake; only tickets opened from now on count towards the next one."""
+        await self.update_settings(guild_id, raid_paused=False, raid_resumed_at=int(time.time()))
 
     def overwrites(
         self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]
@@ -783,7 +838,7 @@ class TicketService:
         """Create a ticket and its channel, and post the welcome message."""
         fields = check_answers(asked_fields(ticket_type), fields)  # before anything is created
         async with self._open_locks[guild_id]:
-            await self.check_can_open(guild_id, member.id, ticket_type)
+            await self.check_can_open(guild_id, member, ticket_type)
             ticket = await self.repo.create_ticket(
                 guild_id, ticket_type["id"], member.id, fields, identity_values(ticket_type, fields)
             )
@@ -1033,8 +1088,12 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(channel_id)
         if ticket is None or ticket["status"] != "open":
             raise TicketError("This isn't an open ticket channel.")
+        return ticket, await self.full_type(ticket)
+
+    async def full_type(self, ticket: dict) -> dict:
+        """A ticket's type with its tier ladder, whose roles count as the type's staff."""
         ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        return ticket, ticket_type  # type: ignore[return-value]
+        return {**ticket_type, "tiers": await self.repo.list_tiers(ticket["type_id"])}  # type: ignore[dict-item]
 
     def is_staff(self, member: hikari.Member, ticket_type: dict) -> bool:
         return is_staff(ticket_type, member.role_ids, member_permissions(member))
@@ -1045,10 +1104,17 @@ class TicketService:
         return member
 
     async def claim(
-        self, ticket: dict, user_id: int, *, by: Optional[int] = None, announce: bool = True
+        self,
+        ticket: dict,
+        user_id: int,
+        *,
+        by: Optional[int] = None,
+        announce: bool = True,
+        force: bool = False,
     ) -> dict:
-        """Give the ticket to `user_id`. `by` is the admin reassigning it, if it isn't them."""
-        updated = await self.repo.claim(ticket["id"], user_id, force=by is not None)
+        """Give the ticket to `user_id`. `by` is whoever reassigns it, if it isn't them; `force`
+        takes it from the current assignee (an escalated tier picking it up)."""
+        updated = await self.repo.claim(ticket["id"], user_id, force=force or by is not None)
         if updated is None:
             current = await self.repo.get_ticket_by_id(ticket["id"])
             assignee = current["assignee_id"] if current else None
@@ -1091,14 +1157,30 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(event.channel_id)
         if ticket is None or ticket["status"] != "open":
             return
-        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
+        # Tier roles only get into the channel by escalating, so a never-escalated ticket skips the ladder.
+        if ticket["tier_id"] is not None:
+            ticket_type = await self.full_type(ticket)
+        else:
+            ticket_type = {**await self.repo.get_type(ticket["guild_id"], ticket["type_id"]), "tiers": []}  # type: ignore[dict-item]
+        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)
         updated = await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
         if updated is None:  # the ticket was rolled back (failed open) a moment ago
             return
         if updated["waiting_on"] != ticket["waiting_on"]:
             self.schedule_topic(event.channel_id)
-        if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]
+        tier = current_tier(ticket, ticket_type)
+        if (
+            staff
+            and ticket["tier_pinged_at"]
+            and tier
+            and ticket_type["claim_mode"] in ("reply", "both")
+            and set(event.member.role_ids) & set(tier["role_ids"])
+        ):
+            # The first of an escalated tier to reply takes the ticket (claiming clears the re-ping);
+            # earlier handlers keep their place and credit in the chain. In button mode the tier
+            # takes it with /ticket assign. ponytail: two replies at once both claim, the later wins.
+            await self.claim(ticket, event.author_id, announce=False, force=True)
+        elif staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):
             try:
                 await self.claim(ticket, event.author_id, announce=False)
             except TicketError:
@@ -1117,6 +1199,118 @@ class TicketService:
                 )
             except Exception:  # one deleted or locked channel can't hold up the rest
                 logger.exception(f"Auto-unclaim failed for ticket {ticket['id']}")
+
+    # Escalation
+
+    async def _ping_tier(self, ticket: dict, tier: dict, headline: str, reason: Optional[str] = None) -> None:
+        roles = " ".join(f"<@&{r}>" for r in tier["role_ids"])
+        lines = [
+            f"{headline} {roles}".strip(),
+            f"Ticket #{ticket['number']} · opened by <@{ticket['opener_id']}> <t:{ticket['opened_at']}:R>",
+        ]
+        if reason:
+            lines.append(f"> {reason}")
+        await self.rest.create_message(
+            ticket["channel_id"], "\n".join(lines), role_mentions=tier["role_ids"], user_mentions=False
+        )
+
+    async def escalate(
+        self, ticket: dict, ticket_type: dict, actor_id: int, target_name: Optional[str], reason: Optional[str]
+    ) -> dict:
+        """Bring a higher tier into the ticket: the next rung up, or a tier the current one may summon."""
+        tiers = ticket_type["tiers"]
+        current = current_tier(ticket, ticket_type)
+        if current is None:
+            raise TicketError(
+                f"**{ticket_type['name']}** tickets have no tiers. Add them with `/ticket type tier`."
+            )
+        above = next((t for t in tiers if t["position"] > current["position"]), None)
+        if target_name is None:
+            target = above
+            if target is None:
+                raise TicketError(f"**{current['name']}** is already the top tier.")
+        else:
+            target = next((t for t in tiers if t["name"].lower() == target_name.lower()), None)
+            if target is None:
+                raise TicketError(f"**{ticket_type['name']}** has no tier called **{target_name}**.")
+            if target is current:
+                raise TicketError(f"This ticket is already with **{current['name']}**.")
+            if target is not above and target["id"] not in current["can_summon"]:
+                raise TicketError(f"**{current['name']}** can't summon **{target['name']}**.")
+        if target["requires_reason"] and not reason:
+            raise TicketError(f"Escalating to **{target['name']}** needs a reason.")
+
+        for role in target["role_ids"]:
+            await self.rest.edit_permission_overwrite(
+                ticket["channel_id"], role, target_type=hikari.PermissionOverwriteType.ROLE,
+                allow=TICKET_MEMBER_ALLOW, reason=f"Ticket #{ticket['number']} escalated to {target['name']}",
+            )
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=target["id"], tier_pinged_at=int(time.time())
+        )
+        await self.repo.add_event(
+            ticket["id"], "escalated", actor_id, {"from": current["id"], "to": target["id"], "reason": reason}
+        )
+        await self.log(
+            updated, ticket_type, "escalated", actor_id,  # type: ignore[arg-type]
+            f"{current['name']} → {target['name']}" + (f": {reason}" if reason else ""),
+        )
+        await self._ping_tier(
+            updated, target, f"⬆️ <@{actor_id}> escalated this ticket to **{target['name']}**.", reason  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    async def deescalate(self, ticket: dict, ticket_type: dict, actor_id: int, note: Optional[str]) -> dict:
+        """Hand the ticket back to the tier that escalated it, unassigned so that tier picks it up.
+
+        ponytail: the higher tier keeps channel access (and its credit); nothing removes its role.
+        """
+        events = await self.repo.list_events(ticket["id"])
+        last = next(
+            (e for e in reversed(events) if e["kind"] == "escalated" and e["data"]["to"] == ticket["tier_id"]),
+            None,
+        )
+        if last is None:
+            raise TicketError("This ticket hasn't been escalated.")
+        if not note:
+            raise TicketError("Add a reason: it's posted for the tier taking the ticket back.")
+        tiers = {t["id"]: t for t in ticket_type["tiers"]}
+        back = tiers.get(last["data"]["from"]) or ticket_type["tiers"][0]
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=back["id"], tier_pinged_at=None, assignee_id=None
+        )
+        await self.repo.add_event(
+            ticket["id"], "deescalated", actor_id, {"from": ticket["tier_id"], "to": back["id"], "reason": note}
+        )
+        await self.log(updated, ticket_type, "deescalated", actor_id, f"Back to {back['name']}: {note}")  # type: ignore[arg-type]
+        await self._ping_tier(
+            updated, back, f"⬇️ <@{actor_id}> handed this ticket back to **{back['name']}**.", note  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    def can_reassign(self, member: hikari.Member, ticket: dict, ticket_type: dict) -> bool:
+        """Admins, and the tier a ticket was escalated to (higher tiers may reassign)."""
+        if member_permissions(member) & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
+            return True
+        tier = current_tier(ticket, ticket_type)
+        return (
+            tier is not None
+            and tier is not ticket_type["tiers"][0]
+            and any(r in tier["role_ids"] for r in member.role_ids)
+        )
+
+    async def reping_tiers(self, now: int) -> None:
+        """Ping escalated tiers again when nobody from them has replied in their re-ping time."""
+        for ticket in await self.repo.due_for_reping(now):
+            try:
+                await self.repo.update_ticket(ticket["id"], tier_pinged_at=now)
+                await self._ping_tier(
+                    ticket,
+                    {"role_ids": ticket["tier_role_ids"]},
+                    f"⏰ Nobody from **{ticket['tier_name']}** has picked this ticket up yet.",
+                )
+            except Exception:  # one deleted or locked channel can't hold up the rest
+                logger.exception(f"Tier re-ping failed for ticket {ticket['id']}")
 
     # Closing
 
@@ -1237,18 +1431,33 @@ class TicketService:
         embed.add_field("Closed by", f"<@{closed_by}>", inline=True)
         embed.add_field("Reason", (reason or "No reason given")[:1024], inline=True)
         kwargs: dict = {}
+        rows: list[hikari.api.MessageActionRowBuilder] = []
+        # Not asked again after a reopen if they already rated it.
+        try:
+            ask = ticket_type["ratings"] and await self.repo.get_rating(ticket["id"]) is None
+        except Exception:  # the close already happened; send the DM without the buttons
+            logger.exception(f"Couldn't check the rating of closed ticket {ticket['id']}")
+            ask = False
+        if ask:
+            embed.add_field("How did we do?", "Rate your experience from 1 (poor) to 5 (great).")
+            rows.append(self.rest.build_message_action_row())
+            for n in range(1, 6):
+                rows[-1].add_interactive_button(
+                    hikari.ButtonStyle.SECONDARY, f"ticket:rate:{ticket['id']}:{n}", label=str(n), emoji="⭐"
+                )
         if document is not None:
             embed.set_footer("The transcript is attached. Staff can reopen this ticket for 7 days.")
             kwargs["attachment"] = hikari.Bytes(
                 render_transcript(document, staff=False).encode(), f"ticket-{ticket['number']}.txt"
             )
-            kwargs["component"] = self.rest.build_message_action_row().add_interactive_button(
+            rows.append(self.rest.build_message_action_row().add_interactive_button(
                 hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
                 label="Ask to delete this transcript",
-            )
+            ))
         try:
             dm = await self.rest.create_dm_channel(ticket["opener_id"])
-            await self.rest.create_message(dm, embed=embed, **kwargs)
+            # ponytail: DMs closed means no rating; the dashboard's transcript page can offer it later.
+            await self.rest.create_message(dm, embed=embed, components=rows, **kwargs)
         except (hikari.ForbiddenError, hikari.NotFoundError, hikari.BadRequestError):
             pass  # DMs closed, or the opener left: they still have nothing to lose
         except hikari.HTTPError as exc:  # the close already happened; don't report it as failed
@@ -1330,6 +1539,50 @@ class TicketService:
         )
         return True
 
+    # Ratings
+
+    async def check_can_rate(self, ticket_id: int, user_id: int) -> tuple[dict, dict]:
+        """The closed ticket `user_id` may rate now, and its type; raises if they can't."""
+        ticket = await self.repo.get_ticket_by_id(ticket_id)
+        if ticket is None or ticket["opener_id"] != user_id:
+            raise TicketError("Only the person who opened this ticket can rate it.")
+        guild_id = ticket["guild_id"]
+        # The buttons are in a DM, so the guild checks other ticket buttons get happen here.
+        if not module_available(guild_id, ModuleType.TICKETS) or not await self.modules.is_enabled(
+            guild_id, ModuleType.TICKETS
+        ):
+            raise TicketError("Tickets are turned off in that server.")
+        ticket_type: dict = await self.repo.get_type(guild_id, ticket["type_id"])  # type: ignore[assignment]
+        if ticket["status"] != "closed":
+            raise TicketError("This ticket was reopened. You can rate it once it closes again.")
+        if not ticket_type["ratings"]:
+            raise TicketError(f"**{ticket_type['name']}** tickets aren't rated.")
+        if await self.repo.get_rating(ticket_id):
+            raise TicketError("You've already rated this ticket. Thanks!")
+        config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
+        days = int(config.settings.get("rating_window_days", DEFAULT_RATING_WINDOW_DAYS))
+        if ticket["closed_at"] < time.time() - days * 86400:
+            raise TicketError(f"Tickets can only be rated for {days} days after they close.")
+        return ticket, ticket_type
+
+    async def rate(self, ticket_id: int, user_id: int, rating: int, comment: Optional[str]) -> dict:
+        """Store the opener's rating, credited to the ticket's handlers; low ones alert staff."""
+        if not 1 <= rating <= 5:
+            raise TicketError("Ratings are from 1 to 5.")
+        ticket, ticket_type = await self.check_can_rate(ticket_id, user_id)
+        stored = await self.repo.add_rating(ticket_id, user_id, rating, comment)
+        if stored is None:  # a second submit that raced the first
+            raise TicketError("You've already rated this ticket. Thanks!")
+        await self.repo.add_event(ticket_id, "rated", user_id, {"rating": rating})
+        if rating <= LOW_RATING:
+            handlers = " ".join(f"<@{h}>" for h in stored["handler_ids"]) or "nobody"
+            detail = f"{'⭐' * rating} {rating}/5 · Handled by {handlers}"
+            await self.log(
+                ticket, ticket_type, "low_rating", user_id,
+                f"{detail}\n> {comment}" if comment else detail,
+            )
+        return stored
+
     # Staff controls
 
     def channel_name(self, ticket: dict, ticket_type: dict, opener_name: str) -> str:
@@ -1406,9 +1659,12 @@ class TicketService:
 
         async with self._open_locks[ticket["guild_id"]]:  # _category may create an overflow
             category = await self._category(ticket["guild_id"], new_type["category_id"])
-            # Stages are per type, so the ticket starts the new type's workflow.
+            # Tiers and stages belong to a type: the ticket starts the new type's ladder at the
+            # bottom and its workflow at the first stage.
             first = new_type["stages"][0]["name"] if new_type["stages"] else None
-            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"], stage=first)
+            updated = await self.repo.update_ticket(
+                ticket["id"], type_id=new_type["id"], tier_id=None, tier_pinged_at=None, stage=first
+            )
             await self.rest.edit_channel(
                 ticket["channel_id"],
                 parent_category=category if category is not None else hikari.UNDEFINED,
