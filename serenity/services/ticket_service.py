@@ -113,12 +113,13 @@ def find_stage(ticket_type: dict, name: Optional[str]) -> Optional[dict]:
     return next((s for s in ticket_type["stages"] if s["name"].lower() == name.lower()), None)
 
 
-def render_topic(ticket: dict, ticket_type: dict, opener_name: str) -> str:
+def render_topic(ticket: dict, ticket_type: dict) -> str:
     """A ticket channel's topic: where it stands and whose turn it is."""
     parts = [f"Ticket #{ticket['number']}", ticket_type["name"]]
     if ticket["stage"]:
         parts.append(ticket["stage"])
-    parts.append("waiting on staff" if ticket["waiting_on"] == "staff" else f"waiting on {opener_name}")
+    # No opener name: it would need a member fetch on every refresh, and topics don't resolve mentions.
+    parts.append(f"waiting on {'staff' if ticket['waiting_on'] == 'staff' else 'member'}")
     return " · ".join(parts)[:1024]
 
 
@@ -530,7 +531,7 @@ class TicketService:
                     ),
                     category=category_id if category_id is not None else hikari.UNDEFINED,
                     permission_overwrites=self.overwrites(guild_id, ticket_type, [member.id]),
-                    topic=render_topic(ticket, ticket_type, member.username),
+                    topic=render_topic(ticket, ticket_type),
                     reason=f"Ticket #{ticket['number']} opened by {member.username}",
                 )
             except BaseException as exc:
@@ -921,7 +922,7 @@ class TicketService:
                 category=await self._category(guild_id, ticket_type["category_id"]) or hikari.UNDEFINED,  # type: ignore[index]
                 permission_overwrites=self.overwrites(guild_id, ticket_type, [ticket["opener_id"]]),  # type: ignore[arg-type]
                 # reopen_ticket sets waiting_on back to staff
-                topic=render_topic({**ticket, "waiting_on": "staff"}, ticket_type, self._opener_name(ticket)),  # type: ignore[arg-type]
+                topic=render_topic({**ticket, "waiting_on": "staff"}, ticket_type),  # type: ignore[arg-type]
                 reason=f"Ticket #{number} reopened by {actor.username}",
             )
             reopened = await self.repo.reopen_ticket(ticket["id"], channel.id, actor.id)
@@ -1123,7 +1124,7 @@ class TicketService:
             if ticket is None or ticket["status"] != "open":
                 return
             ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-            topic = render_topic(ticket, ticket_type, self._opener_name(ticket))  # type: ignore[arg-type]
+            topic = render_topic(ticket, ticket_type)  # type: ignore[arg-type]
             channel = self.cache.get_guild_channel(channel_id)
             if channel is not None and getattr(channel, "topic", None) == topic:
                 return

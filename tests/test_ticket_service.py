@@ -62,9 +62,9 @@ def test_parse_color():
 
 def test_render_topic():
     ticket = {"number": 4, "stage": "Quoted", "waiting_on": "opener"}
-    assert render_topic(ticket, {"name": "Sales"}, "alice") == "Ticket #4 · Sales · Quoted · waiting on alice"
+    assert render_topic(ticket, {"name": "Sales"}) == "Ticket #4 · Sales · Quoted · waiting on member"
     ticket.update(stage=None, waiting_on="staff")
-    assert render_topic(ticket, {"name": "Sales"}, "alice") == "Ticket #4 · Sales · waiting on staff"
+    assert render_topic(ticket, {"name": "Sales"}) == "Ticket #4 · Sales · waiting on staff"
 
 
 def _service(rest=None, repo=None):

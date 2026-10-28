@@ -287,14 +287,16 @@ async def type_staff(
 async def type_stage_add(
     ctx: arc.GatewayContext,
     type: TypeOption,
-    name: arc.Option[str, arc.StrParams("Stage name; an existing one is changed.", max_length=50)],
+    name: arc.Option[
+        str, arc.StrParams("Stage name; an existing one is changed.", min_length=1, max_length=50)
+    ],
     color: arc.Option[Optional[str], arc.StrParams("Hex colour, like #5865F2.", max_length=7)] = None,
     terminal: arc.Option[
-        bool, arc.BoolParams("Reaching it offers to close the ticket with this outcome.")
-    ] = False,
+        Optional[bool], arc.BoolParams("Reaching it offers to close the ticket with this outcome.")
+    ] = None,
     auto_close: arc.Option[
-        bool, arc.BoolParams("Inactive tickets at this stage may be closed automatically.")
-    ] = True,
+        Optional[bool], arc.BoolParams("Inactive tickets at this stage may be closed automatically.")
+    ] = None,
     position: arc.Option[
         Optional[int], arc.IntParams("Place in the order (1 = first, where new tickets start).", min=1)
     ] = None,
@@ -303,11 +305,17 @@ async def type_stage_add(
 ) -> None:
     guild_id = require_manage_guild(ctx)
     ticket_type = await service.resolve_type(guild_id, type)
+    if not name.strip():
+        raise TicketError("A stage needs a name.")
+    # Changing a stage keeps whatever isn't given; a new one gets the defaults.
+    existing = find_stage(ticket_type, name.strip()) or {
+        "color": None, "terminal": False, "auto_close": True
+    }
     stage = {
         "name": name.strip(),
-        "color": parse_color(color) if color else None,
-        "terminal": terminal,
-        "auto_close": auto_close,
+        "color": parse_color(color) if color else existing["color"],
+        "terminal": existing["terminal"] if terminal is None else terminal,
+        "auto_close": existing["auto_close"] if auto_close is None else auto_close,
     }
     stages = with_stage(ticket_type["stages"], stage, position)
     updated = await repo.update_type(guild_id, ticket_type["id"], stages=stages)
@@ -1103,10 +1111,12 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         elif action == "stage" and isinstance(interaction, hikari.ComponentInteraction):
             current, ticket_type = await ticket_for(service, interaction, int(target))
             service.require_staff(interaction.member, ticket_type)
-            await service.set_stage(current, ticket_type, interaction.values[0], interaction.user.id)
+            # Acknowledged first: set_stage posts to the channel and the log, which can take a while.
             await interaction.create_initial_response(
-                hikari.ResponseType.MESSAGE_UPDATE, f"✅ Moved to **{interaction.values[0]}**.", components=[]
+                hikari.ResponseType.MESSAGE_UPDATE, f"Moving to **{interaction.values[0]}**…", components=[]
             )
+            await service.set_stage(current, ticket_type, interaction.values[0], interaction.user.id)
+            await interaction.edit_initial_response(f"✅ Moved to **{interaction.values[0]}**.")
         elif action == "closeas" and isinstance(interaction, hikari.ComponentInteraction):
             current, ticket_type = await ticket_for(service, interaction, int(target))
             service.require_staff(interaction.member, ticket_type)
