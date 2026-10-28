@@ -67,12 +67,13 @@ async def test_panel_deleted_by_hand_is_reposted():
     repo = AsyncMock()
     repo.list_types.return_value = _types(1)
     service = _service(rest, repo)
+    service.panel_messages.add(3)
     panel = {"id": 9, "guild_id": 1, "channel_id": 2, "message_id": 3, "title": "Help",
              "description": None, "style": "buttons", "type_ids": [1]}
 
     await service.post_panel(panel)
     repo.update_panel.assert_awaited_once_with(1, 9, message_id=555)
-    assert service.panel_messages == {555}
+    assert service.panel_messages == {555}  # the dead message id 3 isn't kept
 
     await service.panel_message_deleted(555)
     repo.forget_panel_message.assert_awaited_once_with(555)
