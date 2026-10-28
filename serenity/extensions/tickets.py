@@ -26,6 +26,10 @@ plugin.add_hook(require_module(ModuleType.TICKETS))
 
 ticket = plugin.include_slash_group("ticket", "Support tickets.")
 type_group = ticket.include_subgroup("type", "Configure the kinds of ticket members can open.")
+panel_group = ticket.include_subgroup("panel", "Post the messages members open tickets from.")
+
+PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
+MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
 
 
 @plugin.set_error_handler
@@ -192,6 +196,7 @@ async def type_edit(
         raise TicketError("Nothing to change.")
 
     updated = await repo.update_type(guild_id, ticket_type["id"], **values)
+    await service.refresh_panels(guild_id, ticket_type["id"])
     await ctx.respond(
         embed=hikari.Embed(
             title="✅ Ticket type updated",
@@ -258,6 +263,181 @@ async def type_list(
         color=_BLUE,
     )
     await ctx.respond(embed=embed, flags=hikari.MessageFlag.EPHEMERAL)
+
+
+async def resolve_type_list(service: TicketService, guild_id: int, text: str) -> list[int]:
+    names = [n.strip() for n in text.split(",") if n.strip()]
+    if not names:
+        raise TicketError("List at least one ticket type, separated by commas.")
+    if len(names) > MAX_PANEL_TYPES:
+        raise TicketError(f"A panel can show at most {MAX_PANEL_TYPES} ticket types.")
+    return [(await service.resolve_type(guild_id, n))["id"] for n in names]
+
+
+async def resolve_panel(repo: TicketRepository, guild_id: int, panel_id: int) -> dict:
+    panel = await repo.get_panel(guild_id, panel_id)
+    if panel is None:
+        raise TicketError(f"There's no panel #{panel_id}. See `/ticket panel list`.")
+    return panel
+
+
+TypesOption = arc.Option[
+    str, arc.StrParams("Ticket types to show, separated by commas.", max_length=1000)
+]
+
+
+@panel_group.include
+@arc.slash_subcommand("post", "Post a ticket panel.")
+async def panel_post(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[hikari.GuildTextChannel, arc.ChannelParams("Where to post it.")],
+    title: arc.Option[str, arc.StrParams("Panel title.", max_length=256)],
+    types: TypesOption,
+    description: arc.Option[
+        Optional[str], arc.StrParams("Text under the title.", max_length=2000)
+    ] = None,
+    style: arc.Option[str, arc.StrParams("Buttons or a dropdown.", choices=PANEL_STYLES)] = "buttons",
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    type_ids = await resolve_type_list(service, guild_id, types)
+    panel = await repo.create_panel(guild_id, channel.id, title, type_ids, description, style)
+    try:
+        panel = await service.post_panel(panel)
+    except TicketError:
+        await repo.delete_panel(guild_id, panel["id"])
+        raise
+    await ctx.respond(
+        f"✅ Posted panel #{panel['id']} in {channel.mention}.", flags=hikari.MessageFlag.EPHEMERAL
+    )
+
+
+@panel_group.include
+@arc.slash_subcommand("edit", "Change a posted panel; it's updated in place.")
+async def panel_edit(
+    ctx: arc.GatewayContext,
+    panel: arc.Option[int, arc.IntParams("Panel number, from /ticket panel list.")],
+    title: arc.Option[Optional[str], arc.StrParams("Panel title.", max_length=256)] = None,
+    types: arc.Option[
+        Optional[str], arc.StrParams("Ticket types to show, separated by commas.", max_length=1000)
+    ] = None,
+    description: arc.Option[
+        Optional[str], arc.StrParams("Text under the title.", max_length=2000)
+    ] = None,
+    style: arc.Option[
+        Optional[str], arc.StrParams("Buttons or a dropdown.", choices=PANEL_STYLES)
+    ] = None,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    existing = await resolve_panel(repo, guild_id, panel)
+    values: dict = {"title": title, "description": description, "style": style}
+    values = {k: v for k, v in values.items() if v is not None}
+    if types is not None:
+        values["type_ids"] = await resolve_type_list(service, guild_id, types)
+    updated = await repo.update_panel(guild_id, existing["id"], **values) if values else existing
+    await service.post_panel(updated)  # type: ignore[arg-type]
+    await ctx.respond(f"✅ Updated panel #{panel}.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@panel_group.include
+@arc.slash_subcommand("delete", "Delete a panel and its message.")
+async def panel_delete(
+    ctx: arc.GatewayContext,
+    panel: arc.Option[int, arc.IntParams("Panel number, from /ticket panel list.")],
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.delete_panel(await resolve_panel(repo, guild_id, panel))
+    await ctx.respond(f"🗑️ Deleted panel #{panel}.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@panel_group.include
+@arc.slash_subcommand("list", "List this server's ticket panels.")
+async def panel_list(
+    ctx: arc.GatewayContext,
+    repo: TicketRepository = arc.inject(),
+) -> None:
+    if not ctx.guild_id:
+        raise TicketError("This command can only be used in a server.")
+    names = {t["id"]: t["name"] for t in await repo.list_types(ctx.guild_id)}
+    lines = []
+    for p in await repo.list_panels(ctx.guild_id):
+        where = (
+            f"https://discord.com/channels/{p['guild_id']}/{p['channel_id']}/{p['message_id']}"
+            if p["message_id"]
+            else f"<#{p['channel_id']}> (message deleted; `/ticket panel edit {p['id']}` reposts it)"
+        )
+        shown = ", ".join(names[i] for i in p["type_ids"] if i in names)
+        lines.append(f"**#{p['id']} {p['title']}** · {p['style']} · {shown}\n{where}")
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="🎫 Ticket panels",
+            description="\n\n".join(lines)[:4096] or "None yet. Post one with `/ticket panel post`.",
+            color=_BLUE,
+        ),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+# Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
+# than by in-memory component handlers, so they keep working after a restart.
+
+
+async def reply(interaction: hikari.PartialInteraction, content: str) -> None:
+    """An ephemeral answer, whether or not the interaction was already acknowledged."""
+    assert isinstance(interaction, (hikari.ComponentInteraction, hikari.ModalInteraction))
+    try:
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_CREATE, content, flags=hikari.MessageFlag.EPHEMERAL
+        )
+    except hikari.BadRequestError:  # already acknowledged (deferred or answered)
+        await interaction.execute(content, flags=hikari.MessageFlag.EPHEMERAL)
+
+
+async def open_from_panel(
+    interaction: hikari.ComponentInteraction, service: TicketService, type_id: int
+) -> None:
+    ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
+    if ticket_type is None:
+        raise TicketError("That ticket type no longer exists.")
+    # ponytail: placeholder until the open flow lands
+    await reply(interaction, f"Opening **{ticket_type['name']}** tickets is coming soon.")
+
+
+@plugin.listen()
+async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
+    interaction = event.interaction
+    if not isinstance(interaction, (hikari.ComponentInteraction, hikari.ModalInteraction)):
+        return
+    if not interaction.custom_id.startswith("ticket:") or not interaction.guild_id:
+        return
+
+    service = plugin.client.get_type_dependency(TicketService)
+    _, action, target = interaction.custom_id.split(":", 2)
+    try:
+        if not await service.modules.is_enabled(interaction.guild_id, ModuleType.TICKETS):
+            raise TicketError("Tickets are turned off in this server.")
+        if action == "open" and isinstance(interaction, hikari.ComponentInteraction):
+            await open_from_panel(interaction, service, int(target))
+        elif action == "menu" and isinstance(interaction, hikari.ComponentInteraction):
+            await open_from_panel(interaction, service, int(interaction.values[0]))
+        else:
+            logger.warning(f"Unknown ticket component {interaction.custom_id}")
+    except TicketError as exc:
+        await reply(interaction, f"❌ {exc}")
+    except Exception:
+        logger.exception(f"Ticket component {interaction.custom_id} failed")
+        await reply(interaction, "❌ Something went wrong. Please try again.")
+
+
+@plugin.listen()
+async def on_message_delete(event: hikari.GuildMessageDeleteEvent) -> None:
+    """A panel deleted by hand stays configured; /ticket panel edit reposts it."""
+    await plugin.client.get_type_dependency(TicketService).panel_message_deleted(event.message_id)
 
 
 @arc.loader
