@@ -103,6 +103,108 @@ async def test_full_category_overflows_into_a_new_one(service: TicketService):
     assert service.rest.create_guild_text_channel.call_args.kwargs["category"] == 11
 
 
+def message(channel_id: int, author: MagicMock) -> MagicMock:
+    return MagicMock(channel_id=channel_id, author_id=author.id, member=author, is_bot=False)
+
+
+def staff(user_id: int, name: str) -> MagicMock:
+    m = member(user_id, name)
+    m.role_ids = [STAFF_ROLE]
+    return m
+
+
+CAROL = 1_029_384_756_102_938_477
+
+
+@pytest.mark.asyncio
+async def test_first_staff_reply_claims_and_everyone_who_replied_is_credited(
+    service: TicketService, monkeypatch: pytest.MonkeyPatch
+):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+
+    await service.on_message(message(channel, member(ALICE, "alice")))  # opener: no claim
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
+
+    await service.on_message(message(channel, staff(BOB, "bob")))
+    after = await service.repo.get_ticket_by_id(ticket["id"])
+    assert after is not None and after["assignee_id"] == BOB
+    assert after["waiting_on"] == "opener" and after["first_response_at"] is not None
+
+    await service.on_message(message(channel, staff(CAROL, "carol")))  # assists, doesn't claim
+    await service.on_message(message(channel, staff(BOB, "bob")))
+    # Claimed by an admin's reassign but never wrote: in the chain, not credited.
+    dave = 1_029_384_756_102_938_478
+    await service.claim(after, dave, by=BOB, announce=False)
+
+    await service.repo.credit_handlers(ticket["id"])
+    handlers = {h["user_id"]: h for h in await service.repo.list_handlers(ticket["id"])}
+    assert {u: (h["role"], h["message_count"], h["credited"]) for u, h in handlers.items()} == {
+        BOB: ("claimed", 2, True),
+        CAROL: ("assisted", 1, True),
+        dave: ("claimed", 0, False),
+    }
+
+
+@pytest.mark.asyncio
+async def test_claim_button_mode_needs_an_explicit_claim(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await service.repo.create_type(
+        GUILD, "Support", staff_role_ids=[STAFF_ROLE], claim_mode="button"
+    )
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.on_message(message(ticket["channel_id"], staff(BOB, "bob")))
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
+
+    await service.claim(ticket, CAROL)
+    with pytest.raises(TicketError, match="already has"):
+        await service.claim(ticket, BOB)
+
+
+@pytest.mark.asyncio
+async def test_auto_unclaim_after_silence(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=2)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.claim(ticket, BOB, announce=False)
+    await service.repo.record_message(ticket["id"], ALICE, staff=False)  # opener waiting
+
+    claimed = await service.repo.get_ticket_by_id(ticket["id"])
+    assert claimed is not None
+    await service.auto_unclaim(claimed["last_activity_at"] + 3600)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] == BOB  # type: ignore[index]
+
+    await service.auto_unclaim(claimed["last_activity_at"] + 2 * 3600 + 1)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
+    assert "No staff reply for 2h" in service.rest.create_message.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=1)
+    first = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    second = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    for t in (first, second):
+        await service.claim(t, CAROL, announce=False)
+    later = int(__import__("time").time()) + 7200
+    due = await service.repo.due_for_unclaim(later)
+    assert {t["id"] for t in due} == {first["id"], second["id"]}
+
+    # first is reassigned between the sweep's SELECT and its UPDATE; second's channel is gone.
+    await service.repo.claim(first["id"], ALICE, force=True)
+    service.repo.due_for_unclaim = AsyncMock(return_value=due)
+    service.rest.create_message.side_effect = hikari.NotFoundError("", {}, b"")
+    await service.auto_unclaim(later)
+
+    assert (await service.repo.get_ticket_by_id(first["id"]))["assignee_id"] == ALICE  # type: ignore[index]
+    assert (await service.repo.get_ticket_by_id(second["id"]))["assignee_id"] is None  # type: ignore[index]
+
+
 @pytest.mark.asyncio
 async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support")
