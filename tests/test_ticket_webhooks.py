@@ -92,7 +92,7 @@ async def test_deliver_retries_with_backoff_and_logs_each_attempt():
         side_effect=[(None, None, "timeout"), (500, 30, "HTTP 500"), (200, 25, None)]
     )
     with patch("asyncio.sleep", AsyncMock()) as sleep:
-        error = await webhooks.deliver({"id": 3}, "ticket.closed", b"{}", delays=(0, 10, 60, 300))
+        error = await webhooks.deliver({"id": 3, "guild_id": 1}, "ticket.closed", b"{}", delays=(0, 10, 60, 300))
     assert error is None
     assert [c.args[0] for c in sleep.call_args_list] == [0, 10, 60]  # stopped once accepted
     assert [c.args for c in repo.update_delivery.call_args_list] == [
@@ -102,8 +102,22 @@ async def test_deliver_retries_with_backoff_and_logs_each_attempt():
     ]
 
 
+@pytest.mark.asyncio
+async def test_removing_a_webhook_stops_its_retries():
+    repo = AsyncMock()
+    repo.get_webhook.return_value = None  # removed after the first attempt
+    webhooks = TicketWebhooks(repo)
+    webhooks.post = AsyncMock(return_value=(500, 30, "HTTP 500"))
+    with patch("asyncio.sleep", AsyncMock()):
+        error = await webhooks.deliver({"id": 3, "guild_id": 1}, "ticket.closed", b"{}", delays=(0, 10, 60))
+    assert error == "Webhook was removed."
+    webhooks.post.assert_awaited_once()
+
+
 def test_events():
     assert event_name("stage") == "ticket.stage_changed"
+    assert event_name("closed") == "ticket.closed"
+    assert event_name("escalated") == "ticket.escalated"  # a later kind: "all events" hooks
     assert parse_events(None) == []
     assert parse_events("opened, ticket.closed opened") == ["ticket.opened", "ticket.closed"]
     with pytest.raises(TicketError):

@@ -22,14 +22,22 @@ from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# What a webhook can subscribe to: every kind TicketService.log() sends, "stage" as stage_changed.
-EVENTS = tuple(
-    f"ticket.{kind}"
-    for kind in (
-        "opened", "claimed", "assigned", "unclaimed", "stage_changed",
-        "transferred", "closed", "reopened", "deletion_requested",
-    )
-)
+# What a webhook can subscribe to: the kind TicketService.log() sends -> its public event name.
+EVENT_NAMES = {
+    kind: f"ticket.{name}"
+    for kind, name in {
+        "opened": "opened",
+        "claimed": "claimed",
+        "assigned": "assigned",
+        "unclaimed": "unclaimed",
+        "stage": "stage_changed",  # sent by stages (#125)
+        "transferred": "transferred",
+        "closed": "closed",
+        "reopened": "reopened",
+        "deletion_requested": "deletion_requested",
+    }.items()
+}
+EVENTS = tuple(EVENT_NAMES.values())
 MAX_WEBHOOKS = 5  # per server
 DELIVERY_RETENTION = 7 * 86400
 # Seconds to wait before each attempt. ponytail: retries live in memory, so a restart drops
@@ -44,7 +52,8 @@ class WebhookError(SerenityError):
 
 
 def event_name(kind: str) -> str:
-    return "ticket.stage_changed" if kind == "stage" else f"ticket.{kind}"
+    # A kind added later still reaches the webhooks subscribed to every event.
+    return EVENT_NAMES.get(kind, f"ticket.{kind}")
 
 
 def sign(secret: str, timestamp: int, body: bytes) -> str:
@@ -177,6 +186,9 @@ class TicketWebhooks:
         error: Optional[str] = None
         for attempt, delay in enumerate(delays, 1):
             await asyncio.sleep(delay)
+            # Removing a webhook stops its pending retries too.
+            if attempt > 1 and await self.repo.get_webhook(hook["guild_id"], hook["id"]) is None:
+                return "Webhook was removed."
             status, latency, error = await self.post(hook, event, delivery_id, body)
             await self.repo.update_delivery(delivery_id, attempt, status, latency, error)
             if error is None:
