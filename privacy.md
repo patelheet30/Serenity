@@ -27,7 +27,7 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 | Historical message rate patterns | Aggregated hourly message-per-minute averages per channel used to detect anomalous activity — **not individual messages** | Automatically deleted after 30 days |
 | Ticket records | For each support ticket: its number, type, opener, assigned staff, priority, form answers, timestamps, close reason, and who handled it | Until deletion is requested via our support server |
 | Ticket transcripts | A copy of a closed ticket's messages (see [Tickets](#tickets)) | 30 days after the ticket closes by default; see [Tickets](#tickets) |
-| Ticket staff notes | Private notes staff add to a ticket | Deleted with the ticket's transcript |
+| Ticket staff notes | Private notes staff add to a ticket | Deleted with the ticket's transcript; if transcripts are off for that kind of ticket, until deletion is requested via our support server |
 
 ### Data We Do Not Store
 
@@ -43,7 +43,7 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 
 Tickets are the one place Serenity stores message content. Servers turn them on with the Tickets module; if a server doesn't use tickets, none of this applies.
 
-**What's stored.** While a ticket is open we store its record (see the table above) but not its messages. When it closes, unless the server turned transcripts off for that kind of ticket, we save a transcript: every message in the ticket channel with its text, embeds, timestamps, and a snapshot of the sender's name, avatar and role colour at that moment; attachment file names, sizes and links (the files themselves aren't copied, and Discord expires the links); the opener's form answers; what happened to the ticket (claimed, transferred, closed); and staff notes, which are marked staff-only.
+**What's stored.** While a ticket is open we store its record (see the table above) but not its messages. When it closes, unless the server turned transcripts off for that kind of ticket, we save a transcript: the ticket channel's messages (the first 10,000, which covers any normal ticket) with their text, embeds, timestamps, and a snapshot of the sender's name, avatar and role colour at that moment; attachment file names, sizes and links (the files themselves aren't copied, and Discord expires the links); the opener's form answers; what happened to the ticket (claimed, transferred, closed); and staff notes, which are marked staff-only.
 
 **Who's told.** Each ticket's first message says whether it's being recorded and for how long.
 
