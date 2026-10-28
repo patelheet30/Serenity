@@ -61,6 +61,13 @@ def test_tickets_arent_loaded_without_an_allowlist(monkeypatch):
     client.unload_extension("serenity.extensions.tickets")
 
 
+def test_panel_styles_map_to_stored_values():
+    # Stored values are the ticket_panels.style CHECK.
+    assert choices(tickets.panel_post, "style") == {"Buttons": "buttons", "Dropdown": "menu"}
+    assert default(tickets.panel_post, "style") == "buttons"
+    assert choices(tickets.panel_edit, "style") == choices(tickets.panel_post, "style")
+
+
 def test_module_hook_gates_every_ticket_command(client):
     """The plugin-wide require_module hook reaches every /ticket command, subgroups included."""
     # The plugin the client loaded: unload_extension drops the module, so a reload is a new one.

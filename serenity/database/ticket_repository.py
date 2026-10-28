@@ -204,6 +204,11 @@ class TicketRepository:
         )
         return dict(row) if row else None
 
+    async def panel_message_ids(self) -> list[int]:
+        pool = self._require_pool()
+        rows = await pool.fetch("SELECT message_id FROM ticket_panels WHERE message_id IS NOT NULL")
+        return [r["message_id"] for r in rows]
+
     async def forget_panel_message(self, message_id: int) -> Optional[dict]:
         """The panel's message was deleted by hand: keep the panel, unpost it."""
         pool = self._require_pool()
