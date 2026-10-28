@@ -75,6 +75,9 @@ CREATE UNIQUE INDEX idx_tickets_channel ON tickets (channel_id) WHERE channel_id
 CREATE INDEX idx_tickets_queue ON tickets (guild_id, status);
 CREATE INDEX idx_tickets_type_stage ON tickets (guild_id, type_id, stage);
 CREATE INDEX idx_tickets_opener ON tickets (guild_id, opener_id, type_id) WHERE status = 'open';
+-- Auto-unclaim's sweep: claimed tickets waiting on staff, oldest activity first.
+CREATE INDEX idx_tickets_awaiting_staff ON tickets (last_activity_at)
+    WHERE status = 'open' AND assignee_id IS NOT NULL AND waiting_on = 'staff';
 
 -- Everyone who handled a ticket. `credited` is set on close for handlers who sent a message.
 CREATE TABLE ticket_handlers (
