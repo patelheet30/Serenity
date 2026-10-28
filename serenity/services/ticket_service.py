@@ -26,6 +26,8 @@ CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
+MAX_STAGES = 25  # the stage dropdown's option limit
+TOPIC_INTERVAL = 300  # Discord allows two topic edits per channel per 10 minutes
 
 # What the opener and staff can do in a ticket channel.
 TICKET_MEMBER_ALLOW = (
@@ -62,6 +64,48 @@ def parse_questions(text: str) -> list[dict]:
             {"key": key, "label": label, "style": "paragraph", "required": True, "max_length": 1000}
         )
     return fields
+
+
+def parse_color(text: str) -> int:
+    """A stage colour from "#5865F2" or "5865f2"."""
+    try:
+        color = int(text.strip().lstrip("#"), 16)
+    except ValueError:
+        color = -1
+    if not 0 <= color <= 0xFFFFFF:
+        raise TicketError(f"“{text}” isn't a hex colour like #5865F2.")
+    return color
+
+
+def with_stage(stages: list[dict], stage: dict, position: Optional[int] = None) -> list[dict]:
+    """`stages` with `stage` added, or replacing the one with its name in place.
+
+    `position` is 1-based; without it a new stage goes last and an existing one stays put.
+    """
+    names = [s["name"].lower() for s in stages]
+    rest = [s for s in stages if s["name"].lower() != stage["name"].lower()]
+    if stage["name"].lower() in names and position is None:
+        position = names.index(stage["name"].lower()) + 1
+    if len(rest) >= MAX_STAGES:
+        raise TicketError(f"A ticket type can have at most {MAX_STAGES} stages.")
+    index = len(rest) if position is None else min(max(position, 1) - 1, len(rest))
+    return [*rest[:index], stage, *rest[index:]]
+
+
+def find_stage(ticket_type: dict, name: Optional[str]) -> Optional[dict]:
+    if name is None:
+        return None
+    return next((s for s in ticket_type["stages"] if s["name"].lower() == name.lower()), None)
+
+
+def render_topic(ticket: dict, ticket_type: dict) -> str:
+    """A ticket channel's topic: where it stands and whose turn it is."""
+    parts = [f"Ticket #{ticket['number']}", ticket_type["name"]]
+    if ticket["stage"]:
+        parts.append(ticket["stage"])
+    # No opener name: it would need a member fetch on every refresh, and topics don't resolve mentions.
+    parts.append(f"waiting on {'staff' if ticket['waiting_on'] == 'staff' else 'member'}")
+    return " · ".join(parts)[:1024]
 
 
 def render_channel_name(
@@ -183,6 +227,10 @@ class TicketService:
         # The creation queue: one ticket channel at a time per guild, so limits are checked
         # against settled counts and overflow categories aren't created twice.
         self._open_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Pending topic edits and when each channel's topic was last edited (monotonic).
+        # ponytail: in memory, so a restart drops a pending edit until the ticket next changes.
+        self._topic_tasks: dict[int, asyncio.Task] = {}
+        self._topic_edited: dict[int, float] = {}
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
@@ -408,7 +456,7 @@ class TicketService:
                     ),
                     category=category_id if category_id is not None else hikari.UNDEFINED,
                     permission_overwrites=self.overwrites(guild_id, ticket_type, [member.id]),
-                    topic=f"Ticket #{ticket['number']} · {ticket_type['name']} · opened by {member.username}",
+                    topic=render_topic(ticket, ticket_type),
                     reason=f"Ticket #{ticket['number']} opened by {member.username}",
                 )
             except BaseException as exc:
@@ -464,6 +512,10 @@ class TicketService:
         if ticket_type["claim_mode"] in ("button", "both"):
             row.add_interactive_button(
                 hikari.ButtonStyle.SUCCESS, f"ticket:claim:{ticket['id']}", label="Claim", emoji="🙋"
+            )
+        if ticket_type["stages"]:
+            row.add_interactive_button(
+                hikari.ButtonStyle.SECONDARY, f"ticket:stagemenu:{ticket['id']}", label="Stage", emoji="🏷️"
             )
         staff = " ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"])
         await self.rest.create_message(
@@ -542,7 +594,11 @@ class TicketService:
             return
         ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
         staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
-        await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
+        updated = await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
+        if updated is None:  # the ticket was rolled back (failed open) a moment ago
+            return
+        if updated["waiting_on"] != ticket["waiting_on"]:
+            self.schedule_topic(event.channel_id)
         if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]
             try:
                 await self.claim(ticket, event.author_id, announce=False)
@@ -648,6 +704,7 @@ class TicketService:
 
         if ticket["channel_id"]:
             self.open_channels.discard(ticket["channel_id"])
+            self._topic_edited.pop(ticket["channel_id"], None)
             try:
                 await self.rest.delete_channel(ticket["channel_id"], reason=f"Ticket #{ticket['number']} closed")
             except hikari.NotFoundError:
@@ -726,6 +783,8 @@ class TicketService:
                 self.channel_name(ticket, ticket_type, self._opener_name(ticket)),  # type: ignore[arg-type]
                 category=await self._category(guild_id, ticket_type["category_id"]) or hikari.UNDEFINED,  # type: ignore[index]
                 permission_overwrites=self.overwrites(guild_id, ticket_type, [ticket["opener_id"]]),  # type: ignore[arg-type]
+                # reopen_ticket sets waiting_on back to staff
+                topic=render_topic({**ticket, "waiting_on": "staff"}, ticket_type),  # type: ignore[arg-type]
                 reason=f"Ticket #{number} reopened by {actor.username}",
             )
             reopened = await self.repo.reopen_ticket(ticket["id"], channel.id, actor.id)
@@ -844,7 +903,9 @@ class TicketService:
 
         async with self._open_locks[ticket["guild_id"]]:  # _category may create an overflow
             category = await self._category(ticket["guild_id"], new_type["category_id"])
-            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"])
+            # Stages are per type, so the ticket starts the new type's workflow.
+            first = new_type["stages"][0]["name"] if new_type["stages"] else None
+            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"], stage=first)
             await self.rest.edit_channel(
                 ticket["channel_id"],
                 parent_category=category if category is not None else hikari.UNDEFINED,
@@ -869,4 +930,67 @@ class TicketService:
             f"🔀 Moved to **{self.type_label(new_type)}** by <@{actor_id}>. {roles}".strip(),
             role_mentions=new_type["staff_role_ids"],
         )
+        self.schedule_topic(ticket["channel_id"])
         return updated  # type: ignore[return-value]
+
+    # Stages
+
+    async def set_stage(self, ticket: dict, ticket_type: dict, name: str, actor_id: int) -> dict:
+        """Move a ticket to one of its type's stages; a terminal stage offers to close."""
+        stage = find_stage(ticket_type, name)
+        if stage is None:
+            raise TicketError(f"**{ticket_type['name']}** tickets have no stage called **{name}**.")
+        if ticket["stage"] == stage["name"]:
+            raise TicketError(f"This ticket is already at **{stage['name']}**.")
+        updated = await self.repo.update_ticket(ticket["id"], stage=stage["name"])
+        await self.repo.add_event(
+            ticket["id"], "stage", actor_id, {"from": ticket["stage"], "to": stage["name"]}
+        )
+        # In the channel, so the transcript shows it too.
+        embed = hikari.Embed(
+            description=f"🏷️ <@{actor_id}> moved this ticket to **{stage['name']}**.",
+            color=hikari.Color(stage["color"]) if stage["color"] is not None else PANEL_COLOR,
+        )
+        rows = []
+        if stage["terminal"]:
+            rows.append(
+                self.rest.build_message_action_row().add_interactive_button(
+                    hikari.ButtonStyle.DANGER, f"ticket:closeas:{ticket['id']}",
+                    label=f"Close as {stage['name']}"[:80], emoji="🔒",
+                )
+            )
+        await self.rest.create_message(ticket["channel_id"], embed=embed, components=rows)
+        await self.log(
+            updated, ticket_type, "stage", actor_id, f"{ticket['stage'] or 'No stage'} → {stage['name']}"  # type: ignore[arg-type]
+        )
+        self.schedule_topic(ticket["channel_id"])
+        return updated  # type: ignore[return-value]
+
+    def schedule_topic(self, channel_id: int) -> None:
+        """Bring a ticket channel's topic up to date, at most once per TOPIC_INTERVAL.
+
+        A burst of changes becomes one edit: the pending one reads the ticket when it runs.
+        """
+        if channel_id in self._topic_tasks:
+            return
+        delay = max(0.0, self._topic_edited.get(channel_id, -TOPIC_INTERVAL) + TOPIC_INTERVAL - time.monotonic())
+        self._topic_tasks[channel_id] = asyncio.create_task(self._edit_topic(channel_id, delay))
+
+    async def _edit_topic(self, channel_id: int, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            self._topic_tasks.pop(channel_id, None)  # changes from here on schedule a new edit
+        try:
+            ticket = await self.repo.get_ticket_by_channel(channel_id)
+            if ticket is None or ticket["status"] != "open":
+                return
+            ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+            topic = render_topic(ticket, ticket_type)  # type: ignore[arg-type]
+            channel = self.cache.get_guild_channel(channel_id)
+            if channel is not None and getattr(channel, "topic", None) == topic:
+                return
+            self._topic_edited[channel_id] = time.monotonic()
+            await self.rest.edit_channel(channel_id, topic=topic)
+        except Exception as exc:  # a topic is cosmetic; never let it break the ticket
+            logger.warning(f"Couldn't update the topic of ticket channel {channel_id}: {exc}")

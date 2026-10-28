@@ -15,9 +15,12 @@ from serenity.services.ticket_service import (
     PRIORITIES,
     TicketError,
     TicketService,
+    find_stage,
     member_permissions,
+    parse_color,
     parse_questions,
     render_transcript,
+    with_stage,
 )
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -94,6 +97,9 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
     category = f"<#{ticket_type['category_id']}>" if ticket_type["category_id"] else "None"
     questions = "\n".join(f"• {f['label']}" for f in ticket_type["fields"]) or "None"
     retention = ticket_type["retention_days"]
+    stages = " → ".join(
+        s["name"] + (" ✓" if s["terminal"] else "") for s in ticket_type["stages"]
+    ) or "None"
     return (
         f"**{service.type_label(ticket_type)}**\n"
         f"Staff: {roles}\nCategory: {category}\n"
@@ -101,6 +107,7 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
         f"Channel name: `{ticket_type['name_template']}`\n"
         f"Transcripts: {'on' if ticket_type['transcripts'] else 'off'}"
         f" · Retention: {'server default' if retention is None else 'until deleted' if retention == 0 else f'{retention} days'}\n"
+        f"Stages: {stages}\n"
         f"Questions:\n{questions}"
     )
 
@@ -248,6 +255,77 @@ async def type_staff(
     await ctx.respond(
         f"✅ {role.mention} {'no longer handles' if removed else 'now handles'} "
         f"**{ticket_type['name']}** tickets. (Open tickets keep their current access.)",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
+@arc.slash_subcommand("stage-add", "Add a stage to a ticket type's workflow, or change one.")
+async def type_stage_add(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[
+        str, arc.StrParams("Stage name; an existing one is changed.", min_length=1, max_length=50)
+    ],
+    color: arc.Option[Optional[str], arc.StrParams("Hex colour, like #5865F2.", max_length=7)] = None,
+    terminal: arc.Option[
+        Optional[bool], arc.BoolParams("Reaching it offers to close the ticket with this outcome.")
+    ] = None,
+    auto_close: arc.Option[
+        Optional[bool], arc.BoolParams("Inactive tickets at this stage may be closed automatically.")
+    ] = None,
+    position: arc.Option[
+        Optional[int], arc.IntParams("Place in the order (1 = first, where new tickets start).", min=1)
+    ] = None,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    if not name.strip():
+        raise TicketError("A stage needs a name.")
+    # Changing a stage keeps whatever isn't given; a new one gets the defaults.
+    existing = find_stage(ticket_type, name.strip()) or {
+        "color": None, "terminal": False, "auto_close": True
+    }
+    stage = {
+        "name": name.strip(),
+        "color": parse_color(color) if color else existing["color"],
+        "terminal": existing["terminal"] if terminal is None else terminal,
+        "auto_close": existing["auto_close"] if auto_close is None else auto_close,
+    }
+    stages = with_stage(ticket_type["stages"], stage, position)
+    updated = await repo.update_type(guild_id, ticket_type["id"], stages=stages)
+    if updated is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="✅ Stage saved", description=describe_type(updated, service), color=_GREEN
+        ),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
+@arc.slash_subcommand("stage-remove", "Remove a stage from a ticket type's workflow.")
+async def type_stage_remove(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[str, arc.StrParams("Stage name.", max_length=50)],
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    stage = find_stage(ticket_type, name)
+    if stage is None:
+        raise TicketError(f"**{ticket_type['name']}** has no stage called **{name}**.")
+    stages = [s for s in ticket_type["stages"] if s is not stage]
+    if await repo.update_type(guild_id, ticket_type["id"], stages=stages) is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        f"🗑️ Removed **{stage['name']}** from **{ticket_type['name']}**. "
+        "Tickets already at it keep it until they're moved.",
         flags=hikari.MessageFlag.EPHEMERAL,
     )
 
@@ -586,8 +664,32 @@ async def transfer(
         await ctx.edit_initial_response(f"❌ {exc}")
 
 
+async def stage_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list[str]:
+    """The stages of the ticket in the channel the command is typed in."""
+    repo = data.client.get_type_dependency(TicketRepository)
+    found = await repo.get_ticket_by_channel(data.channel_id) if data.channel_id else None
+    if found is None:
+        return []
+    ticket_type = await repo.get_type(found["guild_id"], found["type_id"])
+    typed = (data.focused_value or "").lower()
+    return [s["name"] for s in (ticket_type or {}).get("stages", []) if typed in s["name"].lower()][:25]
+
+
 @ticket.include
-@arc.slash_subcommand("note", "Add a private staff note (never shown to the opener).")
+@arc.slash_subcommand("stage", "Move this ticket to another stage of its workflow.")
+async def move_stage(
+    ctx: arc.GatewayContext,
+    stage: arc.Option[str, arc.StrParams("The stage.", autocomplete_with=stage_names)],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.set_stage(current, ticket_type, stage, ctx.user.id)
+    await ctx.respond("✅ Stage changed.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@ticket.include
+@arc.slash_subcommand("note","Add a private staff note (never shown to the opener).")
 async def note(
     ctx: arc.GatewayContext,
     text: arc.Option[str, arc.StrParams("The note.", max_length=2000)],
@@ -872,6 +974,39 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
                 hikari.ResponseType.MESSAGE_UPDATE, "🔒 Closing this ticket…", components=[]
             )
             await service.close(current, ticket_type, interaction.user.id, "Opener agreed to close")
+        elif action == "stagemenu" and isinstance(interaction, hikari.ComponentInteraction):
+            # Built when pressed, so it shows the type's stages as they are now.
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            if not ticket_type["stages"]:
+                raise TicketError(f"**{ticket_type['name']}** tickets have no stages.")
+            menu = service.rest.build_message_action_row().add_text_menu(
+                f"ticket:stage:{target}", placeholder="Move to stage…"
+            )
+            for s in ticket_type["stages"]:
+                menu.add_option(s["name"], s["name"], is_default=s["name"] == current["stage"])
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE, component=menu.parent, flags=hikari.MessageFlag.EPHEMERAL
+            )
+        elif action == "stage" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            # Acknowledged first: set_stage posts to the channel and the log, which can take a while.
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE, f"Moving to **{interaction.values[0]}**…", components=[]
+            )
+            await service.set_stage(current, ticket_type, interaction.values[0], interaction.user.id)
+            await interaction.edit_initial_response(f"✅ Moved to **{interaction.values[0]}**.")
+        elif action == "closeas" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            stage = find_stage(ticket_type, current["stage"])
+            if stage is None or not stage["terminal"]:
+                raise TicketError("This ticket has moved on from that stage since.")
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE, "🔒 Closing this ticket…", components=[]
+            )
+            await service.close(current, ticket_type, interaction.user.id, stage["name"])
         else:
             await reply(interaction, "This button isn't available yet.")
     except TicketError as exc:
