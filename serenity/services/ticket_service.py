@@ -821,7 +821,7 @@ class TicketService:
             )
         except (hikari.NotFoundError, hikari.ForbiddenError):
             raise TicketError("I can't read this channel's permissions, so I can't move it.") from None
-        overwrites = getattr(channel, "permission_overwrites", {}).values()
+        overwrites = channel.permission_overwrites.values()  # type: ignore[union-attr]
         me = self.cache.get_me()
         members = [
             ow.id
