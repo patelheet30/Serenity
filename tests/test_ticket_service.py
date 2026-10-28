@@ -78,3 +78,19 @@ async def test_panel_deleted_by_hand_is_reposted():
     repo.forget_panel_message.assert_awaited_once_with(555)
     await service.panel_message_deleted(1234)  # not a panel: no query
     assert repo.forget_panel_message.await_count == 1
+
+
+def test_render_channel_name():
+    from serenity.services.ticket_service import overflow_name, render_channel_name
+
+    def render(template, **fields):
+        return render_channel_name(
+            template, type_name="Billing Help", number=12, username="Heet.P", fields=fields
+        )
+
+    assert render("{type}-{number}") == "billing-help-12"
+    assert render("{user} {field:order}", order="#A-99 x") == "heet-p-a-99-x"
+    assert render("{field:missing}🎫") == "ticket-12"  # emoji are dropped with other symbols
+    assert render("!!!") == "ticket-12"
+    assert len(render("x" * 200)) == 100
+    assert [overflow_name("Support", i) for i in (1, 2)] == ["Support", "Support 2"]
