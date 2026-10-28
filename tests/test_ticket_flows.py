@@ -520,3 +520,27 @@ async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: Ti
     with pytest.raises(RuntimeError):
         await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
     assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: TicketService):
+    other_role = 1_241_890_335_472_164_907
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    billing = await service.repo.create_type(GUILD, "Billing", staff_role_ids=[other_role])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    guest = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(CAROL), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.cache.get_guild_channel.return_value = None
+    service.cache.get_member.return_value = None
+    service.rest.fetch_channel.return_value = MagicMock(permission_overwrites={CAROL: guest})
+
+    await service.transfer(ticket, support, billing, BOB)
+    move = service.rest.edit_channel.call_args_list[0].kwargs
+    assert CAROL in {o.id for o in move["permission_overwrites"]}  # the guest kept access
+
+    service.rest.fetch_channel.side_effect = hikari.NotFoundError("", {}, b"")
+    moved = await service.repo.get_ticket_by_id(ticket["id"])
+    with pytest.raises(TicketError, match="can't read this channel"):
+        await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
