@@ -1,13 +1,13 @@
 # Privacy Policy
 
 **Serenity Discord Bot**  
-Last updated: October 2026
+Last updated: 28 October 2026
 
 ---
 
 ## Overview
 
-Serenity ("the bot", "we", "our") is an open-source Discord bot that provides automatic slowmode management, audit logging, and moderation tools for Discord servers. This policy explains what data we collect, how we use it, and your rights regarding that data.
+Serenity ("the bot", "we", "our") is an open-source Discord bot that provides automatic slowmode management, audit logging, moderation tools and support tickets for Discord servers. This policy explains what data we collect, how we use it, and your rights regarding that data.
 
 ---
 
@@ -25,14 +25,35 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 | Warning records | Track active warnings per user per server | Until cleared by a server administrator via `/clearwarns`, or until deletion is requested via our support server |
 | Log channel configuration | Store which Discord channels receive which categories of audit logs, and any configured ignore lists | Until deletion is requested via our support server |
 | Historical message rate patterns | Aggregated hourly message-per-minute averages per channel used to detect anomalous activity — **not individual messages** | Automatically deleted after 30 days |
+| Ticket records | For each support ticket: its number, type, opener, assigned staff, priority, form answers, timestamps, close reason, and who handled it | Until deletion is requested via our support server |
+| Ticket transcripts | A copy of a closed ticket's messages (see [Tickets](#tickets)) | 30 days after the ticket closes by default; see [Tickets](#tickets) |
+| Ticket staff notes | Private notes staff add to a ticket | Deleted with the ticket's transcript |
 
 ### Data We Do Not Store
 
-- **Message content** — We never store the text of any message. Message content may be read from Discord's temporary cache at the moment a delete or edit event fires in order to send a log embed to your server's configured log channel, but it is never written to our database.
-- **Usernames, display names, or avatars** — We store user IDs only.
+- **Message content outside tickets** — We never store the text of messages anywhere except ticket channels (see [Tickets](#tickets)). For logging, message content may be read from Discord's temporary cache at the moment a delete or edit event fires in order to send a log embed to your server's configured log channel, but it is never written to our database.
+- **Usernames, display names, or avatars outside ticket transcripts** — Everywhere else we store user IDs only.
 - **Voice audio** — We only track voice state events (join/leave/move), never audio.
-- **Direct messages** — The bot does not operate in DMs.
+- **Direct messages** — The bot doesn't read DMs. Its only DMs are the close notice it sends a ticket's opener (see [Tickets](#tickets)).
 - **Email addresses, IP addresses, or any personal contact information.**
+
+---
+
+## Tickets
+
+Tickets are the one place Serenity stores message content. Servers turn them on with the Tickets module; if a server doesn't use tickets, none of this applies.
+
+**What's stored.** While a ticket is open we store its record (see the table above) but not its messages. When it closes, unless the server turned transcripts off for that kind of ticket, we save a transcript: every message in the ticket channel with its text, embeds, timestamps, and a snapshot of the sender's name, avatar and role colour at that moment; attachment file names, sizes and links (the files themselves aren't copied, and Discord expires the links); the opener's form answers; what happened to the ticket (claimed, transferred, closed); and staff notes, which are marked staff-only.
+
+**Who's told.** Each ticket's first message says whether it's being recorded and for how long.
+
+**Who can see it.** The opener receives a copy of the transcript by DM when the ticket closes, without staff notes. Inside the server, the ticket's staff and server administrators can read transcripts, including staff notes.
+
+**How long it's kept.** Transcripts are kept for 30 days after the ticket closes by default. Server administrators can change that to anything from 7 to 365 days, or keep a kind of ticket's transcripts until they delete them. Expired transcripts are permanently deleted every night. A transcript that staff have marked as evidence for a moderation case is kept past its expiry until that hold is released. Reopening a ticket keeps its transcript until it closes again.
+
+**Deletion.** Server administrators can delete any transcript with `/ticket transcript delete`. As the opener, you can ask for yours to be deleted with the button in the close DM, which notifies the server's staff, or by contacting us via our support server.
+
+**Backups.** Deleted transcripts can remain in our database backups for up to 30 more days before those backups are themselves deleted.
 
 ---
 
@@ -43,6 +64,7 @@ Data collected is used solely to operate and improve Serenity's features:
 - **Guild and channel configuration** is used to know where to apply slowmode and where to send log embeds.
 - **Message activity counts** are used to calculate message rates for the slowmode engine. Individual messages are never identified.
 - **Moderation case and warning data** is used to power the `/case`, `/cases`, `/warnings`, and `/modstats` commands within your server.
+- **Ticket records and transcripts** are used to run the server's support tickets: routing them to staff, showing what happened in a ticket, and giving the opener a copy when it closes.
 - **Ignore lists** are used to exclude specific channels or users from audit log embeds.
 - **Aggregated usage metrics** (how many logs of each type are posted per server, how often each command is used) are used to see which features are used and improve the bot. They cannot identify any individual user.
 
@@ -96,11 +118,13 @@ Serenity's primary data store is a PostgreSQL database on a self-hosted server. 
 - **Request data deletion**: To request full deletion of your server's data, contact us via our support server. We will action all requests within a reasonable timeframe.
 - **Manage moderation records**: Moderation cases and warnings can be managed through the bot's own commands (`/clearwarns`, `/case-edit`).
 - **Manage log configuration**: Logging configuration can be updated or removed at any time via `/logging` commands.
+- **Manage tickets**: Transcript retention can be set with `/ticket settings retention` (and per ticket type), transcripts deleted with `/ticket transcript delete`, and transcripts turned off per ticket type.
 
 ### Individual Users
 
 - **Opt out of logging**: Server administrators can add you to a logging ignore list via `/logging ignore-user`. This will exclude your actions from audit log embeds in that server.
-- **Request data deletion**: You may contact us via our support server to request that any records containing your user ID (moderation cases, warnings) be removed. Note that moderation records belong to the server they were issued in, so we may require consent from the relevant server administrator before removing them.
+- **Ticket transcripts**: You'll get a copy of your ticket's transcript when it closes, and can ask for it to be deleted with the button in that message.
+- **Request data deletion**: You may contact us via our support server to request that any records containing your user ID (moderation cases, warnings, tickets) be removed. Note that moderation records belong to the server they were issued in, so we may require consent from the relevant server administrator before removing them.
 
 ---
 
@@ -108,6 +132,7 @@ Serenity's primary data store is a PostgreSQL database on a self-hosted server. 
 
 - **Message activity records** are automatically deleted after **24 hours**.
 - **Historical pattern data** is automatically deleted after **30 days**.
+- **Ticket transcripts** are deleted **30 days** after a ticket closes by default (7–365 days, or until deleted, as the server chooses), unless held as evidence for a moderation case.
 - **All other data** — including server configuration, log channel configuration, moderation cases, and warnings — is retained until a server administrator removes it via bot commands, or until deletion is requested via our support server.
 
 ---
