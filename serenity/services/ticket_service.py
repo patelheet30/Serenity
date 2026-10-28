@@ -681,7 +681,12 @@ class TicketService:
         kwargs: dict = {}
         rows: list[hikari.api.MessageActionRowBuilder] = []
         # Not asked again after a reopen if they already rated it.
-        if ticket_type["ratings"] and not await self.repo.get_rating(ticket["id"]):
+        try:
+            ask = ticket_type["ratings"] and await self.repo.get_rating(ticket["id"]) is None
+        except Exception:  # the close already happened; send the DM without the buttons
+            logger.exception(f"Couldn't check the rating of closed ticket {ticket['id']}")
+            ask = False
+        if ask:
             embed.add_field("How did we do?", "Rate your experience from 1 (poor) to 5 (great).")
             rows.append(self.rest.build_message_action_row())
             for n in range(1, 6):

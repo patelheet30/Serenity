@@ -4,6 +4,7 @@ import asyncio
 import itertools
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import hikari
 import pytest
 from hikari.impl import MessageActionRowBuilder
@@ -593,8 +594,14 @@ async def test_opener_rates_once_from_the_close_dm(service: TicketService, monke
     late = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
     await service.close(late, support, BOB, None)
     await service.repo.pool.execute("UPDATE tickets SET closed_at = closed_at - 8 * 86400 WHERE id = $1", late["id"])
-    with pytest.raises(TicketError, match="7 days"):
+    with pytest.raises(TicketError, match="for 7 days"):  # the default window
         await service.rate(late["id"], BOB, 4, None)
+    with pytest.raises(TicketError, match="from 1 to 5"):
+        await service.rate(late["id"], BOB, 6, None)
+    with pytest.raises(asyncpg.CheckViolationError):  # and the table holds the line too
+        await service.repo.add_rating(late["id"], BOB, 6, None)
+    await service.modules.update_module_settings(GUILD, ModuleType.TICKETS, {"rating_window_days": 10})
+    assert (await service.rate(late["id"], BOB, 4, None))["rating"] == 4  # /ticket settings ratings
     appeals = await service.repo.create_type(GUILD, "Appeals", ratings=False)
     appeal = await service.open_ticket(GUILD, member(ALICE, "alice"), appeals, {})
     await service.close(appeal, appeals, ALICE, None)
@@ -602,3 +609,11 @@ async def test_opener_rates_once_from_the_close_dm(service: TicketService, monke
                for c in r.components)
     with pytest.raises(TicketError, match="aren't rated"):
         await service.rate(appeal["id"], ALICE, 4, None)
+
+    # A failed rating lookup costs the buttons, not the close.
+    monkeypatch.setattr(service.repo, "get_rating", AsyncMock(side_effect=asyncpg.PostgresError()))
+    last = await service.open_ticket(GUILD, member(CAROL, "carol"), support, {})
+    await service.close(last, support, CAROL, None)
+    rows = service.rest.create_message.call_args.kwargs["components"]
+    assert [c.custom_id for r in rows for c in r.components] == [f"ticket:delreq:{last['id']}"]
+    assert service.logging.log_ticket_event.call_args.kwargs["kind"] == "closed"
