@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import re
 import time
 from collections import defaultdict
@@ -1538,6 +1539,10 @@ class TicketService:
                 hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
                 label="Ask to delete this transcript",
             ))
+            if dashboard := os.getenv("DASHBOARD_URL"):  # the viewer asks them to log in first
+                rows[-1].add_link_button(
+                    f"{dashboard.rstrip('/')}/transcripts/{ticket['id']}", label="View transcript"
+                )
         try:
             dm = await self.rest.create_dm_channel(ticket["opener_id"])
             # ponytail: DMs closed means no rating; the dashboard's transcript page can offer it later.

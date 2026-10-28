@@ -736,6 +736,58 @@ class TicketRepository:
         )
         return _decode(row)
 
+    async def list_transcripts(
+        self,
+        guild_id: int,
+        *,
+        type_ids: Optional[list[int]],
+        opener_id: Optional[int] = None,
+        handler_id: Optional[int] = None,
+        outcome: Optional[str] = None,
+        since: Optional[int] = None,
+        until: Optional[int] = None,
+        before: Optional[int] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Closed tickets with a transcript, newest number first, each with its retention, rating,
+        handler ids and outcome (staff, opener or auto). type_ids None is every type; `before`
+        is a ticket number, for paging."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT * FROM (
+                SELECT t.*, ty.name AS type_name, ty.emoji AS type_emoji, tr.expires_at,
+                    tr.held_by_case_number, tr.deletion_requested_at, r.rating,
+                    ARRAY(SELECT user_id FROM ticket_handlers h WHERE h.ticket_id = t.id
+                        ORDER BY h.joined_at, h.user_id) AS handler_ids,
+                    CASE WHEN EXISTS (SELECT 1 FROM ticket_events e
+                            WHERE e.ticket_id = t.id AND e.kind = 'auto_closed') THEN 'auto'
+                        WHEN t.closed_by = t.opener_id THEN 'opener' ELSE 'staff' END AS outcome
+                FROM ticket_transcripts tr
+                JOIN tickets t ON t.id = tr.ticket_id
+                JOIN ticket_types ty ON ty.id = t.type_id
+                LEFT JOIN ticket_ratings r ON r.ticket_id = t.id
+                WHERE tr.guild_id = $1 AND t.status = 'closed'
+                    AND ($2::bigint[] IS NULL OR t.type_id = ANY($2))
+                    AND ($3::bigint IS NULL OR t.opener_id = $3)
+                    AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM ticket_handlers h
+                        WHERE h.ticket_id = t.id AND h.user_id = $4))
+                    AND ($5::bigint IS NULL OR t.closed_at >= $5)
+                    AND ($6::bigint IS NULL OR t.closed_at < $6)
+                    AND ($7::int IS NULL OR t.number < $7)
+            ) x WHERE ($8::text IS NULL OR outcome = $8)
+            ORDER BY number DESC LIMIT $9""",
+            guild_id,
+            type_ids,
+            opener_id,
+            handler_id,
+            since,
+            until,
+            before,
+            outcome,
+            limit,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
     async def hold_transcript(self, ticket_id: int, case_number: Optional[int]) -> bool:
         """Keep a transcript as evidence for a mod case (None releases it)."""
         pool = self._require_pool()
