@@ -31,9 +31,9 @@
 
 	const all = $derived(session.guilds ?? []);
 	const match = (g: Guild) => g.name.toLowerCase().includes(q.trim().toLowerCase());
-	const ready = $derived(all.filter((g) => g.manageable && g.installed && match(g)));
+	const ready = $derived(all.filter((g) => (g.manageable || g.staff) && g.installed && match(g)));
 	const invite = $derived(all.filter((g) => g.manageable && !g.installed && match(g)));
-	const noPerm = $derived(all.filter((g) => !g.manageable && match(g)));
+	const noPerm = $derived(all.filter((g) => !g.manageable && !g.staff && match(g)));
 	const rows = $derived([...ready, ...invite]);
 	$effect(() => {
 		sel = Math.min(sel, Math.max(0, rows.length - 1));
@@ -66,8 +66,8 @@
 	<button class="prow" role="option" id="pr-{g.id}" aria-selected={i === sel} tabindex="-1" onclick={() => open(g)} onmousemove={() => (sel = i)}>
 		<Avatar kind="guild" name={g.name} src={g.icon_url} />
 		<div>
-			<div class="nm">{g.name}</div>
-			<div class="sub">{g.installed ? 'Serenity active' : 'Serenity isn’t here yet'}</div>
+			<div class="nm">{g.name}{#if g.staff}<span class="sbadge">Staff</span>{/if}</div>
+			<div class="sub">{g.staff ? 'Tickets only' : g.installed ? 'Serenity active' : 'Serenity isn’t here yet'}</div>
 		</div>
 		<span class="go">
 			{#if g.installed}Open <Icon name="arrow" />{:else}<span class="btn sm">Invite <Icon name="ext" /></span>{/if}
@@ -86,7 +86,7 @@
 		<h1>Pick a server</h1>
 		<p>
 			{#if session.me}Signed in as <b>{session.me.username}</b>.{/if}
-			Showing servers where you have <span class="mono">Manage Server</span>.
+			Showing servers where you have <span class="mono">Manage Server</span> or handle tickets.
 		</p>
 		<div class="plist">
 			<div class="pin">

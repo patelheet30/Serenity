@@ -5,7 +5,11 @@ export type Guild = {
 	icon_url: string | null;
 	manageable: boolean;
 	installed: boolean;
+	/** Ticket staff without Manage Server: only Tickets opens. */
+	staff: boolean;
 };
+/** What the user can open in a guild; `tickets` is false outside the Tickets allowlist. */
+export type Access = { level: 'manage' | 'staff'; tickets: boolean };
 
 export type Channel = {
 	id: string;

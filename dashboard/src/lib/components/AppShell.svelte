@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import type { Guild, Me } from '../api';
-	import { SECTIONS, sectionCommands, serverCommands } from '../commands';
+	import { SECTIONS, sectionCommands, serverCommands, type Section } from '../commands';
 	import { openPalette, registerCommands } from '../palette.svelte';
 	import { MOD } from '../util';
 	import Avatar from './Avatar.svelte';
@@ -14,6 +14,7 @@
 		me,
 		guild,
 		guilds = [],
+		sections = SECTIONS,
 		section,
 		status,
 		children
@@ -21,12 +22,13 @@
 		me: Me;
 		guild: Pick<Guild, 'id' | 'name' | 'icon_url'>;
 		guilds?: Guild[];
+		sections?: Section[];
 		section: string;
 		status?: Snippet;
 		children: Snippet;
 	} = $props();
 
-	$effect(() => registerCommands([...sectionCommands(guild.id), ...serverCommands(guilds)]));
+	$effect(() => registerCommands([...sectionCommands(guild.id, sections), ...serverCommands(guilds)]));
 </script>
 
 <header class="top">
@@ -38,7 +40,7 @@
 			<Icon name="chev" />
 		</button>
 		<nav class="tabs" aria-label="Sections">
-			{#each SECTIONS as s (s.k)}
+			{#each sections as s (s.k)}
 				<a
 					class="tab"
 					title="g then {s.key}"

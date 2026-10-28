@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { api, ApiError, errorMessage, inviteUrl, type Channel } from '#lib/api.ts';
+	import { api, ApiError, errorMessage, inviteUrl, type Access, type Channel } from '#lib/api.ts';
 	import { autosave } from '#lib/autosave.svelte.ts';
-	import { SECTIONS } from '#lib/commands.ts';
+	import { SECTIONS, visibleSections } from '#lib/commands.ts';
 	import AppShell from '#lib/components/AppShell.svelte';
 	import AutosaveIndicator from '#lib/components/AutosaveIndicator.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
@@ -14,10 +14,15 @@
 	import Modules from '#lib/sections/Modules.svelte';
 	import Overview from '#lib/sections/Overview.svelte';
 	import Slowmode from '#lib/sections/Slowmode.svelte';
+	import Tickets from '#lib/sections/Tickets.svelte';
 	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
 
 	const guildId = $derived(page.params.guild!);
-	const section = $derived(SECTIONS.find((s) => s.k === page.params.section) ?? SECTIONS[0]);
+	let access = $state<Access | null>(null);
+	const sections = $derived(visibleSections(access));
+	const staff = $derived(access?.level === 'staff');
+	// Ticket staff land on Tickets; other sections they ask for are explained, not shown.
+	const section = $derived(SECTIONS.find((s) => s.k === page.params.section) ?? sections[0]);
 	const guild = $derived(
 		session.guilds?.find((g) => g.id === guildId) ?? { id: guildId, name: 'Server', icon_url: null }
 	);
@@ -33,17 +38,23 @@
 		);
 	});
 
-	// Every guild route is authorised server-side; this request doubles as the access check.
+	// Every guild route is authorised server-side; /access only says which sections to show.
 	$effect(() => {
 		if (!session.me) return; // wait for /me, so a failed login doesn't fire a doomed request
 		const id = guildId;
 		let stale = false; // a slower response for the previous server must not land here
+		access = null;
 		channels = null;
 		error = null;
-		api<Channel[]>(`/guilds/${id}/channels`).then(
-			(c) => !stale && (channels = c),
-			(e) => !stale && fail(e)
-		);
+		api<Access>(`/guilds/${id}/access`)
+			.then((a) => {
+				if (!stale) access = a;
+				return a.level === 'manage' ? api<Channel[]>(`/guilds/${id}/channels`) : [];
+			})
+			.then(
+				(c) => !stale && (channels = c),
+				(e) => !stale && fail(e)
+			);
 		return () => (stale = true);
 	});
 
@@ -68,7 +79,7 @@
 <svelte:head><title>{section.name} · {guild.name} · Serenity</title></svelte:head>
 
 {#if session.me}
-	<AppShell me={session.me} {guild} guilds={session.guilds ?? []} section={section.k}>
+	<AppShell me={session.me} {guild} guilds={session.guilds ?? []} {sections} section={section.k}>
 		{#snippet status()}<AutosaveIndicator status={autosave.status} savedAt={autosave.savedAt} />{/snippet}
 		{#if error || !channels}
 			<div class="phead">
@@ -93,6 +104,15 @@
 			<section class="pane"><EmptyState icon="warn">{error.message}</EmptyState></section>
 		{:else if !channels}
 			<section class="pane"><EmptyState>Loading…</EmptyState></section>
+		{:else if !sections.includes(section)}
+			<div class="phead"><div><h1>{section.name}</h1><p>{guild.name}</p></div></div>
+			<section class="pane">
+				<EmptyState icon="lock">
+					{staff ? 'You’re ticket staff here: this section needs Manage Server.' : 'Tickets aren’t available in this server yet.'}
+				</EmptyState>
+			</section>
+		{:else if section.k === 'tickets'}
+			<Tickets {guildId} sub={page.params.sub} {channels} {staff} onerror={fail} />
 		{:else if section.k === 'overview'}
 			<Overview {guildId} guildName={guild.name} {channels} onerror={fail} />
 		{:else if section.k === 'cases'}
