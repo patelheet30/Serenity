@@ -8,7 +8,7 @@ import asyncpg
 import hikari
 
 from serenity.core.hooks import require_module
-from serenity.core.modules import ModuleNotEnabledError, ModuleType
+from serenity.core.modules import ModuleNotEnabledError, ModuleType, tickets_guilds
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
     TicketError,
@@ -31,7 +31,10 @@ CLAIM_MODES = {"First staff reply": "reply", "Claim button": "button", "Both": "
 plugin = arc.GatewayPlugin("tickets", default_permissions=hikari.Permissions.MANAGE_MESSAGES)
 plugin.add_hook(require_module(ModuleType.TICKETS))
 
-ticket = plugin.include_slash_group("ticket", "Support tickets.")
+# Registered only in the TICKETS_GUILDS servers until Tickets launches, so nobody else sees it.
+ticket = plugin.include_slash_group(
+    "ticket", "Support tickets.", guilds=sorted(tickets_guilds()) or hikari.UNDEFINED
+)
 type_group = ticket.include_subgroup("type", "Configure the kinds of ticket members can open.")
 panel_group = ticket.include_subgroup("panel", "Post the messages members open tickets from.")
 blacklist_group = ticket.include_subgroup("blacklist", "Stop members from opening tickets.")
@@ -623,11 +626,15 @@ async def on_bulk_message_delete(event: hikari.GuildBulkMessageDeleteEvent) -> N
 
 @arc.loader
 def load(client: arc.GatewayClient) -> None:
+    if not tickets_guilds():  # otherwise the guild-less group would register globally
+        logger.info("Tickets not loaded: TICKETS_GUILDS is empty.")
+        return
     client.add_plugin(plugin)
-    logger.info("Ticket commands loaded.")
+    logger.info(f"Ticket commands loaded for {len(tickets_guilds())} server(s).")
 
 
 @arc.unloader
 def unload(client: arc.GatewayClient) -> None:
     auto_unclaim.stop()
-    client.remove_plugin(plugin)
+    if plugin.name in client.plugins:
+        client.remove_plugin(plugin)
