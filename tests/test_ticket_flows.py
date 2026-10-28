@@ -610,7 +610,7 @@ async def test_waiting_on_flips_edit_the_topic_at_most_once_per_interval(service
         if service.rest.edit_channel.await_count:
             break
         await asyncio.sleep(0.01)
-    service.rest.edit_channel.assert_awaited_once_with(channel, topic=f"Ticket #1 · Support · waiting on {ALICE}")
+    service.rest.edit_channel.assert_awaited_once_with(channel, topic="Ticket #1 · Support · waiting on member")
 
     await service.on_message(message(channel, member(ALICE, "alice")))  # back to staff
     await service.on_message(message(channel, staff(BOB, "bob")))
