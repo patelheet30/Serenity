@@ -90,11 +90,13 @@ class TicketRepository:
         return _decode(row)
 
     async def delete_type(self, guild_id: int, type_id: int) -> bool:
-        """Delete a type that has never had a ticket (tickets keep theirs for history)."""
+        """Delete a type that no panel shows and that has never had a ticket (tickets keep
+        theirs for history)."""
         pool = self._require_pool()
         status = await pool.execute(
             """DELETE FROM ticket_types t WHERE guild_id = $1 AND id = $2
-            AND NOT EXISTS (SELECT 1 FROM tickets WHERE type_id = t.id)""",
+            AND NOT EXISTS (SELECT 1 FROM tickets WHERE type_id = t.id)
+            AND NOT EXISTS (SELECT 1 FROM ticket_panels WHERE t.id = ANY(type_ids))""",
             guild_id,
             type_id,
         )
@@ -125,6 +127,17 @@ class TicketRepository:
 
     # Panels
 
+    async def _check_types(self, guild_id: int, type_ids: list[int]) -> None:
+        """Panels may only show the guild's own types (type_ids has no foreign key)."""
+        pool = self._require_pool()
+        found = await pool.fetchval(
+            "SELECT COUNT(*) FROM ticket_types WHERE guild_id = $1 AND id = ANY($2::bigint[])",
+            guild_id,
+            type_ids,
+        )
+        if found != len(set(type_ids)):
+            raise ValueError("Panels can only show this guild's ticket types.")
+
     async def create_panel(
         self,
         guild_id: int,
@@ -135,6 +148,7 @@ class TicketRepository:
         style: str = "buttons",
     ) -> dict:
         pool = self._require_pool()
+        await self._check_types(guild_id, type_ids)
         row = await pool.fetchrow(
             """INSERT INTO ticket_panels (guild_id, channel_id, title, description, style, type_ids, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *""",
@@ -171,6 +185,10 @@ class TicketRepository:
                 raise ValueError(f"Unknown ticket panel column: {key}")
             params.append(value)
             sets.append(f"{key} = ${len(params)}")
+        if not sets:
+            return await self.get_panel(guild_id, panel_id)
+        if "type_ids" in values:
+            await self._check_types(guild_id, values["type_ids"])
         row = await pool.fetchrow(
             f"UPDATE ticket_panels SET {', '.join(sets)} WHERE guild_id = $1 AND id = $2 RETURNING *",
             *params,
@@ -216,13 +234,16 @@ class TicketRepository:
                 """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at)
                 SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5
                 FROM tickets WHERE guild_id = $1
+                HAVING EXISTS (SELECT 1 FROM ticket_types WHERE id = $2 AND guild_id = $1)
                 RETURNING *""",
                 guild_id,
                 type_id,
                 opener_id,
-                json.dumps(fields),
+                _encode("fields", fields),
                 now,
             )
+            if row is None:  # the type belongs to another guild (the FK isn't guild-scoped)
+                raise ValueError(f"Ticket type {type_id} isn't in guild {guild_id}.")
             await conn.execute(
                 "INSERT INTO ticket_events (ticket_id, kind, actor_id, created_at) VALUES ($1, 'opened', $2, $3)",
                 row["id"],
@@ -265,6 +286,8 @@ class TicketRepository:
                 raise ValueError(f"Unknown ticket column: {key}")
             params.append(value)
             sets.append(f"{key} = ${len(params)}")
+        if not sets:
+            return await self.get_ticket_by_id(ticket_id)
         row = await pool.fetchrow(
             f"UPDATE tickets SET {', '.join(sets)} WHERE id = $1 RETURNING *", *params
         )
@@ -396,7 +419,7 @@ class TicketRepository:
             ticket_id,
             kind,
             actor_id,
-            json.dumps(data or {}),
+            _encode("data", data or {}),
             int(time.time()),
         )
 
@@ -440,7 +463,7 @@ class TicketRepository:
             expires_at = EXCLUDED.expires_at""",
             ticket_id,
             guild_id,
-            json.dumps(document),
+            _encode("document", document),
             int(time.time()),
             expires_at,
         )

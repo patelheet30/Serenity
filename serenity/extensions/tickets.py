@@ -236,7 +236,7 @@ async def type_staff(
 
 
 @type_group.include
-@arc.slash_subcommand("delete", "Delete a ticket type that has never had a ticket.")
+@arc.slash_subcommand("delete", "Delete a ticket type no panel shows and that has no tickets.")
 async def type_delete(
     ctx: arc.GatewayContext,
     type: TypeOption,
@@ -247,8 +247,8 @@ async def type_delete(
     ticket_type = await service.resolve_type(guild_id, type)
     if not await repo.delete_type(guild_id, ticket_type["id"]):
         raise TicketError(
-            f"**{ticket_type['name']}** has tickets, so it's kept for their history. "
-            "Remove it from your panels instead."
+            f"**{ticket_type['name']}** is still on a panel or has tickets (kept for their "
+            "history). Take it off your panels; types with tickets can't be deleted."
         )
     await ctx.respond(f"🗑️ Deleted the **{ticket_type['name']}** ticket type.")
 
