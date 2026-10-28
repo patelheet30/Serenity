@@ -96,8 +96,11 @@ def _slow_pattern(parsed: Any) -> bool:
                     return True
             elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
                 return True
-            elif op in (c.SUBPATTERN, c.ATOMIC_GROUP, c.ASSERT, c.ASSERT_NOT):
+            elif op in (c.SUBPATTERN, c.ASSERT, c.ASSERT_NOT):
                 if walk(av[-1], in_repeat):
+                    return True
+            elif op == c.ATOMIC_GROUP:  # its argument is the subpattern itself
+                if walk(av, in_repeat):
                     return True
         return False
 
