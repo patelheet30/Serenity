@@ -282,7 +282,44 @@ def test_type_field_option_choices_and_defaults():
     assert tickets.FIELD_KINDS["Dropdown"] == "select" and tickets.FIELD_KINDS["Member"] == "user"
     params = inspect.signature(tickets.type_field.callback).parameters
     defaults = {n: params[n].default for n in ("kind", "required", "identity", "staff_only", "remove")}
-    assert defaults == {"kind": "short", "required": True, "identity": False, "staff_only": False, "remove": False}
+    # None keeps an existing field's setting; set_field fills in a new field's defaults.
+    assert defaults == {"kind": None, "required": None, "identity": None, "staff_only": None, "remove": False}
+
+
+def test_changing_a_field_keeps_what_isnt_given():
+    from serenity.services.ticket_service import set_field
+
+    (ign,) = set_field([], "IGN", "pattern", options=IGN, identity=True, required=False)
+    (changed,) = set_field([ign], "ign", staff_only=True)  # the label is matched case-insensitively
+    assert changed == {**ign, "label": "ign", "staff_only": True}  # kind, pattern, identity kept
+    (back,) = set_field([changed], "IGN", staff_only=False)
+    assert back["required"] is True and back["identity"] is True  # asked again: required by default
+    (region,) = set_field([], "Region", "select", options="EU,NA")
+    assert set_field([region], "Region", required=False)[0]["options"] == ["EU", "NA"]
+    with pytest.raises(TicketError, match="dropdown needs"):  # a new kind needs its own options
+        set_field([ign], "IGN", "select")
+    (new,) = set_field([], "Order")
+    assert (new["type"], new["required"], "identity" in new) == ("short", True, False)
+
+
+def test_answers_to_removed_fields_stay_staff_only():
+    from unittest.mock import MagicMock
+
+    from hikari.impl import ModalActionRowBuilder
+
+    from serenity.extensions.tickets import text_inputs
+    from serenity.services.ticket_service import set_field
+
+    service = _service()
+    service.rest.build_modal_action_row = MagicMock(side_effect=ModalActionRowBuilder)
+    order = set_field([], "Order")
+    ticket = {"fields": {"order": "A-1", "verdict": "banned"}}  # Verdict was staff-only, now removed
+    embed = service.show_answers(hikari.Embed(), ticket, {"fields": order})
+    assert [(f.name, f.value) for f in embed.fields] == [("Order", "A-1")]
+
+    long_answer = {"order": "x" * 500}  # given when Order was a paragraph
+    (row,) = text_inputs(service, order, long_answer)
+    assert len(row.build()[0]["components"][0]["value"]) == 100
 
 
 def test_drafts_expire_and_are_capped(monkeypatch):

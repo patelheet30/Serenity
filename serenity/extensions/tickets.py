@@ -287,17 +287,22 @@ async def type_staff(
 async def type_field(
     ctx: arc.GatewayContext,
     type: TypeOption,
-    label: arc.Option[str, arc.StrParams("The question; an existing one is replaced.", max_length=45)],
-    kind: arc.Option[str, arc.StrParams("What the answer is.", choices=FIELD_KINDS)] = "short",
-    required: arc.Option[bool, arc.BoolParams("The opener must answer it.")] = True,
+    # Left out, these keep an existing field's setting; a new field is a required short text.
+    label: arc.Option[str, arc.StrParams("The question; an existing one is changed.", max_length=45)],
+    kind: arc.Option[
+        Optional[str], arc.StrParams("What the answer is (new fields: short text).", choices=FIELD_KINDS)
+    ] = None,
+    required: arc.Option[
+        Optional[bool], arc.BoolParams("The opener must answer it (new fields: yes).")
+    ] = None,
     options: arc.Option[
         Optional[str],
         arc.StrParams("Dropdown: options separated by commas. Pattern: the regex.", max_length=1000),
     ] = None,
     identity: arc.Option[
-        bool, arc.BoolParams("Link tickets with the same answer (e.g. an IGN), across types.")
-    ] = False,
-    staff_only: arc.Option[bool, arc.BoolParams("Never asked; staff fill it in.")] = False,
+        Optional[bool], arc.BoolParams("Link tickets with the same answer (e.g. an IGN), across types.")
+    ] = None,
+    staff_only: arc.Option[Optional[bool], arc.BoolParams("Never asked; staff fill it in.")] = None,
     remove: arc.Option[bool, arc.BoolParams("Remove this field instead.")] = False,
     repo: TicketRepository = arc.inject(),
     service: TicketService = arc.inject(),
@@ -850,7 +855,9 @@ def text_inputs(
             if field_type(f) == "paragraph"
             else hikari.TextInputStyle.SHORT,
             placeholder=placeholder(f),
-            value=(values or {}).get(f["key"]) or hikari.UNDEFINED,
+            # Clamped: Discord rejects a value longer than the input, and a field's type (so its
+            # max length) can change after answers were given.
+            value=((values or {}).get(f["key"]) or "")[: f.get("max_length", 1000)] or hikari.UNDEFINED,
             required=f["required"],
             max_length=f.get("max_length", 1000),
         )

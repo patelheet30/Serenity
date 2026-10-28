@@ -146,21 +146,30 @@ def parse_questions(text: str) -> list[dict]:
 def set_field(
     fields: list[dict],
     label: str,
-    kind: str,
+    kind: Optional[str] = None,
     *,
-    required: bool = True,
+    required: Optional[bool] = None,
     options: Optional[str] = None,
-    identity: bool = False,
-    staff_only: bool = False,
+    identity: Optional[bool] = None,
+    staff_only: Optional[bool] = None,
 ) -> list[dict]:
-    """`fields` with the field called `label` added, or replaced in place (keeping its key, so
-    answers already given still line up)."""
+    """`fields` with the field called `label` added, or changed in place (keeping its key, so
+    answers already given still line up). On a change, anything left as None keeps its current
+    value; for a new field it's a required short-text question."""
     label = label.strip()
     if not label or len(label) > MAX_LABEL:
         raise TicketError(f"A field's label is 1–{MAX_LABEL} characters.")
+    existing = next((f for f in fields if f["label"].lower() == label.lower()), None)
+    current = existing or {}
+    kind = kind or (field_type(existing) if existing else "short")
     if kind not in FIELD_TYPES:
         raise TicketError(f"Unknown field type {kind}.")
-    existing = next((f for f in fields if f["label"].lower() == label.lower()), None)
+    staff_only = bool(current.get("staff_only")) if staff_only is None else staff_only
+    identity = bool(current.get("identity")) if identity is None else identity
+    if required is None:
+        required = current["required"] if existing and not current.get("staff_only") else True
+    if options is None and existing and field_type(existing) == kind:  # same kind: keep its choices
+        options = ",".join(current["options"]) if kind == "select" else current.get("pattern")
     field: dict = {
         "key": existing["key"] if existing else _field_key(label, fields),
         "label": label,
@@ -737,15 +746,13 @@ class TicketService:
 
     def show_answers(self, embed: hikari.Embed, ticket: dict, ticket_type: dict) -> hikari.Embed:
         """The welcome embed's fields: the opener's answers, never staff-only ones (the opener
-        sees this message)."""
+        sees this message). Answers to fields removed since aren't shown either: they may have
+        been staff-only."""
         while embed.fields:
             embed.remove_field(0)
-        by_key = {f["key"]: f for f in ticket_type["fields"]}
-        for key, answer in ticket["fields"].items():
-            field = by_key.get(key)
-            if field is None or not field.get("staff_only"):
-                label = field["label"] if field else key
-                embed.add_field(label, answer_text(field, answer)[:1024] or "—")
+        for field in asked_fields(ticket_type):
+            if field["key"] in ticket["fields"]:
+                embed.add_field(field["label"], answer_text(field, ticket["fields"][field["key"]])[:1024] or "—")
         return embed
 
     async def edit_fields(
@@ -997,7 +1004,9 @@ class TicketService:
                 # with whatever was read, rather than leave it open forever.
                 logger.warning(f"Transcript of ticket {ticket['id']} is incomplete: {exc}")
         labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
-        staff_keys = {f["key"] for f in ticket_type["fields"] if f.get("staff_only")}
+        # Only answers to fields the opener is asked go in their copy; staff-only ones, and those
+        # of fields removed since (which may have been staff-only), are kept for staff.
+        opener_keys = {f["key"] for f in asked_fields(ticket_type)}
         return {
             "ticket": {
                 "number": ticket["number"],
@@ -1008,8 +1017,8 @@ class TicketService:
                 "closed_by": ticket.get("closed_by"),
                 "reason": ticket.get("close_reason"),
             },
-            "fields": {labels.get(k, k): v for k, v in ticket["fields"].items() if k not in staff_keys},
-            "staff_fields": {labels[k]: v for k, v in ticket["fields"].items() if k in staff_keys and v},
+            "fields": {labels[k]: v for k, v in ticket["fields"].items() if k in opener_keys},
+            "staff_fields": {labels.get(k, k): v for k, v in ticket["fields"].items() if k not in opener_keys and v},
             "messages": messages,
             "events": [
                 {"kind": e["kind"], "actor_id": e["actor_id"], "data": e["data"], "created_at": e["created_at"]}

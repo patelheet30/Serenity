@@ -591,6 +591,11 @@ async def test_invalid_ign_creates_nothing_and_identity_links_tickets_across_typ
     with pytest.raises(TicketError, match="IGN"):
         await service.edit_fields(other, report, {"ign": "x"}, BOB)
 
+    # Verdict is removed from the type: its answer stays out of the opener's transcript.
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    doc = await service.build_transcript(edited, {**report, "fields": ign})
+    assert doc["fields"] == {"IGN": "NOTCH_2"} and doc["staff_fields"] == {"verdict": "banned"}
+
 
 @pytest.mark.asyncio
 async def test_mod_action_links_the_case_and_holds_the_transcript(
