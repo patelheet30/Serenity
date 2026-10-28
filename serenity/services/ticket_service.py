@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Optional, Sequence
+from datetime import date, datetime, timezone
+from typing import Any, Optional, Sequence
+from urllib.parse import urlparse
 
 import hikari
 import toolbox
@@ -54,11 +56,78 @@ class TicketError(SerenityError):
     """A ticket action the member can't do; the message is shown to them as is."""
 
 
+FIELD_TYPES = ("short", "paragraph", "number", "date", "select", "url", "user", "pattern")
+PICKED = ("select", "user")  # asked with select menus after the form, since modals only hold text
+MAX_PICKED = 4  # those menus' rows, plus the row with the Open button
+MAX_OPTIONS = 25  # options in one select menu
+MAX_LENGTH = {"paragraph": 1000}  # answer length; 100 for everything else
+DRAFT_TTL = 15 * 60  # seconds a half-filled form waits for its dropdown picks
+MAX_DRAFTS = 1000  # half-filled forms kept at once, across guilds
+
+
+def field_type(field: dict) -> str:
+    return field.get("type") or field.get("style", "paragraph")  # fields from before #60 only have a style
+
+
+def _field_key(label: str, fields: list[dict]) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:32] or f"q{len(fields) + 1}"
+    while key in {f["key"] for f in fields}:
+        key += "_"
+    return key
+
+
+MAX_OPEN_REPEATS = 3  # wide repeats (`*`, `+`, `{0,100}`): on 100 characters, ~100^3 steps
+MAX_VARIABLE_REPEATS = 6  # `?` and `{0,n}` too: each one can double the paths
+
+
+def _slow_pattern(parsed: Any) -> bool:
+    """Whether a parsed regex can backtrack badly. Patterns run on the event loop, and Python's
+    re has no timeout, so the shapes behind catastrophic backtracking are refused up front:
+    a repeat or `|` inside any repeat (bounded ones too: `(a+){6}` explodes as well),
+    backreferences, and many open-ended repeats.
+
+    ponytail: reads re's private parse tree and is deliberately strict; a `regex`-module
+    timeout would allow more if admins need richer patterns.
+    """
+    from re import _constants as c  # type: ignore[attr-defined]
+
+    open_repeats = variable_repeats = 0
+
+    def walk(items: Any, in_repeat: bool) -> bool:
+        nonlocal open_repeats, variable_repeats
+        for op, av in items:
+            if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
+                low, high, sub = av
+                if in_repeat and low != high:  # `{3}` can only match one way; `?` can't
+                    return True
+                open_repeats += high - low > 1  # `{0,100}` splits an answer as many ways as `*`
+                variable_repeats += low != high
+                if walk(sub, in_repeat or high > 1):
+                    return True
+            elif op == c.BRANCH:
+                if in_repeat or any(walk(branch, in_repeat) for branch in av[1]):
+                    return True
+            elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
+                return True
+            elif op in (c.SUBPATTERN, c.ASSERT, c.ASSERT_NOT):
+                if walk(av[-1], in_repeat):
+                    return True
+            elif op == c.ATOMIC_GROUP:  # its argument is the subpattern itself
+                if walk(av, in_repeat):
+                    return True
+        return False
+
+    return (
+        walk(parsed, False)
+        or open_repeats > MAX_OPEN_REPEATS
+        or variable_repeats > MAX_VARIABLE_REPEATS
+    )
+
+
 def parse_questions(text: str) -> list[dict]:
     """`/ticket type` questions ("Order number | What went wrong?") as form fields.
 
-    ponytail: every field is a required paragraph; per-field style and optional fields come
-    with the dashboard's type editor.
+    Every question is a required paragraph; `/ticket type field` adds typed and optional ones.
     """
     labels = [q.strip() for q in text.split("|") if q.strip()]
     if len(labels) > MAX_FIELDS:
@@ -67,13 +136,171 @@ def parse_questions(text: str) -> list[dict]:
     for label in labels:
         if len(label) > MAX_LABEL:
             raise TicketError(f"Questions can be at most {MAX_LABEL} characters: “{label}”.")
-        key = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:32] or f"q{len(fields) + 1}"
-        while key in {f["key"] for f in fields}:
-            key += "_"
         fields.append(
-            {"key": key, "label": label, "style": "paragraph", "required": True, "max_length": 1000}
+            {"key": _field_key(label, fields), "label": label, "type": "paragraph",
+             "required": True, "max_length": 1000}
         )
     return fields
+
+
+def set_field(
+    fields: list[dict],
+    label: str,
+    kind: Optional[str] = None,
+    *,
+    required: Optional[bool] = None,
+    options: Optional[str] = None,
+    identity: Optional[bool] = None,
+    staff_only: Optional[bool] = None,
+) -> list[dict]:
+    """`fields` with the field called `label` added, or changed in place (keeping its key, so
+    answers already given still line up). On a change, anything left as None keeps its current
+    value; for a new field it's a required short-text question."""
+    label = label.strip()
+    if not label or len(label) > MAX_LABEL:
+        raise TicketError(f"A field's label is 1–{MAX_LABEL} characters.")
+    existing = next((f for f in fields if f["label"].lower() == label.lower()), None)
+    current = existing or {}
+    kind = kind or (field_type(existing) if existing else "short")
+    if kind not in FIELD_TYPES:
+        raise TicketError(f"Unknown field type {kind}.")
+    staff_only = bool(current.get("staff_only")) if staff_only is None else staff_only
+    identity = bool(current.get("identity")) if identity is None else identity
+    if required is None:
+        required = current["required"] if existing and not current.get("staff_only") else True
+    if options is None and existing and field_type(existing) == kind:  # same kind: keep its choices
+        options = ",".join(current["options"]) if kind == "select" else current.get("pattern")
+    field: dict = {
+        "key": existing["key"] if existing else _field_key(label, fields),
+        "label": label,
+        "type": kind,
+        "required": required and not staff_only,  # staff fill those in once it's open
+        "max_length": MAX_LENGTH.get(kind, 100),
+    }
+    if kind == "select":
+        choices = list(dict.fromkeys(o.strip()[:100] for o in (options or "").split(",") if o.strip()))
+        if not 1 <= len(choices) <= MAX_OPTIONS:
+            raise TicketError(f"A dropdown needs 1–{MAX_OPTIONS} options, separated by commas.")
+        field["options"] = choices
+    if kind == "pattern":
+        if not options:
+            raise TicketError("A pattern field needs its regular expression in `options`.")
+        try:
+            slow = len(options) > 200 or _slow_pattern(re._parser.parse(options))  # type: ignore[attr-defined]
+        except re.error as exc:
+            raise TicketError(f"That pattern isn't a valid regular expression: {exc}.") from None
+        if slow:
+            raise TicketError(
+                "That pattern could take too long to check. Keep it simple: no repeats inside "
+                "repeats (like `(a+)*`), no `|` inside a repeat, no backreferences, and at most "
+                f"{MAX_OPEN_REPEATS} wide repeats (`*`, `+`, `{{0,100}}`) and {MAX_VARIABLE_REPEATS} "
+                "repeats in all (counting `?`)."
+            )
+        field["pattern"] = options
+    if identity:
+        field["identity"] = True
+    if staff_only:
+        field["staff_only"] = True
+
+    result = [field if f is existing else f for f in fields] if existing else [*fields, field]
+    if len(result) > MAX_FIELDS:
+        raise TicketError(f"A ticket type can have at most {MAX_FIELDS} fields.")
+    if sum(1 for f in asked_fields({"fields": result}) if field_type(f) in PICKED) > MAX_PICKED:
+        raise TicketError(f"A form can ask at most {MAX_PICKED} dropdown or member questions.")
+    return result
+
+
+def asked_fields(ticket_type: dict) -> list[dict]:
+    """The fields the opener fills in (staff-only ones are never asked)."""
+    return [f for f in ticket_type["fields"] if not f.get("staff_only")]
+
+
+def placeholder(field: dict) -> hikari.UndefinedOr[str]:
+    kind = field_type(field)
+    if kind == "date":
+        return "YYYY-MM-DD"
+    if kind == "url":
+        return "https://…"
+    if kind == "user":
+        return "Member ID or @mention"
+    if kind == "select":
+        return f"One of: {', '.join(field['options'])}"[:100]
+    return hikari.UNDEFINED
+
+
+def check_answer(field: dict, value: str) -> str:
+    """An answer as stored, or a TicketError saying what's wrong with it."""
+    kind, label = field_type(field), field["label"]
+    limit = field.get("max_length", 1000)
+    if len(value) > limit:
+        raise TicketError(f"**{label}** can be at most {limit} characters.")
+    if kind == "number":
+        try:
+            ok = math.isfinite(float(value.replace(",", "")))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise TicketError(f"**{label}** must be a number.")
+    elif kind == "date":
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise TicketError(f"**{label}** must be a date like 2026-01-31.") from None
+    elif kind == "url":
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise TicketError(f"**{label}** must be a link starting with https://.")
+    elif kind == "pattern":
+        # set_field refused slow shapes, and the answer is at most 100 characters.
+        if not re.fullmatch(field["pattern"], value):
+            raise TicketError(f"**{label}** isn't in the expected format.")
+    elif kind == "select":
+        match = next((o for o in field["options"] if o.lower() == value.lower()), None)
+        if match is None:
+            raise TicketError(f"**{label}** must be one of: {', '.join(field['options'])}.")
+        value = match
+    elif kind == "user":
+        value = value.strip("<@!>")
+        if not value.isdigit():
+            raise TicketError(f"**{label}** must be a member: their ID or @mention.")
+    return value
+
+
+def check_answers(fields: list[dict], answers: dict[str, str]) -> dict[str, str]:
+    """Answers to `fields`, checked: one per field ("" when skipped), or a TicketError listing
+    every problem at once."""
+    checked: dict[str, str] = {}
+    problems: list[str] = []
+    for f in fields:
+        value = (answers.get(f["key"]) or "").strip()
+        checked[f["key"]] = ""
+        if not value:
+            if f["required"]:
+                problems.append(f"Please answer **{f['label']}**.")
+            continue
+        try:
+            checked[f["key"]] = check_answer(f, value)
+        except TicketError as exc:
+            problems.append(str(exc))
+    if problems:
+        raise TicketError("\n".join(problems))
+    return checked
+
+
+def identity_values(ticket_type: dict, fields: dict[str, str]) -> dict[str, str]:
+    """Identity answers, normalised, by field key. Tickets sharing one are linked, across types
+    too: fields with the same label have the same key."""
+    return {
+        f["key"]: fields[f["key"]].strip().lower()
+        for f in ticket_type["fields"]
+        if f.get("identity") and fields.get(f["key"], "").strip()
+    }
+
+
+def answer_text(field: Optional[dict], value: str) -> str:
+    if field is not None and field_type(field) == "user" and value:
+        return f"<@{value}>"
+    return value
 
 
 def parse_color(text: str) -> int:
@@ -182,6 +409,8 @@ def render_transcript(document: dict, *, staff: bool) -> str:
         lines.append(f"Closed {when(t['closed_at'])} by {t['closed_by']}: {t.get('reason') or 'no reason'}")
     for label, answer in document["fields"].items():
         lines.append(f"{label}: {answer}")
+    if staff:
+        lines += [f"{label} (staff): {answer}" for label, answer in document.get("staff_fields", {}).items()]
     lines.append("")
     for m in document["messages"]:
         lines.append(f"[{when(m['timestamp'])}] {m['author']['name']}: {m['content']}")
@@ -244,6 +473,27 @@ class TicketService:
         # ponytail: in memory, so a restart drops a pending edit until the ticket next changes.
         self._topic_tasks: dict[int, asyncio.Task] = {}
         self._topic_edited: dict[int, float] = {}
+        # Form answers waiting on the opener's dropdown/member picks, by (guild, user, type), with
+        # when they were saved. Oldest first, so expiry and the cap only ever drop from the front.
+        # ponytail: in memory; a restart drops half-filled forms and the member starts again.
+        self.drafts: dict[tuple[int, int, int], tuple[float, dict[str, str]]] = {}
+
+    def save_draft(self, key: tuple[int, int, int], answers: dict[str, str]) -> None:
+        """Keep a form's answers for DRAFT_TTL, replacing that member's earlier form of the type.
+        Expired drafts are dropped here, and past MAX_DRAFTS the oldest go first."""
+        now = time.monotonic()
+        self.drafts.pop(key, None)
+        for old, (saved, _) in list(self.drafts.items()):
+            if now - saved < DRAFT_TTL and len(self.drafts) < MAX_DRAFTS:
+                break
+            del self.drafts[old]
+        self.drafts[key] = (now, answers)
+
+    def get_draft(self, key: tuple[int, int, int]) -> dict[str, str]:
+        draft = self.drafts.get(key)
+        if draft is None or time.monotonic() - draft[0] >= DRAFT_TTL:
+            raise TicketError("This form expired. Press the panel button again.")
+        return draft[1]
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
@@ -510,9 +760,12 @@ class TicketService:
         self, guild_id: int, member: hikari.Member, ticket_type: dict, fields: dict[str, str]
     ) -> dict:
         """Create a ticket and its channel, and post the welcome message."""
+        fields = check_answers(asked_fields(ticket_type), fields)  # before anything is created
         async with self._open_locks[guild_id]:
             await self.check_can_open(guild_id, member.id, ticket_type)
-            ticket = await self.repo.create_ticket(guild_id, ticket_type["id"], member.id, fields)
+            ticket = await self.repo.create_ticket(
+                guild_id, ticket_type["id"], member.id, fields, identity_values(ticket_type, fields)
+            )
             try:
                 category_id = await self._category(guild_id, ticket_type["category_id"])
                 channel = await self.rest.create_guild_text_channel(
@@ -578,9 +831,7 @@ class TicketService:
             description="Thanks for reaching out. Staff will be with you shortly.",
             color=PANEL_COLOR,
         )
-        labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
-        for key, answer in ticket["fields"].items():
-            embed.add_field(labels.get(key, key), answer[:1024] or "—")
+        self.show_answers(embed, ticket, ticket_type)
         embed.set_footer(privacy)
 
         row = self.rest.build_message_action_row().add_interactive_button(
@@ -589,6 +840,10 @@ class TicketService:
         if ticket_type["claim_mode"] in ("button", "both"):
             row.add_interactive_button(
                 hikari.ButtonStyle.SUCCESS, f"ticket:claim:{ticket['id']}", label="Claim", emoji="🙋"
+            )
+        if ticket_type["fields"]:
+            row.add_interactive_button(
+                hikari.ButtonStyle.SECONDARY, f"ticket:fields:{ticket['id']}", label="Edit fields", emoji="✏️"
             )
         if ticket_type["stages"]:
             row.add_interactive_button(
@@ -603,6 +858,29 @@ class TicketService:
             user_mentions=[opener_id],
             role_mentions=ticket_type["staff_role_ids"],
         )
+
+    def show_answers(self, embed: hikari.Embed, ticket: dict, ticket_type: dict) -> hikari.Embed:
+        """The welcome embed's fields: the opener's answers, never staff-only ones (the opener
+        sees this message). Answers to fields removed since aren't shown either: they may have
+        been staff-only."""
+        while embed.fields:
+            embed.remove_field(0)
+        for field in asked_fields(ticket_type):
+            if field["key"] in ticket["fields"]:
+                embed.add_field(field["label"], answer_text(field, ticket["fields"][field["key"]])[:1024] or "—")
+        return embed
+
+    async def edit_fields(
+        self, ticket: dict, ticket_type: dict, answers: dict[str, str], actor_id: int
+    ) -> dict:
+        """Staff change a ticket's answers, staff-only fields included."""
+        fields = {**ticket["fields"], **check_answers(ticket_type["fields"], answers)}
+        updated = await self.repo.update_fields(
+            ticket["id"], ticket["guild_id"], fields, identity_values(ticket_type, fields)
+        )
+        changed = sorted(k for k in fields if fields[k] != ticket["fields"].get(k, ""))
+        await self.repo.add_event(ticket["id"], "fields_edited", actor_id, {"keys": changed})
+        return updated
 
     # Claiming
 
@@ -725,6 +1003,9 @@ class TicketService:
                 # with whatever was read, rather than leave it open forever.
                 logger.warning(f"Transcript of ticket {ticket['id']} is incomplete: {exc}")
         labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
+        # Only answers to fields the opener is asked go in their copy; staff-only ones, and those
+        # of fields removed since (which may have been staff-only), are kept for staff.
+        opener_keys = {f["key"] for f in asked_fields(ticket_type)}
         return {
             "ticket": {
                 "number": ticket["number"],
@@ -735,7 +1016,8 @@ class TicketService:
                 "closed_by": ticket.get("closed_by"),
                 "reason": ticket.get("close_reason"),
             },
-            "fields": {labels.get(k, k): v for k, v in ticket["fields"].items()},
+            "fields": {labels[k]: v for k, v in ticket["fields"].items() if k in opener_keys},
+            "staff_fields": {labels.get(k, k): v for k, v in ticket["fields"].items() if k not in opener_keys and v},
             "messages": messages,
             "events": [
                 {"kind": e["kind"], "actor_id": e["actor_id"], "data": e["data"], "created_at": e["created_at"]}
