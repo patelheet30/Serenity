@@ -555,6 +555,18 @@ class TicketRepository:
         pool = self._require_pool()
         await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
 
+    async def staff_roles(self, guild_id: int) -> list[dict]:
+        """Every type's staff roles, one row per tier (tier_id NULL for a type without tiers)."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT ty.id AS type_id, ty.staff_role_ids, tr.id AS tier_id,
+                COALESCE(tr.role_ids, '{}') AS tier_role_ids
+            FROM ticket_types ty LEFT JOIN ticket_tiers tr ON tr.type_id = ty.id
+            WHERE ty.guild_id = $1""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
     async def due_for_reping(self, now: int) -> list[dict]:
         """Escalated tickets their tier hasn't picked up within its re-ping time."""
         pool = self._require_pool()

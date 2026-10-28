@@ -1,19 +1,28 @@
 import { goto } from '$app/navigation';
-import { inviteUrl, type Guild } from './api';
+import { inviteUrl, type Access, type Guild } from './api';
 import type { IconName } from './icons';
 import type { Command } from './palette.svelte';
 
-export const SECTIONS: { k: IconName; name: string; key: string }[] = [
+export type Section = { k: IconName; name: string; key: string };
+
+export const SECTIONS: Section[] = [
 	{ k: 'overview', name: 'Overview', key: 'o' },
 	{ k: 'slowmode', name: 'Slowmode', key: 's' },
 	{ k: 'logging', name: 'Logging', key: 'l' },
 	{ k: 'cases', name: 'Cases', key: 'c' },
 	{ k: 'stats', name: 'Mod stats', key: 't' },
+	{ k: 'tickets', name: 'Tickets', key: 'k' },
 	{ k: 'modules', name: 'Modules', key: 'm' }
 ];
 
-export function sectionCommands(guildId: string): Command[] {
-	return SECTIONS.map((s) => ({
+/** The sections a user can open: ticket staff get only Tickets, and Tickets is allowlisted. */
+export function visibleSections(access: Access | null): Section[] {
+	if (access?.level === 'staff') return SECTIONS.filter((s) => s.k === 'tickets');
+	return SECTIONS.filter((s) => s.k !== 'tickets' || access?.tickets);
+}
+
+export function sectionCommands(guildId: string, sections = SECTIONS): Command[] {
+	return sections.map((s) => ({
 		id: `section:${s.k}`,
 		group: 'Navigate',
 		title: s.name,
@@ -26,7 +35,7 @@ export function sectionCommands(guildId: string): Command[] {
 /** One palette entry per server: open it, or invite Serenity to it. */
 export function serverCommands(guilds: Guild[]): Command[] {
 	return guilds
-		.filter((g) => g.manageable)
+		.filter((g) => g.manageable || g.staff)
 		.map((g) => ({
 			id: `server:${g.id}`,
 			group: 'Servers',

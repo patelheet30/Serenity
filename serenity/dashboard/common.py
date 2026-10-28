@@ -12,6 +12,7 @@ from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.logging_service import LoggingService
+from serenity.services.ticket_service import TicketService
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +28,7 @@ REPO = web.AppKey("repo", Repository)
 LOG_REPO = web.AppKey("log_repo", LoggingRepository)
 MOD_REPO = web.AppKey("mod_repo", ModerationRepository)
 MODULES = web.AppKey("modules", ModuleManager)
+TICKET_SVC = web.AppKey("ticket_svc", TicketService)  # the bot's own, so actions reach Discord
 CHANGES = web.AppKey("changes", Any)  # ChangeLog
 SESSION = web.RequestKey("session", Session)
 ACCESS_LEVEL = web.RequestKey("access_level", str)

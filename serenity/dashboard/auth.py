@@ -196,19 +196,28 @@ class NotInstalledError(Exception):
     """The bot isn't in the guild."""
 
 
+@dataclass(frozen=True)
+class Membership:
+    """A member's permissions and roles in a guild, as the bot sees them."""
+
+    permissions: hikari.Permissions
+    role_ids: frozenset[int]
+
+
 class GuildAccess:
     """Decides whether a user may manage a guild, from the bot's view of their current roles.
 
     The OAuth guild list is never trusted for this: it can be stale and is client-visible.
-    Permissions are cached for ACCESS_CACHE_SECONDS, so a revoked permission applies within that.
+    Memberships are cached for ACCESS_CACHE_SECONDS, so a revoked permission or role applies
+    within that.
     """
 
     def __init__(self, bot: hikari.GatewayBot):
         self.bot = bot
-        self._cache: dict[tuple[int, int], tuple[float, Optional[hikari.Permissions]]] = {}
+        self._cache: dict[tuple[int, int], tuple[float, Optional[Membership]]] = {}
 
-    async def permissions(self, user_id: int, guild_id: int) -> Optional[hikari.Permissions]:
-        """The user's permissions in the guild, or None if they aren't a member.
+    async def member(self, user_id: int, guild_id: int) -> Optional[Membership]:
+        """The user's permissions and roles in the guild, or None if they aren't a member.
 
         Raises NotInstalledError.
         """
@@ -221,28 +230,31 @@ class GuildAccess:
         if cached and cached[0] > now:
             return cached[1]
 
-        perms = await self._compute(user_id, guild_id)
+        member = await self._compute(user_id, guild_id)
         if len(self._cache) > 10_000:  # ponytail: crude bound, fine at our traffic
             self._cache.clear()
-        self._cache[key] = (now + ACCESS_CACHE_SECONDS, perms)
-        return perms
+        self._cache[key] = (now + ACCESS_CACHE_SECONDS, member)
+        return member
 
     async def level(self, user_id: int, guild_id: int) -> Optional[str]:
-        """Return "manage" if the user may manage the guild, else None. Raises NotInstalledError."""
-        return access_level(await self.permissions(user_id, guild_id))
+        """Return "manage" if the user may manage the guild, else None. Raises NotInstalledError.
 
-    async def _compute(self, user_id: int, guild_id: int) -> Optional[hikari.Permissions]:
+        Ticket staff ("staff") need the database, so auth_middleware decides that.
+        """
+        member = await self.member(user_id, guild_id)
+        return access_level(member.permissions if member else None)
+
+    async def _compute(self, user_id: int, guild_id: int) -> Optional[Membership]:
         member = self.bot.cache.get_member(guild_id, user_id)
         if member is None:
             try:
                 member = await self.bot.rest.fetch_member(guild_id, user_id)
             except hikari.NotFoundError:
                 return None
-        return toolbox.calculate_permissions(member)
+        return Membership(toolbox.calculate_permissions(member), frozenset(member.role_ids))
 
 
 def access_level(perms: Optional[hikari.Permissions]) -> Optional[str]:
     if perms is not None and perms & hikari.Permissions.MANAGE_GUILD:
         return "manage"
-    # Tickets dashboard milestone: return "staff" here for members with a ticket-staff role.
     return None

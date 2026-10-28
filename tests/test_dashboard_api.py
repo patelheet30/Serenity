@@ -11,15 +11,26 @@ import pytest
 import pytest_asyncio
 import toolbox
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from cryptography.fernet import Fernet
 
 from serenity.core.modules import ModuleType
 from serenity.dashboard import auth
-from serenity.dashboard.api import CHANGES, OAUTH, SESSION_COOKIE, SESSIONS, STATE_COOKIE, build_api
-from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
-from serenity.dashboard.common import ChangeLog
+from serenity.dashboard.api import (
+    CHANGES,
+    OAUTH,
+    SESSION_COOKIE,
+    SESSIONS,
+    STAFF_HANDLERS,
+    STATE_COOKIE,
+    build_api,
+)
+from serenity.dashboard.auth import GuildAccess, Membership, NotInstalledError, Session, Sessions
+from serenity.dashboard.common import SESSION, TICKET_SVC, ChangeLog
+from serenity.dashboard.tickets import ticket_access, transcript_viewer
 from serenity.database.moderation_repository import ModerationRepository
+from serenity.database.ticket_repository import TicketRepository
+from serenity.services.ticket_service import TicketService
 
 REAL_PERMISSIONS = toolbox.calculate_permissions  # before fake_permissions patches it
 
@@ -45,7 +56,11 @@ def make_channel(
     return channel
 
 
-def make_bot(*, installed=True, member=True, perms=hikari.Permissions.MANAGE_GUILD):
+def make_member(perms=hikari.Permissions.MANAGE_GUILD, roles=()):
+    return MagicMock(perms=perms, role_ids=list(roles), username="aria")
+
+
+def make_bot(*, installed=True, member=True, perms=hikari.Permissions.MANAGE_GUILD, roles=()):
     """A bot whose cache knows one guild; calculate_permissions is patched to read .perms."""
     bot = MagicMock()
     channels = {
@@ -61,7 +76,7 @@ def make_bot(*, installed=True, member=True, perms=hikari.Permissions.MANAGE_GUI
         k: c for k, c in channels.items() if c.guild_id == gid
     }
     bot.cache.get_guild.side_effect = lambda gid: object() if installed and gid == GUILD else None
-    bot.cache.get_member.return_value = MagicMock(perms=perms, username="aria") if member else None
+    bot.cache.get_member.return_value = make_member(perms, roles) if member else None
     bot.rest.fetch_member = AsyncMock(side_effect=hikari.NotFoundError("", {}, b""))
     bot.cache.get_roles_view_for_guild.return_value = {}
     bot.cache.get_members_view_for_guild.return_value = {}
@@ -183,7 +198,9 @@ async def client_for():
 
     async def make(bot, repo=None):
         """The API with fake sessions and Discord. Routes that touch Postgres need `repo`."""
-        api = build_api(bot, repo or MagicMock(pool=None))
+        pool = repo.pool if repo else None
+        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, MagicMock())
+        api = build_api(bot, repo or MagicMock(pool=None), tickets)
         api[SESSIONS] = FakeSessions()
         api[CHANGES] = MagicMock()  # ChangeLog has its own tests
 
@@ -215,13 +232,16 @@ PLACEHOLDERS = {
 }
 
 
-def guild_routes(client):
-    """(method, path) for every /api route that takes a guild id, placeholders filled in."""
+def guild_routes(client, *, staff=None):
+    """(method, path) for every /api route that takes a guild id, placeholders filled in;
+    with `staff`, only the routes ticket staff may (True) or may not (False) use."""
     found = []
     for resource in client.server.app.router.resources():
         if hasattr(resource, "_app"):  # the /api sub-app
             for route in resource._app.router.routes():
                 path = route.resource.canonical
+                if staff is not None and (route.handler in STAFF_HANDLERS) != staff:
+                    continue
                 if "{guild_id}" in path and route.method != "HEAD":
                     for key, value in PLACEHOLDERS.items():
                         path = path.replace(key, value)
@@ -240,7 +260,8 @@ async def test_health_is_public(client_for):
 
 
 @pytest.mark.asyncio
-async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_repo):
+async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_repo, monkeypatch):
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     origin = {"Origin": ORIGIN}  # so writes reach the auth check instead of the CSRF one
     denied = await client_for(make_bot(perms=hikari.Permissions.NONE), pg_repo)
     for method, path in guild_routes(denied):
@@ -807,3 +828,142 @@ async def test_change_log_drops_early_posts_when_the_log_is_stuck(monkeypatch):
     stuck.set()
     for t in list(changes._timers.values()):
         t.cancel()
+
+
+# --- Ticket staff access (#69) -----------------------------------------------------------------
+
+SUPPORT_ROLE, BILLING_ROLE, SENIOR_ROLE, OTHER_ROLE = 801, 802, 803, 804
+
+
+@pytest_asyncio.fixture
+async def ticket_guild(pg_repo, monkeypatch):
+    """Support (staff SUPPORT_ROLE; tiers Helpers, Seniors) and Billing (BILLING_ROLE), with
+    ticket #1 on Support's first tier, #2 escalated to Seniors, #3 in Billing."""
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+    repo = TicketRepository(pg_repo.pool)
+    support = await repo.create_type(GUILD, "Support", staff_role_ids=[SUPPORT_ROLE])
+    billing = await repo.create_type(GUILD, "Billing", staff_role_ids=[BILLING_ROLE])
+    tier = {"name": "Helpers", "position": 1, "role_ids": [SUPPORT_ROLE]}
+    helpers = await repo.create_tier(support["id"], **tier)
+    tier = {"name": "Seniors", "position": 2, "role_ids": [SENIOR_ROLE]}
+    seniors = await repo.create_tier(support["id"], **tier)
+    t1 = await repo.create_ticket(GUILD, support["id"], USER + 1, {})
+    t2 = await repo.update_ticket(
+        (await repo.create_ticket(GUILD, support["id"], USER + 1, {}))["id"], tier_id=seniors["id"]
+    )
+    t3 = await repo.create_ticket(GUILD, billing["id"], USER, {})
+    return MagicMock(repo=repo, helpers=helpers, seniors=seniors, tickets=(t1, t2, t3))
+
+
+@pytest.mark.asyncio
+async def test_ticket_staff_only_reach_ticket_routes(client_for, pg_repo, ticket_guild):
+    async def get(client, path):
+        resp = await client.get(f"/api/guilds/{GUILD}{path}", cookies=COOKIES)
+        return resp.status, await resp.json()
+
+    staff = await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[SUPPORT_ROLE]), pg_repo)
+    assert await get(staff, "/access") == (200, {"level": "staff", "tickets": True})
+    assert [t["name"] for t in (await get(staff, "/tickets/types"))[1]] == ["Support"]
+    for method, path in guild_routes(staff, staff=False):  # settings, modules and the rest
+        resp = await staff.request(method, path, headers=HEADERS, cookies=COOKIES)
+        assert resp.status == 403, (method, path)
+        assert "Ticket staff" in (await resp.json())["error"]["message"]
+
+    manager = await client_for(make_bot(), pg_repo)
+    assert (await get(manager, "/access"))[1]["level"] == "manage"
+    assert [t["name"] for t in (await get(manager, "/tickets/types"))[1]] == ["Support", "Billing"]
+
+    nobody = await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[OTHER_ROLE]), pg_repo)
+    for method, path in guild_routes(nobody, staff=True):
+        resp = await nobody.request(method, path, headers=HEADERS, cookies=COOKIES)
+        assert resp.status == 403, (method, path)
+
+
+@pytest.mark.asyncio
+async def test_tickets_need_the_allowlist(client_for, pg_repo, ticket_guild, monkeypatch):
+    monkeypatch.setenv("TICKETS_GUILDS", "")
+    manager = await client_for(make_bot(), pg_repo)
+    resp = await manager.get(f"/api/guilds/{GUILD}/tickets/types", cookies=COOKIES)
+    assert resp.status == 404
+    staff = await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[SUPPORT_ROLE]), pg_repo)
+    assert (await staff.get(f"/api/guilds/{GUILD}/access", cookies=COOKIES)).status == 403
+
+
+@pytest.mark.asyncio
+async def test_tier_roles_see_only_tickets_with_their_tier(client_for, pg_repo, ticket_guild):
+    client = await client_for(make_bot(), pg_repo)
+    svc = client.api[TICKET_SVC]
+    t1, t2, t3 = ticket_guild.tickets
+
+    async def sees(*roles, perms=hikari.Permissions.NONE):
+        access = await ticket_access(client.api, GUILD, Membership(perms, frozenset(roles)))
+        return [t["number"] for t in (t1, t2, t3) if access.can_see(t, await svc.full_type(t))]
+
+    assert await sees(SUPPORT_ROLE) == [1, 2]  # type staff: every Support ticket
+    assert await sees(SENIOR_ROLE) == [2]  # the escalated one only
+    assert await sees(BILLING_ROLE, SENIOR_ROLE) == [2, 3]
+    assert await sees(OTHER_ROLE) == []
+    assert await sees(perms=hikari.Permissions.MANAGE_GUILD) == [1, 2, 3]
+
+    # De-escalated back to Helpers: Seniors no longer see it.
+    t2.update(await ticket_guild.repo.update_ticket(t2["id"], tier_id=ticket_guild.helpers["id"]))
+    assert await sees(SENIOR_ROLE) == []
+
+
+@pytest.mark.asyncio
+async def test_removing_the_staff_role_revokes_access_within_a_minute(
+    client_for, pg_repo, ticket_guild, monkeypatch
+):
+    bot = make_bot(perms=hikari.Permissions.NONE, roles=[SENIOR_ROLE])
+    client = await client_for(bot, pg_repo)
+    path = f"/api/guilds/{GUILD}/tickets/types"
+    assert (await client.get(path, cookies=COOKIES)).status == 200
+
+    bot.cache.get_member.return_value = make_member(hikari.Permissions.NONE)
+    assert (await client.get(path, cookies=COOKIES)).status == 200  # cached roles
+    now = time.monotonic()
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now + auth.ACCESS_CACHE_SECONDS + 1)
+    assert (await client.get(path, cookies=COOKIES)).status == 403
+
+    # Taking the role off the type (here, the tier) applies at once.
+    bot.cache.get_member.return_value = make_member(hikari.Permissions.NONE, [SENIOR_ROLE])
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now + 3 * auth.ACCESS_CACHE_SECONDS)
+    assert (await client.get(path, cookies=COOKIES)).status == 200
+    await ticket_guild.repo.update_tier(ticket_guild.seniors["id"], role_ids=[])
+    assert (await client.get(path, cookies=COOKIES)).status == 403
+
+
+@pytest.mark.asyncio
+async def test_openers_can_view_their_own_transcripts(client_for, pg_repo, ticket_guild):
+    t1, _, t3 = ticket_guild.tickets  # USER opened #3 (Billing), not #1 (Support)
+
+    async def viewer(bot, ticket):
+        client = await client_for(bot, pg_repo)
+        request = make_mocked_request("GET", "/", app=client.api)
+        request[SESSION] = FakeSessions().session
+        return await transcript_viewer(request, ticket)
+
+    nobody = dict(perms=hikari.Permissions.NONE)
+    assert await viewer(make_bot(**nobody), t3) == "opener"
+    assert await viewer(make_bot(member=False), t3) == "opener"  # left the server
+    assert await viewer(make_bot(installed=False), t3) == "opener"  # or the bot did
+    assert await viewer(make_bot(**nobody), t1) is None
+    assert await viewer(make_bot(**nobody, roles=[SUPPORT_ROLE]), t1) == "staff"
+    assert await viewer(make_bot(), t3) == "staff"  # managers see notes on their own too
+
+
+@pytest.mark.asyncio
+async def test_picker_marks_ticket_staff_guilds(client_for, pg_repo, ticket_guild):
+    bot = make_bot(perms=hikari.Permissions.NONE, roles=[BILLING_ROLE])
+    client = await client_for(bot, pg_repo)
+    client.api[OAUTH].get = AsyncMock(
+        return_value=[
+            {"id": str(GUILD), "name": "Main", "permissions": "0"},
+            {"id": str(GUILD + 1), "name": "Elsewhere", "permissions": "0"},
+        ]
+    )
+    resp = await client.get("/api/guilds", cookies=COOKIES)
+    assert [(g["name"], g["manageable"], g["staff"]) for g in await resp.json()] == [
+        ("Elsewhere", False, False),
+        ("Main", False, True),
+    ]

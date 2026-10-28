@@ -1,7 +1,7 @@
 """The dashboard's JSON API, mounted at /api on the bot's web server.
 
 Every /api/guilds/{guild_id}/... route goes through auth_middleware's guild check; handlers
-never check access themselves.
+never check access themselves. Ticket staff who can't manage the guild only get STAFF_HANDLERS.
 """
 
 import os
@@ -15,15 +15,14 @@ import hikari
 from aiohttp import web
 from yarl import URL
 
-from serenity.core.modules import ModuleManager
-from serenity.dashboard import moderation, settings
+from serenity.core.modules import ModuleManager, ModuleType, module_available
+from serenity.dashboard import moderation, settings, tickets
 from serenity.dashboard.auth import (
     DiscordOAuth,
     GuildAccess,
     NotInstalledError,
     Session,
     Sessions,
-    access_level,
 )
 from serenity.dashboard.common import (
     ACCESS,
@@ -41,13 +40,17 @@ from serenity.dashboard.common import (
     SECURE,
     SESSION,
     SESSIONS,
+    TICKET_SVC,
     ApiError,
     ChangeLog,
+    guild_id,
 )
+from serenity.dashboard.tickets import TICKET_ACCESS, ticket_access
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.logging_service import LoggingService
+from serenity.services.ticket_service import TicketService
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -99,7 +102,8 @@ async def csrf_middleware(request: web.Request, handler: Handler) -> web.StreamR
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
-    """Require a session outside PUBLIC_PATHS, and guild access on any route with {guild_id}."""
+    """Require a session outside PUBLIC_PATHS, and guild access on any route with {guild_id}:
+    managers get every route, ticket staff only STAFF_HANDLERS."""
     if request.path in PUBLIC_PATHS:
         return await handler(request)
 
@@ -110,21 +114,27 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     request[SESSION] = session
 
     if "guild_id" in request.match_info:
-        guild_id = int(request.match_info["guild_id"])
+        gid = guild_id(request)
         try:
-            perms = await request.app[ACCESS].permissions(session.user_id, guild_id)
+            member = await request.app[ACCESS].member(session.user_id, gid)
         except NotInstalledError:
             raise ApiError(
                 404,
                 "bot_not_installed",
                 "Serenity isn't in this server.",
-                invite=f"/api/auth/invite?guild_id={guild_id}",
+                invite=f"/api/auth/invite?guild_id={gid}",
             ) from None
-        level = access_level(perms)
-        if level is None:
+        access = await ticket_access(request.app, gid, member)
+        handler = request.match_info.handler
+        if not (access.manager or access.staff):
             raise ApiError(403, "forbidden", "You need Manage Server in this server.")
-        request[ACCESS_LEVEL] = level
-        request[PERMISSIONS] = perms  # type: ignore[assignment]  # not None when level is set
+        if not access.manager and handler not in STAFF_HANDLERS:
+            raise ApiError(403, "forbidden", "Ticket staff can only use Tickets in this server.")
+        if handler in TICKET_HANDLERS and not module_available(gid, ModuleType.TICKETS):
+            raise ApiError(404, "not_found", "Tickets aren't available in this server yet.")
+        request[ACCESS_LEVEL] = "manage" if access.manager else "staff"
+        request[PERMISSIONS] = member.permissions  # type: ignore[union-attr]  # set when access is
+        request[TICKET_ACCESS] = access
 
     return await handler(request)
 
@@ -220,8 +230,8 @@ async def me(request: web.Request) -> web.Response:
 async def guilds(request: web.Request) -> web.Response:
     """The user's guilds for the server picker.
 
-    `manageable` comes from the OAuth list and only drives the picker's grouping; opening a
-    guild is authorised separately by auth_middleware.
+    `manageable` comes from the OAuth list and, with `staff`, only drives the picker's grouping;
+    opening a guild is authorised separately by auth_middleware.
     """
     oauth = _oauth(request)
     session: Session = request[SESSION]
@@ -245,10 +255,26 @@ async def guilds(request: web.Request) -> web.Response:
             "icon_url": _cdn("icons", g["id"], g.get("icon")),
             "manageable": g.get("owner", False) or bool(int(g.get("permissions", 0)) & manage),
             "installed": cache.get_guild(int(g["id"])) is not None,
+            "staff": False,
         }
         for g in user_guilds
     ]
+    for g in result:  # ticket staff: few guilds while Tickets is allowlisted, and cached
+        gid = int(g["id"])
+        if g["installed"] and not g["manageable"] and module_available(gid, ModuleType.TICKETS):
+            member = await request.app[ACCESS].member(session.user_id, gid)
+            g["staff"] = (await ticket_access(request.app, gid, member)).staff
     return web.json_response(sorted(result, key=lambda g: g["name"].lower()))
+
+
+async def guild_access(request: web.Request) -> web.Response:
+    """What the user can open here: "manage" (everything) or "staff" (Tickets only)."""
+    return web.json_response(
+        {
+            "level": request[ACCESS_LEVEL],
+            "tickets": module_available(guild_id(request), ModuleType.TICKETS),
+        }
+    )
 
 
 CHANNEL_TYPES = {
@@ -322,7 +348,18 @@ async def members(request: web.Request) -> web.Response:
     return web.json_response([_member_json(m) for m in found])
 
 
-def build_api(bot: hikari.GatewayBot, repo: Repository) -> web.Application:
+def _handlers(*tables: web.RouteTableDef) -> frozenset[Any]:
+    return frozenset(r.handler for t in tables for r in t if isinstance(r, web.RouteDef))
+
+
+# Routes ticket staff may use, and those that 404 outside TICKETS_GUILDS.
+STAFF_HANDLERS = _handlers(tickets.staff_routes) | {guild_access}
+TICKET_HANDLERS = _handlers(tickets.routes, tickets.staff_routes)
+
+
+def build_api(
+    bot: hikari.GatewayBot, repo: Repository, ticket_svc: TicketService
+) -> web.Application:
     """The /api sub-app. Login needs DISCORD_CLIENT_ID/SECRET, DASHBOARD_URL, DASHBOARD_SECRET."""
     url = os.getenv("DASHBOARD_URL", "http://localhost:5173").rstrip("/")
     secret = os.getenv("DASHBOARD_SECRET", "")
@@ -339,6 +376,7 @@ def build_api(bot: hikari.GatewayBot, repo: Repository) -> web.Application:
     app[LOG_REPO] = LoggingRepository(repo.pool)  # type: ignore[arg-type]
     app[MOD_REPO] = ModerationRepository(repo.pool)  # type: ignore[arg-type]
     app[MODULES] = ModuleManager(repo)
+    app[TICKET_SVC] = ticket_svc
     app[CHANGES] = ChangeLog(LoggingService(app[LOG_REPO], bot.rest))
     # Without a valid secret there are no sessions, so every protected route answers 401.
     try:
@@ -370,11 +408,14 @@ def build_api(bot: hikari.GatewayBot, repo: Repository) -> web.Application:
     app.router.add_post("/auth/logout", logout)
     app.router.add_get("/me", me)
     app.router.add_get("/guilds", guilds)
+    app.router.add_get(r"/guilds/{guild_id:\d+}/access", guild_access)
     app.router.add_get(r"/guilds/{guild_id:\d+}/channels", channels)
     app.router.add_get(r"/guilds/{guild_id:\d+}/roles", roles)
     app.router.add_get(r"/guilds/{guild_id:\d+}/members", members)
     app.add_routes(settings.routes)
     app.add_routes(moderation.routes)
+    app.add_routes(tickets.routes)
+    app.add_routes(tickets.staff_routes)
     return app
 
 
