@@ -91,3 +91,29 @@ async def test_duplicate_type_name_is_a_friendly_error():
     ctx = MagicMock(respond=AsyncMock())
     await on_error(ctx, asyncpg.UniqueViolationError("duplicate key"))
     assert "already exists" in ctx.respond.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_one_broken_panel_doesnt_stop_the_refresh():
+    from unittest.mock import AsyncMock
+
+    rest = AsyncMock()
+    rest.edit_message.side_effect = [hikari.BadRequestError("", {}, b""), None]
+    repo = AsyncMock()
+    repo.list_types.return_value = _types(1)
+    panel = {"guild_id": 1, "channel_id": 2, "title": "Help", "description": None,
+             "style": "buttons", "type_ids": [1]}
+    repo.list_panels.return_value = [{**panel, "id": 1, "message_id": 10}, {**panel, "id": 2, "message_id": 11}]
+    await _service(rest, repo).refresh_panels(1)
+    assert rest.edit_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_types_on_a_panel_are_listed_once():
+    from unittest.mock import AsyncMock
+
+    from serenity.extensions.tickets import resolve_type_list
+
+    service = AsyncMock()
+    service.resolve_type.side_effect = lambda _, name: {"id": {"a": 1, "b": 2}[name]}
+    assert await resolve_type_list(service, 1, "a, b, a") == [1, 2]

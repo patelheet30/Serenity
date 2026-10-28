@@ -48,3 +48,10 @@ def test_module_hook_gates_subgroup_commands(client):
     """The plugin-wide require_module hook reaches /ticket type subcommands."""
     hooks = [h.__name__ for h in tickets.type_create._resolve_hooks()]
     assert "module_check_hook" in hooks
+
+
+def test_panel_styles_map_to_stored_values():
+    # Stored values are the ticket_panels.style CHECK.
+    assert choices(tickets.panel_post, "style") == {"Buttons": "buttons", "Dropdown": "menu"}
+    assert default(tickets.panel_post, "style") == "buttons"
+    assert choices(tickets.panel_edit, "style") == choices(tickets.panel_post, "style")
