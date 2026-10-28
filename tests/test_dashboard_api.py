@@ -231,6 +231,7 @@ PLACEHOLDERS = {
     "{user_id}": str(USER),
     "{panel_id}": "1",
     "{pack}": "game",
+    "{type_id}": "1",
 }
 
 
