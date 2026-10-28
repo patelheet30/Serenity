@@ -299,18 +299,37 @@ class TicketRepository:
         Each has `linked_by`: the field keys they share."""
         pool = self._require_pool()
         rows = await pool.fetch(
-            """SELECT t.*, array_agg(other.field_key ORDER BY other.field_key) AS linked_by
+            """SELECT t.*, ty.name AS type_name,
+                array_agg(other.field_key ORDER BY other.field_key) AS linked_by
             FROM ticket_identity mine
             JOIN ticket_identity other ON other.guild_id = mine.guild_id
                 AND other.field_key = mine.field_key AND other.value = mine.value
                 AND other.ticket_id <> mine.ticket_id
             JOIN tickets t ON t.id = other.ticket_id
+            JOIN ticket_types ty ON ty.id = t.type_id
             WHERE mine.ticket_id = $1
-            GROUP BY t.id ORDER BY t.opened_at DESC, t.id DESC LIMIT $2""",
+            GROUP BY t.id, ty.name ORDER BY t.opened_at DESC, t.id DESC LIMIT $2""",
             ticket_id,
             limit,
         )
         return [_decode(r) for r in rows]  # type: ignore[misc]
+
+    async def opener_tickets(
+        self, guild_id: int, opener_id: int, exclude_id: int, limit: int = 5
+    ) -> tuple[list[dict], int]:
+        """A member's other tickets, newest first, and how many there are in all."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, ty.name AS type_name, COUNT(*) OVER () AS total
+            FROM tickets t JOIN ticket_types ty ON ty.id = t.type_id
+            WHERE t.guild_id = $1 AND t.opener_id = $2 AND t.id <> $3
+            ORDER BY t.opened_at DESC, t.id DESC LIMIT $4""",
+            guild_id,
+            opener_id,
+            exclude_id,
+            limit,
+        )
+        return [_decode(r) for r in rows], rows[0]["total"] if rows else 0  # type: ignore[misc]
 
     async def delete_ticket(self, ticket_id: int) -> None:
         """Undo a ticket whose channel couldn't be created."""
@@ -653,14 +672,20 @@ class TicketRepository:
     async def save_transcript(
         self, ticket_id: int, guild_id: int, document: dict, expires_at: Optional[int]
     ) -> None:
-        """Store (or, after a reopen, replace) a ticket's transcript."""
+        """Store (or, after a reopen, replace) a ticket's transcript. A case made from the ticket
+        holds it as evidence, unless it's already held."""
         pool = self._require_pool()
         await pool.execute(
-            """INSERT INTO ticket_transcripts (ticket_id, guild_id, document, created_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5)
+            """INSERT INTO ticket_transcripts
+            (ticket_id, guild_id, document, created_at, expires_at, held_by_case_number)
+            VALUES ($1, $2, $3, $4, $5,
+                (SELECT MAX(case_number) FROM mod_cases WHERE source_ticket_id = $1))
             ON CONFLICT (ticket_id) DO UPDATE SET
             document = EXCLUDED.document, created_at = EXCLUDED.created_at,
-            expires_at = EXCLUDED.expires_at""",
+            expires_at = EXCLUDED.expires_at,
+            held_by_case_number = COALESCE(
+                ticket_transcripts.held_by_case_number, EXCLUDED.held_by_case_number
+            )""",
             ticket_id,
             guild_id,
             _encode("document", document),

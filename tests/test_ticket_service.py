@@ -283,6 +283,15 @@ async def test_dropdown_questions_follow_the_form(monkeypatch):
     assert service.drafts == {}
 
 
+def test_parse_duration():
+    from serenity.services.ticket_service import parse_duration
+
+    assert [parse_duration(t) for t in ("30m", " 2H ", "28d")] == [1800, 7200, 28 * 86400]
+    for bad in ("soon", "0m", "29d", "1h30m"):
+        with pytest.raises(TicketError):
+            parse_duration(bad)
+
+
 @pytest.mark.parametrize(
     "pattern, slow",
     [

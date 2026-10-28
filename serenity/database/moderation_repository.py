@@ -83,12 +83,26 @@ class ModerationRepository:
             raise DatabaseError("Database connection is not initialised")
 
         row = await self.pool.fetchrow(
-            "SELECT * FROM mod_cases WHERE guild_id = $1 AND case_number = $2",
+            """SELECT c.*, t.number AS source_ticket_number FROM mod_cases c
+            LEFT JOIN tickets t ON t.id = c.source_ticket_id
+            WHERE c.guild_id = $1 AND c.case_number = $2""",
             guild_id,
             case_number,
         )
 
         return dict(row) if row else None
+
+    async def set_case_source(self, guild_id: int, case_number: int, ticket_id: int) -> None:
+        """Link a case to the ticket it was made from (a ticket's Mod action)."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.pool.execute(
+            "UPDATE mod_cases SET source_ticket_id = $3 WHERE guild_id = $1 AND case_number = $2",
+            guild_id,
+            case_number,
+            ticket_id,
+        )
 
     async def get_user_cases(self, guild_id: int, user_id: int, limit: int = 10) -> List[dict]:
         """Get moderation cases for a specific user in a guild"""
