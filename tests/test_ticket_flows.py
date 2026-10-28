@@ -436,3 +436,9 @@ async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: Ti
         await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
     service.rest.delete_channel.assert_awaited_once()
     assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
+
+    # Even if removing the channel fails too, the ticket row goes and the original error surfaces.
+    service.rest.delete_channel.side_effect = hikari.ForbiddenError("", {}, b"")
+    with pytest.raises(RuntimeError):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
