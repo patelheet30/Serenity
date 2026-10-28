@@ -9,6 +9,7 @@ import hikari
 
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType, tickets_guilds
+from serenity.database.logging_repository import LoggingRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
     PRIORITIES,
@@ -660,6 +661,22 @@ async def transcript_hold(
         f"📌 Ticket #{number}'s transcript is kept as evidence for case #{case}."
         if case
         else f"Released the hold on ticket #{number}'s transcript; it expires as normal.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("log-channel", "Where ticket events are logged (the ticket log).")
+async def settings_log_channel(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[hikari.TextableGuildChannel, arc.ChannelParams("The ticket log channel.")],
+    logs: LoggingRepository = arc.inject(),
+) -> None:
+    # Here rather than /logging ticket-log while Tickets is allowlisted, since /logging is global.
+    guild_id = require_manage_guild(ctx)
+    await logs.set_log_channel(guild_id, "ticket", channel.id)
+    await ctx.respond(
+        f"✅ Ticket events will be logged in {channel.mention} (needs the Logging module on).",
         flags=hikari.MessageFlag.EPHEMERAL,
     )
 
