@@ -59,10 +59,13 @@ async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
     if isinstance(exc, (TicketError, SerenityPermissionError)):
         await ctx.respond(f"❌ {exc}", flags=hikari.MessageFlag.EPHEMERAL)
         return
-    if isinstance(exc, asyncpg.UniqueViolationError):  # type names, case-insensitively
-        await ctx.respond(
-            "❌ A ticket type with that name already exists.", flags=hikari.MessageFlag.EPHEMERAL
+    if isinstance(exc, asyncpg.UniqueViolationError):  # names (case-insensitively), tier positions
+        taken = (
+            "Another change took that tier name or position a moment ago. Try again."
+            if "ticket_tiers" in (exc.constraint_name or "")
+            else "A ticket type with that name already exists."
         )
+        await ctx.respond(f"❌ {taken}", flags=hikari.MessageFlag.EPHEMERAL)
         return
     raise exc
 
@@ -348,7 +351,7 @@ async def type_tier(
     await ctx.respond(
         embed=hikari.Embed(
             title=f"🪜 {ticket_type['name']} tiers",
-            description=describe_tiers(await repo.list_tiers(ticket_type["id"])),
+            description=describe_tiers(await repo.list_tiers(ticket_type["id"]))[:4096],
             color=_GREEN,
         ).set_footer("Tickets start on the lowest tier; /ticket escalate moves them up."),
         flags=hikari.MessageFlag.EPHEMERAL,

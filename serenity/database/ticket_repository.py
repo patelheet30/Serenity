@@ -328,8 +328,9 @@ class TicketRepository:
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window.
-                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3
+                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window,
+                # and it answers an escalation: the tier stops being re-pinged.
+                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' {"" if force else "AND assignee_id IS NULL"}
                 RETURNING *""",
                 ticket_id,
@@ -485,7 +486,7 @@ class TicketRepository:
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """UPDATE tickets SET status = 'closed', closed_at = $2, closed_by = $3,
-                close_reason = $4, channel_id = NULL
+                close_reason = $4, channel_id = NULL, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' RETURNING *""",
                 ticket_id,
                 now,

@@ -667,3 +667,55 @@ async def test_deescalate_reping_and_reassign(service: TicketService, monkeypatc
     assert "back to **T1**" in service.rest.create_message.call_args.args[1]
     with pytest.raises(TicketError, match="hasn't been escalated"):
         await service.deescalate(back, full, BOB, "again")
+
+
+@pytest.mark.asyncio
+async def test_claiming_or_closing_ends_the_re_pings_and_button_mode_never_claims_on_reply(
+    service: TicketService, monkeypatch
+):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    await service.repo.update_type(GUILD, support["id"], claim_mode="button")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+    await service.claim(current, BOB, announce=False)
+    escalated = await service.escalate(current, full, BOB, None, None)
+
+    await service.on_message(message(ticket["channel_id"], in_role(CAROL, "carol", T2_ROLE)))
+    after = await service.repo.get_ticket_by_id(ticket["id"])
+    assert after["assignee_id"] == BOB and after["tier_pinged_at"] is not None  # type: ignore[index]
+
+    await service.claim(after, CAROL, by=CAROL, announce=False)  # the tier takes it with /ticket assign
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_pinged_at"] is None  # type: ignore[index]
+
+    await service.repo.update_ticket(ticket["id"], tier_pinged_at=escalated["tier_pinged_at"])
+    await service.repo.close_ticket(ticket["id"], BOB, None)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_pinged_at"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_tier_schema_constraints(service: TicketService):
+    import asyncpg
+
+    support = await ladder(service)
+    tid = support["id"]
+    with pytest.raises(asyncpg.UniqueViolationError) as raced:  # one tier per rung
+        await service.repo.create_tier(tid, name="Other", position=2)
+    ctx = MagicMock(respond=AsyncMock())  # a lost race reads as one, not as a duplicate type
+    from serenity.extensions.tickets import on_error
+
+    await on_error(ctx, raced.value)
+    assert "tier name or position" in ctx.respond.call_args.args[0]
+    with pytest.raises(asyncpg.UniqueViolationError):  # names are unique case-insensitively
+        await service.repo.create_tier(tid, name="t2", position=5)
+    for minutes in (0, -5):  # 0 would re-ping every sweep
+        with pytest.raises(asyncpg.CheckViolationError):
+            await service.repo.create_tier(tid, name="Zero", position=6, reping_minutes=minutes)
+
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+    escalated = await service.escalate(current, full, BOB, None, None)
+    await service.repo.delete_tier(escalated["tier_id"])
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["tier_id"] is None  # type: ignore[index]

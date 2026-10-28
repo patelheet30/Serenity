@@ -558,14 +558,24 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(event.channel_id)
         if ticket is None or ticket["status"] != "open":
             return
-        ticket_type = await self.full_type(ticket)
+        # Tier roles only get into the channel by escalating, so a never-escalated ticket skips the ladder.
+        if ticket["tier_id"] is not None:
+            ticket_type = await self.full_type(ticket)
+        else:
+            ticket_type = {**await self.repo.get_type(ticket["guild_id"], ticket["type_id"]), "tiers": []}  # type: ignore[dict-item]
         staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)
         await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
         tier = current_tier(ticket, ticket_type)
-        if staff and ticket["tier_pinged_at"] and tier and set(event.member.role_ids) & set(tier["role_ids"]):
-            # The first of an escalated tier to reply takes the ticket; earlier handlers keep
-            # their place (and credit) in the chain. ponytail: two replies at once both claim, the later wins.
-            await self.repo.update_ticket(ticket["id"], tier_pinged_at=None)
+        if (
+            staff
+            and ticket["tier_pinged_at"]
+            and tier
+            and ticket_type["claim_mode"] in ("reply", "both")
+            and set(event.member.role_ids) & set(tier["role_ids"])
+        ):
+            # The first of an escalated tier to reply takes the ticket (claiming clears the re-ping);
+            # earlier handlers keep their place and credit in the chain. In button mode the tier
+            # takes it with /ticket assign. ponytail: two replies at once both claim, the later wins.
             await self.claim(ticket, event.author_id, announce=False, force=True)
         elif staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):
             try:
