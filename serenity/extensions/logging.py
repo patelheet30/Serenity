@@ -4,7 +4,12 @@ import arc
 import hikari
 
 from serenity.core.hooks import require_module
-from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType
+from serenity.core.modules import (
+    ModuleManager,
+    ModuleNotEnabledError,
+    ModuleType,
+    module_available,
+)
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.logging_service import LOG_TYPES, setup_log_channels
 from serenity.utils.logging import get_logger
@@ -19,6 +24,11 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "mod":     "🔨 Mod",
     "ticket":  "🎫 Ticket",
 }
+
+
+# /logging is global, so its log-type choices leave out the ticket log until Tickets launches;
+# allowlisted servers set it with /ticket log-channel. ponytail: drop with the TICKETS_GUILDS gate.
+CHOICE_LOG_TYPES = [t for t in LOG_TYPES if t != "ticket"]
 
 
 plugin = arc.GatewayPlugin(
@@ -249,6 +259,8 @@ async def view(
     )
 
     for log_type in LOG_TYPES:
+        if log_type == "ticket" and not module_available(ctx.guild_id, ModuleType.TICKETS):
+            continue
         label = LOG_TYPE_LABELS[log_type]
         config = config_map.get(log_type)
 
@@ -343,24 +355,11 @@ async def mod_log(
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
-@arc.slash_subcommand("ticket-log", "Set the channel for ticket logs.")
-async def ticket_log(
-    ctx: arc.GatewayContext,
-    channel: arc.Option[
-        hikari.TextableGuildChannel,
-        arc.ChannelParams("The channel to send ticket events to"),
-    ],
-    repo: LoggingRepository = arc.inject(),
-) -> None:
-    await _set_channel(ctx, repo, "ticket", channel)
-
-@logging_group.include
-@arc.with_hook(require_module(ModuleType.LOGGING))
 @arc.slash_subcommand("enable", "Enable a log type.")
 async def enable_log(
     ctx: arc.GatewayContext,
     log_type: arc.Option[
-        str, arc.StrParams("The log type to enable", choices=LOG_TYPES)
+        str, arc.StrParams("The log type to enable", choices=CHOICE_LOG_TYPES)
     ],
     repo: LoggingRepository = arc.inject(),
 ) -> None:
@@ -395,7 +394,7 @@ async def enable_log(
 async def disable_log(
     ctx: arc.GatewayContext,
     log_type: arc.Option[
-        str, arc.StrParams("The log type to disable", choices=LOG_TYPES)
+        str, arc.StrParams("The log type to disable", choices=CHOICE_LOG_TYPES)
     ],
     repo: LoggingRepository = arc.inject(),
 ) -> None:
@@ -416,7 +415,7 @@ async def disable_log(
     await ctx.respond(embed=embed)
 
 # Choice name -> value: picking "all" sends the "*" sentinel that log_ignores stores.
-_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in LOG_TYPES}}
+_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in CHOICE_LOG_TYPES}}
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
