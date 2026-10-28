@@ -356,6 +356,8 @@ async def test_ticket_flows_are_logged(service: TicketService):
     assert not await service.request_transcript_deletion(ticket["id"], ALICE)
     kinds = [c.kwargs["kind"] for c in service.logging.log_ticket_event.call_args_list]
     assert kinds == ["opened", "claimed", "closed", "deletion_requested"]
+    closed_event = service.logging.log_ticket_event.call_args_list[2].kwargs
+    assert closed_event["channel_id"] == ticket["channel_id"]  # for channel ignores
 
 
 @pytest.mark.asyncio
@@ -408,6 +410,8 @@ async def test_priority_renames_and_opener_cant_be_removed(service: TicketServic
     await service.remove_member(ticket, CAROL, BOB)
     kinds = [e["kind"] for e in await service.repo.list_events(ticket["id"])]
     assert kinds == ["opened", "priority", "priority", "member_added", "member_removed"]
+
+
 
 
 async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):

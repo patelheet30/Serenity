@@ -52,3 +52,16 @@ def test_log_types_match_the_schema_and_setup_channel_names():
         )
     assert checks
     assert [t.strip(" '") for t in checks[-1].split(",")] == LOG_TYPES
+
+
+def test_dashboard_labels_every_log_type():
+    """The dashboard's Logging page looks each log type up in TYPES; a missing one crashes it."""
+    import re
+    from pathlib import Path
+
+    from serenity.services.logging_service import LOG_TYPES
+
+    page = Path("dashboard/src/lib/sections/Logging.svelte").read_text()
+    block = re.search(r"const TYPES[^=]*= \{(.*?)\n\t\};", page, re.S)
+    assert block is not None
+    assert re.findall(r"^\t\t(\w+): \{", block.group(1), re.M) == LOG_TYPES
