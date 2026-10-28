@@ -39,10 +39,16 @@ def test_log_types_match_the_schema_and_setup_channel_names():
         "voice": "voice-log",
         "server": "server-log",
         "mod": "mod-log",
+        "ticket": "ticket-log",
     }
-    schema = Path("serenity/database/migrations/001_initial.sql").read_text()
-    table = re.search(r"CREATE TABLE log_channels \((.*?)\n\);", schema, re.S)
-    assert table is not None
-    check = re.search(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1))
-    assert check is not None
-    assert [t.strip(" '") for t in check.group(1).split(",")] == LOG_TYPES
+    # The newest migration that (re)defines the log_channels CHECK wins.
+    checks = []
+    for path in sorted(Path("serenity/database/migrations").glob("*.sql")):
+        sql = path.read_text()
+        table = re.search(r"CREATE TABLE log_channels \((.*?)\n\);", sql, re.S)
+        checks += re.findall(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1) if table else "")
+        checks += re.findall(
+            r"log_channels_log_type_check\s+CHECK \(log_type IN \(([^)]*)\)\)", sql
+        )
+    assert checks
+    assert [t.strip(" '") for t in checks[-1].split(",")] == LOG_TYPES

@@ -288,3 +288,64 @@ async def test_reopen_restores_and_keeps_earlier_messages(service: TicketService
     await service.repo.pool.execute("UPDATE tickets SET closed_at = closed_at - 8 * 86400")
     with pytest.raises(TicketError, match="more than 7 days"):
         await service.reopen(GUILD, 1, staff(BOB, "bob"))
+
+
+@pytest.mark.asyncio
+async def test_ticket_channels_never_get_auto_slowmode(monkeypatch):
+    from serenity.core.types import GuildConfig
+    from serenity.extensions import tasks
+
+    ticket_channel, normal_channel = 501, 502
+    tasks._LAST_SCORED.clear()
+    client = MagicMock()
+    client.app.cache.get_available_guilds_view.return_value = {GUILD: None}
+    client.app.cache.get_guild_channel.side_effect = lambda _: MagicMock(spec=hikari.GuildTextChannel)
+    client.get_type_dependency.return_value = MagicMock(open_channels={ticket_channel})
+    repo = AsyncMock()
+    repo.get_guild_config.return_value = GuildConfig(GUILD, True, 10, 1)
+    repo.get_enabled_channels.return_value = [ticket_channel, normal_channel]
+    engine = AsyncMock()
+    engine.calculate_with_current.side_effect = RuntimeError("stop here")
+    monkeypatch.setattr(tasks.asyncio, "sleep", AsyncMock())
+
+    await tasks.update_slowmode._coro(client=client, repo=repo, engine=engine)
+    assert [c.args[0] for c in engine.calculate_with_current.call_args_list] == [normal_channel]
+
+
+@pytest.mark.asyncio
+async def test_ticket_events_go_to_the_ticket_log_and_respect_ignores(pg_repo: Repository):
+    from serenity.database.logging_repository import LoggingRepository
+    from serenity.services.logging_service import LoggingService
+
+    assert pg_repo.pool is not None
+    log_repo = LoggingRepository(pg_repo.pool)
+    await log_repo.set_log_channel(GUILD, "ticket", 900)
+    rest = AsyncMock()
+    logging = LoggingService(log_repo, rest)
+
+    await logging.log_ticket_event(
+        guild_id=GUILD, kind="opened", number=1, type_name="Support", actor_id=ALICE, channel_id=5
+    )
+    assert rest.create_message.call_args.args[0] == 900
+    assert "Ticket opened | #1" in rest.create_message.call_args.kwargs["embed"].title
+
+    await log_repo.add_ignore(GUILD, "user", BOB, "ticket")
+    await logging.log_ticket_event(
+        guild_id=GUILD, kind="closed", number=1, type_name="Support", actor_id=BOB
+    )
+    assert rest.create_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ticket_flows_are_logged(service: TicketService):
+    service.logging = AsyncMock()
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.claim(ticket, BOB, announce=False)
+    await service.close(ticket, support, BOB, "done")
+    assert await service.request_transcript_deletion(ticket["id"], ALICE)
+    assert not await service.request_transcript_deletion(ticket["id"], ALICE)
+    kinds = [c.kwargs["kind"] for c in service.logging.log_ticket_event.call_args_list]
+    assert kinds == ["opened", "claimed", "closed", "deletion_requested"]

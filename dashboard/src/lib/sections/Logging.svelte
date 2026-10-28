@@ -28,7 +28,8 @@
 		message: { n: 'Message', d: 'Edits, deletes and bulk deletes' },
 		voice: { n: 'Voice', d: 'Joins, leaves and moves' },
 		server: { n: 'Server', d: 'Channels, roles, emoji, settings and dashboard changes' },
-		mod: { n: 'Mod', d: 'Every moderation case' }
+		mod: { n: 'Mod', d: 'Every moderation case' },
+		ticket: { n: 'Ticket', d: 'Tickets opened, claimed, closed and reopened' }
 	};
 	const KEYS = Object.keys(TYPES);
 

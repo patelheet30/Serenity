@@ -18,7 +18,7 @@ _BLUE = hikari.Color(0x5865F2)
 _ORANGE = hikari.Color(0xE67E22)
 _GREY = hikari.Color(0x99AAB5)
 
-LOG_TYPES = ["member", "message", "voice", "server", "mod"]
+LOG_TYPES = ["member", "message", "voice", "server", "mod", "ticket"]
 CHANNEL_NAMES: dict[str, str] = {t: f"{t}-log" for t in LOG_TYPES}
 LOGS_CATEGORY = "📋 Serenity Logs"
 
@@ -29,8 +29,11 @@ async def setup_log_channels(
     repo: LoggingRepository,
     guild_id: int,
     bot_id: Optional[int],
+    tickets_enabled: bool = False,
 ) -> tuple[dict[str, hikari.GuildChannel], list[str]]:
     """Give every log type a channel under the Serenity Logs category (/logging setup).
+
+    The ticket log only gets one in servers using the Tickets module.
 
     Idempotent: log types whose channel still exists are left alone, and the category and
     channels are reused by name before anything new is created. Returns each log type's channel
@@ -43,7 +46,9 @@ async def setup_log_channels(
         if c["channel_id"]
     }
     result = {t: ch for t, ch in configured.items() if ch is not None}
-    missing = [t for t in LOG_TYPES if t not in result]
+    missing = [
+        t for t in LOG_TYPES if t not in result and (t != "ticket" or tickets_enabled)
+    ]
     if not missing:
         return result, []
 
@@ -731,6 +736,44 @@ class LoggingService:
             reason=reason,
             case_number=case_number,
             duration=duration,
+        )
+
+    async def log_ticket_event(
+        self,
+        *,
+        guild_id: int,
+        kind: str,
+        number: int,
+        type_name: str,
+        actor_id: Optional[int],
+        channel_id: Optional[int] = None,
+        detail: Optional[str] = None,
+    ) -> None:
+        """A ticket was opened, claimed, closed, ... posted to the Ticket log."""
+        title, color = {
+            "opened": ("🎫 Ticket opened", _GREEN),
+            "claimed": ("🙋 Ticket claimed", _BLUE),
+            "assigned": ("📌 Ticket assigned", _BLUE),
+            "unclaimed": ("↩️ Ticket unclaimed", _YELLOW),
+            "closed": ("🔒 Ticket closed", _GREY),
+            "reopened": ("↩️ Ticket reopened", _GREEN),
+            "deletion_requested": ("🗑️ Transcript deletion requested", _ORANGE),
+        }.get(kind, (f"🎫 Ticket {kind.replace('_', ' ')}", _GREY))
+        embed = hikari.Embed(title=f"{title} | #{number}", color=color, timestamp=_now())
+        embed.add_field("Type", _truncate(type_name, 256), inline=True)
+        if actor_id:
+            embed.add_field("By", f"<@{actor_id}>", inline=True)
+        if channel_id:
+            embed.add_field("Channel", f"<#{channel_id}>", inline=True)
+        if detail:
+            embed.add_field("Details", _truncate(detail, 1024), inline=False)
+        await self._send(
+            log_event=f"ticket_{kind}",
+            guild_id=guild_id,
+            log_type="ticket",
+            embed=embed,
+            channel_id=channel_id,
+            user_id=actor_id,
         )
 
     async def log_dashboard_change(

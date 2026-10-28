@@ -688,11 +688,7 @@ async def request_deletion(
     service: TicketService,
     ticket_id: int,
 ) -> None:
-    found = await service.repo.get_ticket_by_id(ticket_id)
-    if found is None or found["opener_id"] != interaction.user.id:
-        raise TicketError("That transcript isn't yours.")
-    if await service.repo.request_transcript_deletion(ticket_id):
-        await service.repo.add_event(ticket_id, "deletion_requested", interaction.user.id)
+    if await service.request_transcript_deletion(ticket_id, interaction.user.id):
         await reply(interaction, "✅ Your request was sent to the server's admins.")
     else:
         await reply(interaction, "You've already asked, or the transcript is already gone.")

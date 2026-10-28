@@ -368,7 +368,14 @@ async def logging_setup(request: web.Request) -> web.Response:
     me = bot.get_me()
     try:
         channels, failed = await setup_log_channels(
-            bot.rest, bot.cache, request.app[LOG_REPO], guild_id(request), me.id if me else None
+            bot.rest,
+            bot.cache,
+            request.app[LOG_REPO],
+            guild_id(request),
+            me.id if me else None,
+            tickets_enabled=await request.app[MODULES].is_enabled(
+                guild_id(request), ModuleType.TICKETS
+            ),
         )
     except hikari.ForbiddenError:
         raise ApiError(

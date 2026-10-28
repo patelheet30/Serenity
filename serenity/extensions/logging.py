@@ -4,7 +4,7 @@ import arc
 import hikari
 
 from serenity.core.hooks import require_module
-from serenity.core.modules import ModuleNotEnabledError, ModuleType
+from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.logging_service import LOG_TYPES, setup_log_channels
 from serenity.utils.logging import get_logger
@@ -17,6 +17,7 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "voice":   "🔊 Voice",
     "server":  "⚙️ Server",
     "mod":     "🔨 Mod",
+    "ticket":  "🎫 Ticket",
 }
 
 
@@ -137,15 +138,17 @@ async def _set_channel(
 @arc.with_hook(require_module(ModuleType.LOGGING))
 @arc.slash_subcommand(
     "setup",
-    "Quick setup — creates all 5 log channels automatically.",
+    "Quick setup — creates every log channel automatically.",
 )
 async def setup(
     ctx: arc.GatewayContext,
     repo: LoggingRepository = arc.inject(),
+    modules: ModuleManager = arc.inject(),
 ) -> None:
     """
     Gives each log type a channel under a '📋 Serenity Logs' category: member-log,
-    message-log, voice-log, server-log, mod-log. Safe to re-run: existing channels are kept.
+    message-log, voice-log, server-log, mod-log, ticket-log. Safe to re-run: existing channels
+    are kept.
 
     Permissions are set so only the bot can send messages.
     Admins can adjust visibility by editing the category permissions.
@@ -165,7 +168,12 @@ async def setup(
 
     try:
         channels, failed = await setup_log_channels(
-            app.rest, app.cache, repo, guild_id, bot_user.id if bot_user else None
+            app.rest,
+            app.cache,
+            repo,
+            guild_id,
+            bot_user.id if bot_user else None,
+            tickets_enabled=await modules.is_enabled(guild_id, ModuleType.TICKETS),
         )
     except hikari.ForbiddenError:
         await ctx.respond(
@@ -332,6 +340,19 @@ async def mod_log(
     repo: LoggingRepository = arc.inject(),
 ) -> None:
     await _set_channel(ctx, repo, "mod", channel)
+
+@logging_group.include
+@arc.with_hook(require_module(ModuleType.LOGGING))
+@arc.slash_subcommand("ticket-log", "Set the channel for ticket logs.")
+async def ticket_log(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[
+        hikari.TextableGuildChannel,
+        arc.ChannelParams("The channel to send ticket events to"),
+    ],
+    repo: LoggingRepository = arc.inject(),
+) -> None:
+    await _set_channel(ctx, repo, "ticket", channel)
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
