@@ -263,6 +263,11 @@ def test_parse_duration():
         (r"(a{0,2}){16}b", True),
         (r"(a|aa){8}b", True),
         (r"(a?){30}b", True),  # an optional inside a repeat: two paths per iteration
+        (r"(?:a?){30}b", True),
+        (r"(?>(?:a?){30})b", True),  # atomic groups are walked too
+        (r"((a?){30}){2}b", True),
+        (r"(a?){2,}b", True),
+        (r"(\d{3}-)+\d", False),
         (r"(\d{3}-){2}\d{4}", False),  # a fixed-size repeat inside a bounded one is fine
     ],
 )
