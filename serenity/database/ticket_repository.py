@@ -239,8 +239,9 @@ class TicketRepository:
             # means a case and a ticket in one guild can briefly wait on each other.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
             row = await conn.fetchrow(
-                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at)
-                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5
+                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at, stage)
+                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5,
+                       (SELECT stages -> 0 ->> 'name' FROM ticket_types WHERE id = $2)  -- the first stage
                 FROM tickets WHERE guild_id = $1
                 HAVING EXISTS (SELECT 1 FROM ticket_types WHERE id = $2 AND guild_id = $1)
                 RETURNING *""",
@@ -363,7 +364,7 @@ class TicketRepository:
         )
         return _decode(row)
 
-    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> dict:
+    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> Optional[dict]:
         """Count a message: staff replies join the credit chain and hand the turn to the opener."""
         pool = self._require_pool()
         now = int(time.time())
@@ -388,7 +389,7 @@ class TicketRepository:
                 "opener" if staff else "staff",
                 staff,
             )
-        return _decode(row)  # type: ignore[return-value]
+        return _decode(row)
 
     async def list_handlers(self, ticket_id: int) -> list[dict]:
         pool = self._require_pool()

@@ -26,7 +26,7 @@ def member(user_id: int, name: str) -> MagicMock:
 
 
 @pytest.fixture
-def service(pg_repo: Repository) -> TicketService:
+def service(pg_repo: Repository):
     assert pg_repo.pool is not None
     ids = itertools.count(1_300_000_000_000_000_000)
     rest = AsyncMock()
@@ -39,7 +39,10 @@ def service(pg_repo: Repository) -> TicketService:
     rest.create_guild_text_channel.side_effect = create_channel
     cache = MagicMock()
     cache.get_me.return_value = None
-    return TicketService(TicketRepository(pg_repo.pool), rest, cache, ModuleManager(pg_repo))
+    service = TicketService(TicketRepository(pg_repo.pool), rest, cache, ModuleManager(pg_repo))
+    yield service
+    for task in service._topic_tasks.values():  # pending topic edits, before the pool closes
+        task.cancel()
 
 
 @pytest.mark.asyncio
@@ -586,3 +589,60 @@ async def test_off_hours_auto_reply_and_types_closed_outside_hours(service: Tick
     urgent = await service.repo.update_type(GUILD, urgent["id"], schedule=tomorrow_only)
     with pytest.raises(TicketError, match="only be opened during support hours"):
         await service.open_ticket(GUILD, member(CAROL, "carol"), urgent, {})  # type: ignore[arg-type]
+
+
+SALES_STAGES = [
+    {"name": "Inquiry", "color": None, "terminal": False, "auto_close": True},
+    {"name": "Quoted", "color": 0x57F287, "terminal": False, "auto_close": True},
+    {"name": "Paid", "color": None, "terminal": True, "auto_close": False},
+]
+
+
+@pytest.mark.asyncio
+async def test_stages_start_first_move_with_history_and_reset_on_transfer(service: TicketService):
+    service.cache.get_member.return_value = None
+    sales = await service.repo.create_type(GUILD, "Sales", staff_role_ids=[STAFF_ROLE], stages=SALES_STAGES)
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), sales, {})
+    assert ticket["stage"] == "Inquiry"
+    assert "Inquiry" in service.rest.create_guild_text_channel.call_args.kwargs["topic"]
+
+    with pytest.raises(TicketError, match="no stage called"):
+        await service.set_stage(ticket, sales, "Shipped", BOB)
+    with pytest.raises(TicketError, match="already at"):
+        await service.set_stage(ticket, sales, "inquiry", BOB)
+
+    quoted = await service.set_stage(ticket, sales, "quoted", BOB)
+    assert quoted["stage"] == "Quoted"
+    assert not service.rest.create_message.call_args.kwargs["components"]  # not terminal: no close offer
+    paid = await service.set_stage(quoted, sales, "Paid", BOB)
+    [row] = service.rest.create_message.call_args.kwargs["components"]
+    assert row.components[0].custom_id == f"ticket:closeas:{ticket['id']}"
+
+    history = [e["data"] for e in await service.repo.list_events(ticket["id"]) if e["kind"] == "stage"]
+    assert history == [{"from": "Inquiry", "to": "Quoted"}, {"from": "Quoted", "to": "Paid"}]
+
+    service.cache.get_guild_channel.return_value = MagicMock(permission_overwrites={})
+    moved = await service.transfer(paid, sales, support, BOB)
+    assert moved["stage"] is None  # Support has no workflow
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_flips_edit_the_topic_at_most_once_per_interval(service: TicketService):
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+
+    await service.on_message(message(channel, staff(BOB, "bob")))  # now waiting on the opener
+    for _ in range(200):  # no edit yet, so it runs straight away; wait for it, up to 2s
+        if service.rest.edit_channel.await_count:
+            break
+        await asyncio.sleep(0.01)
+    service.rest.edit_channel.assert_awaited_once_with(channel, topic="Ticket #1 · Support · waiting on member")
+
+    await service.on_message(message(channel, member(ALICE, "alice")))  # back to staff
+    await service.on_message(message(channel, staff(BOB, "bob")))
+    await asyncio.sleep(0.01)
+    assert service.rest.edit_channel.await_count == 1  # the next edit waits out the interval
+    assert list(service._topic_tasks) == [channel]  # one pending edit for the whole burst
