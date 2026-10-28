@@ -101,7 +101,7 @@ def describe_type(ticket_type: dict, service: TicketService) -> str:
     questions = "\n".join(f"• {f['label']}" for f in ticket_type["fields"]) or "None"
     retention = ticket_type["retention_days"]
     auto_close = ticket_type["auto_close_hours"]
-    stages =" → ".join(
+    stages = " → ".join(
         s["name"] + (" ✓" if s["terminal"] else "") for s in ticket_type["stages"]
     ) or "None"
     return (
