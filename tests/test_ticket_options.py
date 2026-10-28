@@ -55,3 +55,11 @@ def test_panel_styles_map_to_stored_values():
     assert choices(tickets.panel_post, "style") == {"Buttons": "buttons", "Dropdown": "menu"}
     assert default(tickets.panel_post, "style") == "buttons"
     assert choices(tickets.panel_edit, "style") == choices(tickets.panel_post, "style")
+
+
+def test_module_hook_gates_every_ticket_command(client):
+    """The plugin-wide require_module hook reaches every /ticket command, subgroups included."""
+    commands = list(tickets.plugin.walk_commands(hikari.CommandType.SLASH, callable_only=True))
+    assert commands
+    for command in commands:
+        assert "module_check_hook" in [h.__name__ for h in command._resolve_hooks()], command.name
