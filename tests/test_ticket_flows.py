@@ -182,3 +182,109 @@ async def test_auto_unclaim_after_silence(service: TicketService):
     await service.auto_unclaim(claimed["last_activity_at"] + 2 * 3600 + 1)
     assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
     assert "No staff reply for 2h" in service.rest.create_message.call_args.args[1]
+
+
+class FakeHistory:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def limit(self, _):
+        return self
+
+    def __aiter__(self):
+        async def gen():
+            for m in self.messages:
+                yield m
+
+        return gen()
+
+
+def chat(message_id: int, author_id: int, name: str, content: str) -> MagicMock:
+    from datetime import datetime, timezone
+
+    author = MagicMock(id=author_id, username=name, display_name=name, is_bot=False)
+    author.display_avatar_url = f"https://cdn/{author_id}.png"
+    return MagicMock(
+        id=message_id, author=author, content=content, embeds=[], attachments=[],
+        timestamp=datetime(2026, 10, 28, tzinfo=timezone.utc), edited_timestamp=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_stores_transcript_credits_and_cleans_up(service: TicketService):
+    from serenity.services.ticket_service import render_transcript
+
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support", fields=[
+        {"key": "order", "label": "Order", "style": "short", "required": True}
+    ])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {"order": "A1"})
+    await service.repo.record_message(ticket["id"], BOB, staff=True)
+    await service.repo.add_note(ticket["id"], BOB, "refund approved")
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory(
+        [chat(1, ALICE, "alice", "it broke"), chat(2, BOB, "bob", "fixed")]
+    ))
+
+    closed = await service.close(ticket, support, BOB, "fixed")
+    assert closed["status"] == "closed" and closed["channel_id"] is None
+    assert closed["close_reason"] == "fixed" and closed["closed_by"] == BOB
+    service.rest.delete_channel.assert_awaited_once()
+    assert ticket["channel_id"] not in service.open_channels
+    assert (await service.repo.list_handlers(ticket["id"]))[0]["credited"] is True
+
+    transcript = await service.repo.get_transcript(ticket["id"])
+    assert transcript is not None
+    assert transcript["expires_at"] == closed["closed_at"] + 30 * 86400
+    doc = transcript["document"]
+    assert [m["content"] for m in doc["messages"]] == ["it broke", "fixed"]
+    assert doc["fields"] == {"Order": "A1"} and doc["notes"][0]["body"] == "refund approved"
+    assert "refund approved" not in render_transcript(doc, staff=False)
+    assert "refund approved" in render_transcript(doc, staff=True)
+
+    dm = service.rest.create_message.call_args
+    assert dm.kwargs["attachment"].filename == "ticket-1.txt"
+    with pytest.raises(TicketError, match="already closed"):
+        await service.close(ticket, support, BOB, None)
+
+
+@pytest.mark.asyncio
+async def test_transcript_retention_and_holds(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support", retention_days=0)
+    kept = await service.repo.create_ticket(GUILD, support["id"], ALICE, {})
+    expired = await service.repo.create_ticket(GUILD, support["id"], ALICE, {})
+    held = await service.repo.create_ticket(GUILD, support["id"], ALICE, {})
+    await service.repo.save_transcript(kept["id"], GUILD, {}, None)
+    await service.repo.save_transcript(expired["id"], GUILD, {}, 100)
+    await service.repo.save_transcript(held["id"], GUILD, {}, 100)
+    await service.repo.hold_transcript(held["id"], 7)
+
+    assert await service.repo.purge_expired_transcripts(now=200) == 1
+    assert await service.repo.get_transcript(expired["id"]) is None
+    assert await service.repo.get_transcript(kept["id"]) is not None
+    assert await service.repo.get_transcript(held["id"]) is not None
+    assert await service.retention_days(GUILD, support) == 0
+
+
+@pytest.mark.asyncio
+async def test_reopen_restores_and_keeps_earlier_messages(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.MANAGE_GUILD)
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([chat(1, ALICE, "alice", "first")]))
+    await service.close(ticket, support, ALICE, None)
+
+    reopened = await service.reopen(GUILD, 1, staff(BOB, "bob"))
+    assert reopened["status"] == "open" and reopened["channel_id"] in service.open_channels
+    assert (await service.repo.get_transcript(ticket["id"]))["expires_at"] is None  # type: ignore[index]
+
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([chat(5, ALICE, "alice", "again")]))
+    await service.close(reopened, support, BOB, None)
+    doc = (await service.repo.get_transcript(ticket["id"]))["document"]  # type: ignore[index]
+    assert [m["content"] for m in doc["messages"]] == ["first", "again"]
+
+    await service.repo.pool.execute("UPDATE tickets SET closed_at = closed_at - 8 * 86400")
+    with pytest.raises(TicketError, match="more than 7 days"):
+        await service.reopen(GUILD, 1, staff(BOB, "bob"))

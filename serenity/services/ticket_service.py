@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 import hikari
@@ -20,6 +22,8 @@ MAX_LABEL = 45  # and each input's label is at most 45 characters
 PANEL_COLOR = hikari.Color(0x5865F2)
 CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
+REOPEN_WINDOW = 7 * 86400
+TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 
 # What the opener and staff can do in a ticket channel.
 TICKET_MEMBER_ALLOW = (
@@ -77,6 +81,62 @@ def render_channel_name(
 def overflow_name(base: str, index: int) -> str:
     """The category tickets overflow into once `base` is full: "Support 2", "Support 3", ..."""
     return base if index == 1 else f"{base} {index}"
+
+
+def message_entry(message: hikari.Message, color: Optional[int]) -> dict:
+    """One message as stored in a transcript: content plus a snapshot of who sent it."""
+    author = message.author
+    return {
+        "id": message.id,
+        "author": {
+            "id": author.id,
+            "name": author.display_name or author.username,
+            "avatar": str(author.display_avatar_url),
+            "color": color,
+            "bot": author.is_bot,
+        },
+        "content": message.content or "",
+        "timestamp": int(message.timestamp.timestamp()),
+        "edited": message.edited_timestamp is not None,
+        "embeds": [
+            {
+                "title": e.title,
+                "description": e.description,
+                "fields": [{"name": f.name, "value": f.value} for f in e.fields],
+            }
+            for e in message.embeds
+        ],
+        # Metadata only: files aren't copied, so these links stop working when Discord expires them.
+        "attachments": [
+            {"filename": a.filename, "size": a.size, "url": a.url, "content_type": a.media_type}
+            for a in message.attachments
+        ],
+    }
+
+
+def render_transcript(document: dict, *, staff: bool) -> str:
+    """A plain-text transcript. Staff notes are only included for staff."""
+
+    def when(ts: int) -> str:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    t = document["ticket"]
+    lines = [f"Ticket #{t['number']} · {t['type']}", f"Opened {when(t['opened_at'])} by {t['opener_id']}"]
+    if t.get("closed_at"):
+        lines.append(f"Closed {when(t['closed_at'])} by {t['closed_by']}: {t.get('reason') or 'no reason'}")
+    for label, answer in document["fields"].items():
+        lines.append(f"{label}: {answer}")
+    lines.append("")
+    for m in document["messages"]:
+        lines.append(f"[{when(m['timestamp'])}] {m['author']['name']}: {m['content']}")
+        for e in m["embeds"]:
+            lines.append(f"    [embed] {e.get('title') or ''} {e.get('description') or ''}".rstrip())
+        for a in m["attachments"]:
+            lines.append(f"    [file] {a['filename']} {a['url']}")
+    if staff and document.get("notes"):
+        lines += ["", "Staff notes (never shown to the opener):"]
+        lines += [f"[{when(n['created_at'])}] {n['author_id']}: {n['body']}" for n in document["notes"]]
+    return "\n".join(lines) + "\n"
 
 
 def is_staff(
@@ -339,10 +399,10 @@ class TicketService:
             self.open_channels.add(channel.id)
             ticket["channel_id"] = channel.id
 
-        await self.post_welcome(ticket, ticket_type, member)
+        await self.post_welcome(ticket, ticket_type, member.id)
         return ticket
 
-    async def post_welcome(self, ticket: dict, ticket_type: dict, opener: hikari.User) -> None:
+    async def post_welcome(self, ticket: dict, ticket_type: dict, opener_id: int) -> None:
         days = await self.retention_days(ticket["guild_id"], ticket_type)
         if not ticket_type["transcripts"]:
             privacy = "This ticket isn't recorded."
@@ -371,10 +431,10 @@ class TicketService:
         staff = " ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"])
         await self.rest.create_message(
             ticket["channel_id"],
-            f"{opener.mention} {staff}".strip(),
+            f"<@{opener_id}> {staff}".strip(),
             embed=embed,
             components=[row],
-            user_mentions=[opener.id],
+            user_mentions=[opener_id],
             role_mentions=ticket_type["staff_role_ids"],
         )
 
@@ -451,3 +511,171 @@ class TicketService:
                 f"⏰ No staff reply for {ticket['auto_unclaim_hours']}h, so <@{ticket['assignee_id']}> "
                 f"was unassigned. {roles}".strip(),
             )
+
+    # Closing
+
+    def _role_color(self, guild_id: int, user_id: int) -> Optional[int]:
+        member = self.cache.get_member(guild_id, user_id)
+        if member is None:
+            return None
+        colored = [r for r in member.get_roles() if r.color]
+        return int(max(colored, key=lambda r: r.position).color) if colored else None
+
+    async def build_transcript(self, ticket: dict, ticket_type: dict) -> dict:
+        previous = await self.repo.get_transcript(ticket["id"])  # from before a reopen
+        messages = previous["document"]["messages"] if previous else []
+        seen = {m["id"] for m in messages}
+        colors: dict[int, Optional[int]] = {}
+        if ticket["channel_id"]:
+            async for message in self.rest.fetch_messages(
+                ticket["channel_id"], after=hikari.Snowflake.min()
+            ).limit(TRANSCRIPT_MESSAGE_LIMIT):
+                if message.id in seen:
+                    continue
+                if message.author.id not in colors:
+                    colors[message.author.id] = self._role_color(ticket["guild_id"], message.author.id)
+                messages.append(message_entry(message, colors[message.author.id]))
+        labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
+        return {
+            "ticket": {
+                "number": ticket["number"],
+                "type": ticket_type["name"],
+                "opener_id": ticket["opener_id"],
+                "opened_at": ticket["opened_at"],
+                "closed_at": ticket.get("closed_at"),
+                "closed_by": ticket.get("closed_by"),
+                "reason": ticket.get("close_reason"),
+            },
+            "fields": {labels.get(k, k): v for k, v in ticket["fields"].items()},
+            "messages": messages,
+            "events": [
+                {"kind": e["kind"], "actor_id": e["actor_id"], "data": e["data"], "created_at": e["created_at"]}
+                for e in await self.repo.list_events(ticket["id"])
+            ],
+            "notes": [  # staff only
+                {"author_id": n["author_id"], "body": n["body"], "created_at": n["created_at"]}
+                for n in await self.repo.list_notes(ticket["id"])
+            ],
+        }
+
+    def can_close(self, member: Optional[hikari.Member], ticket: dict, ticket_type: dict) -> bool:
+        return member is not None and (
+            member.id == ticket["opener_id"] or self.is_staff(member, ticket_type)
+        )
+
+    async def close(
+        self, ticket: dict, ticket_type: dict, closed_by: int, reason: Optional[str]
+    ) -> dict:
+        """Close a ticket: transcript first, then the record, then the channel, then a DM."""
+        document: Optional[dict] = None
+        if ticket_type["transcripts"]:
+            document = await self.build_transcript(ticket, ticket_type)
+
+        closed = await self.repo.close_ticket(ticket["id"], closed_by, reason)
+        if closed is None:
+            raise TicketError("This ticket is already closed.")
+
+        if document is not None:
+            document["ticket"].update(
+                closed_at=closed["closed_at"], closed_by=closed_by, reason=reason
+            )
+            days = await self.retention_days(ticket["guild_id"], ticket_type)
+            expires = closed["closed_at"] + days * 86400 if days else None
+            await self.repo.save_transcript(ticket["id"], ticket["guild_id"], document, expires)
+
+        if ticket["channel_id"]:
+            self.open_channels.discard(ticket["channel_id"])
+            try:
+                await self.rest.delete_channel(ticket["channel_id"], reason=f"Ticket #{ticket['number']} closed")
+            except hikari.NotFoundError:
+                pass
+
+        await self._dm_closed(closed, ticket_type, closed_by, reason, document)
+        return closed
+
+    async def _dm_closed(
+        self, ticket: dict, ticket_type: dict, closed_by: int, reason: Optional[str], document: Optional[dict]
+    ) -> None:
+        guild = self.cache.get_guild(ticket["guild_id"])
+        embed = hikari.Embed(
+            title=f"Your ticket #{ticket['number']} was closed",
+            description=f"**{ticket_type['name']}** in **{guild.name if guild else 'the server'}**",
+            color=PANEL_COLOR,
+        )
+        embed.add_field("Closed by", f"<@{closed_by}>", inline=True)
+        embed.add_field("Reason", (reason or "No reason given")[:1024], inline=True)
+        kwargs: dict = {}
+        if document is not None:
+            embed.set_footer("The transcript is attached. Staff can reopen this ticket for 7 days.")
+            kwargs["attachment"] = hikari.Bytes(
+                render_transcript(document, staff=False).encode(), f"ticket-{ticket['number']}.txt"
+            )
+            kwargs["component"] = self.rest.build_message_action_row().add_interactive_button(
+                hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
+                label="Ask to delete this transcript",
+            )
+        try:
+            dm = await self.rest.create_dm_channel(ticket["opener_id"])
+            await self.rest.create_message(dm, embed=embed, **kwargs)
+        except (hikari.ForbiddenError, hikari.NotFoundError, hikari.BadRequestError):
+            pass  # DMs closed, or the opener left: they still have nothing to lose
+
+    async def request_close(self, ticket: dict, staff_id: int) -> None:
+        row = (
+            self.rest.build_message_action_row()
+            .add_interactive_button(hikari.ButtonStyle.SUCCESS, f"ticket:closeyes:{ticket['id']}", label="Yes, close it")
+            .add_interactive_button(hikari.ButtonStyle.SECONDARY, f"ticket:closeno:{ticket['id']}", label="No, keep it open")
+        )
+        await self.rest.create_message(
+            ticket["channel_id"],
+            f"<@{ticket['opener_id']}>, <@{staff_id}> thinks this is sorted. Can we close this ticket?",
+            component=row,
+            user_mentions=[ticket["opener_id"]],
+        )
+        await self.repo.add_event(ticket["id"], "close_requested", staff_id)
+
+    async def reopen(self, guild_id: int, number: int, actor: hikari.Member) -> dict:
+        ticket = await self.repo.get_ticket(guild_id, number)
+        if ticket is None:
+            raise TicketError(f"There's no ticket #{number}.")
+        if ticket["status"] == "open":
+            raise TicketError(f"Ticket #{number} is still open: <#{ticket['channel_id']}>.")
+        if ticket["closed_at"] < time.time() - REOPEN_WINDOW:
+            raise TicketError(f"Ticket #{number} closed more than 7 days ago, so it can't be reopened.")
+        ticket_type = await self.repo.get_type(guild_id, ticket["type_id"])
+        self.require_staff(actor, ticket_type)  # type: ignore[arg-type]
+
+        async with self._open_locks[guild_id]:
+            opener = self.cache.get_member(guild_id, ticket["opener_id"])
+            channel = await self.rest.create_guild_text_channel(
+                guild_id,
+                render_channel_name(
+                    ticket_type["name_template"],  # type: ignore[index]
+                    type_name=ticket_type["name"],  # type: ignore[index]
+                    number=number,
+                    username=opener.username if opener else str(ticket["opener_id"]),
+                    fields=ticket["fields"],
+                ),
+                category=await self._category(guild_id, ticket_type["category_id"]) or hikari.UNDEFINED,  # type: ignore[index]
+                permission_overwrites=self.overwrites(guild_id, ticket_type, [ticket["opener_id"]]),  # type: ignore[arg-type]
+                reason=f"Ticket #{number} reopened by {actor.username}",
+            )
+            ticket = await self.repo.reopen_ticket(ticket["id"], channel.id, actor.id)
+            self.open_channels.add(channel.id)
+
+        await self.post_welcome(ticket, ticket_type, ticket["opener_id"])  # type: ignore[arg-type]
+        transcript = await self.repo.get_transcript(ticket["id"])
+        recent = transcript["document"]["messages"][-10:] if transcript else []
+        context = "\n".join(f"**{m['author']['name']}:** {m['content'][:200]}" for m in recent if m["content"])
+        embed = hikari.Embed(
+            title=f"↩️ Reopened by {actor.display_name or actor.username}",
+            description=(f"Last messages before it closed:\n{context}" if context else "No earlier messages.")[:4096],
+            color=PANEL_COLOR,
+        )
+        await self.rest.create_message(channel.id, embed=embed)
+        return ticket
+
+    async def purge_transcripts(self, now: int) -> None:
+        purged = await self.repo.purge_expired_transcripts(now)
+        if purged:
+            logger.info(f"Deleted {purged} expired ticket transcript(s).")

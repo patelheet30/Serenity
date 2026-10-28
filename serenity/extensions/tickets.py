@@ -7,13 +7,14 @@ import arc
 import hikari
 
 from serenity.core.hooks import require_module
-from serenity.core.modules import ModuleNotEnabledError, ModuleType
+from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
     TicketError,
     TicketService,
     member_permissions,
     parse_questions,
+    render_transcript,
 )
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -34,6 +35,8 @@ ticket = plugin.include_slash_group("ticket", "Support tickets.")
 type_group = ticket.include_subgroup("type", "Configure the kinds of ticket members can open.")
 panel_group = ticket.include_subgroup("panel", "Post the messages members open tickets from.")
 blacklist_group = ticket.include_subgroup("blacklist", "Stop members from opening tickets.")
+transcript_group = ticket.include_subgroup("transcript", "Closed tickets' transcripts.")
+settings_group = ticket.include_subgroup("settings", "Server-wide ticket settings.")
 
 PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
 MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
@@ -461,6 +464,130 @@ async def assign(
     )
 
 
+@ticket.include
+@arc.slash_subcommand("close", "Close this ticket.")
+async def close(
+    ctx: arc.GatewayContext,
+    reason: arc.Option[Optional[str], arc.StrParams("Why it's being closed.", max_length=500)] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    if not service.can_close(ctx.member, current, ticket_type):
+        raise TicketError("Only the opener or staff can close this ticket.")
+    await ctx.respond("🔒 Closing this ticket…")
+    await service.close(current, ticket_type, ctx.user.id, reason)
+
+
+@ticket.include
+@arc.slash_subcommand("close-request", "Ask the opener whether this ticket can be closed.")
+async def close_request(ctx: arc.GatewayContext, service: TicketService = arc.inject()) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.request_close(current, ctx.user.id)
+    await ctx.respond("✅ Asked the opener.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@ticket.include
+@arc.slash_subcommand("reopen", "Reopen a ticket closed in the last 7 days.")
+async def reopen(
+    ctx: arc.GatewayContext,
+    number: arc.Option[int, arc.IntParams("Ticket number.", min=1)],
+    service: TicketService = arc.inject(),
+) -> None:
+    if not ctx.guild_id or not ctx.member:
+        raise TicketError("This command can only be used in a server.")
+    await ctx.defer(flags=hikari.MessageFlag.EPHEMERAL)
+    reopened = await service.reopen(ctx.guild_id, number, ctx.member)
+    await ctx.respond(f"↩️ Reopened ticket #{number}: <#{reopened['channel_id']}>")
+
+
+async def closed_ticket(service: TicketService, ctx: arc.GatewayContext, number: int) -> tuple[dict, dict]:
+    if not ctx.guild_id:
+        raise TicketError("This command can only be used in a server.")
+    found = await service.repo.get_ticket(ctx.guild_id, number)
+    if found is None:
+        raise TicketError(f"There's no ticket #{number}.")
+    return found, await service.repo.get_type(ctx.guild_id, found["type_id"])  # type: ignore[return-value]
+
+
+@transcript_group.include
+@arc.slash_subcommand("get", "Download a ticket's transcript, staff notes included.")
+async def transcript_get(
+    ctx: arc.GatewayContext,
+    number: arc.Option[int, arc.IntParams("Ticket number.", min=1)],
+    service: TicketService = arc.inject(),
+) -> None:
+    found, ticket_type = await closed_ticket(service, ctx, number)
+    service.require_staff(ctx.member, ticket_type)
+    transcript = await service.repo.get_transcript(found["id"])
+    if transcript is None:
+        raise TicketError(f"Ticket #{number} has no transcript.")
+    await ctx.respond(
+        f"📄 Transcript of ticket #{number}"
+        + (" · ⚠️ the opener asked for it to be deleted" if transcript["deletion_requested_at"] else ""),
+        attachment=hikari.Bytes(
+            render_transcript(transcript["document"], staff=True).encode(), f"ticket-{number}.txt"
+        ),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@transcript_group.include
+@arc.slash_subcommand("delete", "Permanently delete a ticket's transcript (admins).")
+async def transcript_delete(
+    ctx: arc.GatewayContext,
+    number: arc.Option[int, arc.IntParams("Ticket number.", min=1)],
+    service: TicketService = arc.inject(),
+) -> None:
+    require_manage_guild(ctx)
+    found, _ = await closed_ticket(service, ctx, number)
+    if not await service.repo.delete_transcript(found["id"]):
+        raise TicketError(f"Ticket #{number} has no transcript.")
+    await service.repo.add_event(found["id"], "transcript_deleted", ctx.user.id)
+    await ctx.respond(f"🗑️ Deleted the transcript of ticket #{number}.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@transcript_group.include
+@arc.slash_subcommand("hold", "Keep a transcript as evidence for a mod case, past its expiry.")
+async def transcript_hold(
+    ctx: arc.GatewayContext,
+    number: arc.Option[int, arc.IntParams("Ticket number.", min=1)],
+    case: arc.Option[
+        Optional[int], arc.IntParams("Case number (leave out to release the hold).", min=1)
+    ] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    found, ticket_type = await closed_ticket(service, ctx, number)
+    service.require_staff(ctx.member, ticket_type)
+    if not await service.repo.hold_transcript(found["id"], case):
+        raise TicketError(f"Ticket #{number} has no transcript.")
+    await ctx.respond(
+        f"📌 Ticket #{number}'s transcript is kept as evidence for case #{case}."
+        if case
+        else f"Released the hold on ticket #{number}'s transcript; it expires as normal.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("retention", "How long transcripts are kept by default.")
+async def settings_retention(
+    ctx: arc.GatewayContext,
+    days: arc.Option[int, arc.IntParams("Days (7–365). Types can override it.", min=7, max=365)],
+    modules: ModuleManager = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    config = await modules.get_module_config(guild_id, ModuleType.TICKETS)
+    await modules.update_module_settings(
+        guild_id, ModuleType.TICKETS, {**config.settings, "retention_days": days}
+    )
+    await ctx.respond(
+        f"✅ Transcripts are now kept for {days} days after a ticket closes. "
+        "(Already-closed tickets keep their current expiry.)",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -544,17 +671,49 @@ async def create_and_confirm(
     await interaction.edit_initial_response(f"✅ Your ticket is open: <#{ticket['channel_id']}>")
 
 
+async def ticket_for(
+    service: TicketService,
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    ticket_id: int,
+) -> tuple[dict, dict]:
+    """The open ticket a button belongs to, checked against the guild it was pressed in."""
+    found = await service.repo.get_ticket_by_id(ticket_id)
+    if found is None or found["guild_id"] != interaction.guild_id or found["status"] != "open":
+        raise TicketError("This ticket is already closed.")
+    return found, await service.repo.get_type(found["guild_id"], found["type_id"])  # type: ignore[return-value]
+
+
+async def request_deletion(
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    service: TicketService,
+    ticket_id: int,
+) -> None:
+    found = await service.repo.get_ticket_by_id(ticket_id)
+    if found is None or found["opener_id"] != interaction.user.id:
+        raise TicketError("That transcript isn't yours.")
+    if await service.repo.request_transcript_deletion(ticket_id):
+        await service.repo.add_event(ticket_id, "deletion_requested", interaction.user.id)
+        await reply(interaction, "✅ Your request was sent to the server's admins.")
+    else:
+        await reply(interaction, "You've already asked, or the transcript is already gone.")
+
+
 @plugin.listen()
 async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     interaction = event.interaction
     if not isinstance(interaction, (hikari.ComponentInteraction, hikari.ModalInteraction)):
         return
-    if not interaction.custom_id.startswith("ticket:") or not interaction.guild_id:
+    if not interaction.custom_id.startswith("ticket:"):
         return
 
     service = plugin.client.get_type_dependency(TicketService)
     _, action, target = interaction.custom_id.split(":", 2)
     try:
+        if action == "delreq":  # from the close DM, so there's no guild
+            await request_deletion(interaction, service, int(target))
+            return
+        if not interaction.guild_id:
+            return
         if not await service.modules.is_enabled(interaction.guild_id, ModuleType.TICKETS):
             raise TicketError("Tickets are turned off in this server.")
         if action == "open" and isinstance(interaction, hikari.ComponentInteraction):
@@ -570,6 +729,41 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await interaction.create_initial_response(
                 hikari.ResponseType.MESSAGE_CREATE, f"🙋 {interaction.user.mention} claimed this ticket."
             )
+        elif action == "close" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            if not service.can_close(interaction.member, current, ticket_type):
+                raise TicketError("Only the opener or staff can close this ticket.")
+            row = service.rest.build_modal_action_row().add_text_input(
+                "reason", "Reason (optional)", required=False, max_length=500
+            )
+            await interaction.create_modal_response(
+                f"Close ticket #{current['number']}", f"ticket:closewhy:{target}", component=row
+            )
+        elif action == "closewhy" and isinstance(interaction, hikari.ModalInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            if not service.can_close(interaction.member, current, ticket_type):
+                raise TicketError("Only the opener or staff can close this ticket.")
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE, "🔒 Closing this ticket…"
+            )
+            reason = modal_values(interaction).get("reason") or None
+            await service.close(current, ticket_type, interaction.user.id, reason)
+        elif action in ("closeyes", "closeno") and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            if interaction.user.id != current["opener_id"]:
+                raise TicketError("Only the person who opened this ticket can answer.")
+            if action == "closeno":
+                await service.repo.add_event(current["id"], "close_declined", interaction.user.id)
+                await interaction.create_initial_response(
+                    hikari.ResponseType.MESSAGE_UPDATE,
+                    f"<@{current['opener_id']}> would like to keep this ticket open.",
+                    components=[],
+                )
+                return
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE, "🔒 Closing this ticket…", components=[]
+            )
+            await service.close(current, ticket_type, interaction.user.id, "Opener agreed to close")
         else:
             await reply(interaction, "This button isn't available yet.")
     except TicketError as exc:
@@ -592,9 +786,19 @@ async def auto_unclaim(service: TicketService) -> None:
         logger.exception("Ticket auto-unclaim failed")
 
 
+@arc.utils.cron_loop("30 4 * * *")  # nightly, after the 03:30 UTC backup
+async def purge_transcripts(service: TicketService) -> None:
+    try:
+        await service.purge_transcripts(int(time.time()))
+    except Exception:
+        logger.exception("Ticket transcript purge failed")
+
+
 @plugin.listen()
 async def on_started(_: hikari.StartedEvent) -> None:
-    auto_unclaim.start(service=plugin.client.get_type_dependency(TicketService))
+    service = plugin.client.get_type_dependency(TicketService)
+    auto_unclaim.start(service=service)
+    purge_transcripts.start(service=service)
 
 
 @plugin.listen()
@@ -612,4 +816,5 @@ def load(client: arc.GatewayClient) -> None:
 @arc.unloader
 def unload(client: arc.GatewayClient) -> None:
     auto_unclaim.stop()
+    purge_transcripts.stop()
     client.remove_plugin(plugin)

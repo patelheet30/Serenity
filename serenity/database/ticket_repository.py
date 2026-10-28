@@ -384,6 +384,62 @@ class TicketRepository:
         )
         return [_decode(r) for r in rows]  # type: ignore[misc]
 
+    # Closing and reopening
+
+    async def close_ticket(
+        self, ticket_id: int, closed_by: int, reason: Optional[str]
+    ) -> Optional[dict]:
+        """Mark a ticket closed and credit its handlers; None if it was already closed."""
+        pool = self._require_pool()
+        now = int(time.time())
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE tickets SET status = 'closed', closed_at = $2, closed_by = $3,
+                close_reason = $4, channel_id = NULL
+                WHERE id = $1 AND status = 'open' RETURNING *""",
+                ticket_id,
+                now,
+                closed_by,
+                reason,
+            )
+            if row is None:
+                return None
+            await self.credit_handlers(ticket_id, conn)
+            await conn.execute(
+                """INSERT INTO ticket_events (ticket_id, kind, actor_id, data, created_at)
+                VALUES ($1, 'closed', $2, $3, $4)""",
+                ticket_id,
+                closed_by,
+                json.dumps({"reason": reason}),
+                now,
+            )
+        return _decode(row)
+
+    async def reopen_ticket(self, ticket_id: int, channel_id: int, actor_id: int) -> dict:
+        pool = self._require_pool()
+        now = int(time.time())
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE tickets SET status = 'open', channel_id = $2, closed_at = NULL,
+                closed_by = NULL, close_reason = NULL, waiting_on = 'staff', last_activity_at = $3
+                WHERE id = $1 RETURNING *""",
+                ticket_id,
+                channel_id,
+                now,
+            )
+            # Kept until the ticket closes again, when it's rebuilt with the new messages.
+            await conn.execute(
+                "UPDATE ticket_transcripts SET expires_at = NULL WHERE ticket_id = $1", ticket_id
+            )
+            await conn.execute(
+                """INSERT INTO ticket_events (ticket_id, kind, actor_id, created_at)
+                VALUES ($1, 'reopened', $2, $3)""",
+                ticket_id,
+                actor_id,
+                now,
+            )
+        return _decode(row)  # type: ignore[return-value]
+
     # Events and notes
 
     async def add_event(
@@ -451,6 +507,41 @@ class TicketRepository:
             "SELECT * FROM ticket_transcripts WHERE ticket_id = $1", ticket_id
         )
         return _decode(row)
+
+    async def hold_transcript(self, ticket_id: int, case_number: Optional[int]) -> bool:
+        """Keep a transcript as evidence for a mod case (None releases it)."""
+        pool = self._require_pool()
+        status = await pool.execute(
+            "UPDATE ticket_transcripts SET held_by_case_number = $2 WHERE ticket_id = $1",
+            ticket_id,
+            case_number,
+        )
+        return status != "UPDATE 0"
+
+    async def request_transcript_deletion(self, ticket_id: int) -> bool:
+        pool = self._require_pool()
+        status = await pool.execute(
+            """UPDATE ticket_transcripts SET deletion_requested_at = $2
+            WHERE ticket_id = $1 AND deletion_requested_at IS NULL""",
+            ticket_id,
+            int(time.time()),
+        )
+        return status != "UPDATE 0"
+
+    async def delete_transcript(self, ticket_id: int) -> bool:
+        pool = self._require_pool()
+        status = await pool.execute("DELETE FROM ticket_transcripts WHERE ticket_id = $1", ticket_id)
+        return status != "DELETE 0"
+
+    async def purge_expired_transcripts(self, now: int) -> int:
+        """Hard-delete transcripts past their expiry, except those held for a mod case."""
+        pool = self._require_pool()
+        status = await pool.execute(
+            """DELETE FROM ticket_transcripts
+            WHERE expires_at IS NOT NULL AND expires_at < $1 AND held_by_case_number IS NULL""",
+            now,
+        )
+        return int(status.split()[-1])
 
     # Blacklist
 
