@@ -576,7 +576,10 @@ async def transfer(
     service.require_staff(ctx.member, ticket_type)
     new_type = await service.resolve_type(ctx.guild_id, type)  # type: ignore[arg-type]
     await ctx.respond("🔀 Transferring…", flags=hikari.MessageFlag.EPHEMERAL)
-    await service.transfer(current, ticket_type, new_type, ctx.user.id)
+    try:
+        await service.transfer(current, ticket_type, new_type, ctx.user.id)
+    except TicketError as exc:  # answer with the reason, not a follow-up under "Transferring…"
+        await ctx.edit_initial_response(f"❌ {exc}")
 
 
 @ticket.include
