@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { api } from '../../api';
 	import Avatar from '../../components/Avatar.svelte';
 	import DataTable from '../../components/DataTable.svelte';
@@ -63,6 +64,12 @@
 	$effect(() => {
 		const t = setInterval(() => document.visibilityState === 'visible' && version++, REFRESH);
 		return () => clearInterval(t);
+	});
+
+	// ?t=142 opens that ticket: links from cases, the overview and elsewhere.
+	const wanted = $derived(Number(page.url.searchParams.get('t')) || null);
+	$effect(() => {
+		if (wanted) open(wanted, innerWidth <= 980);
 	});
 
 	function open(n: number, asSheet = true) {

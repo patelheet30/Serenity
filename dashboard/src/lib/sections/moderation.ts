@@ -10,6 +10,8 @@ export type Case = {
 	expires_at: number | null;
 	/** Warnings and timeouts only; null for actions without a state. */
 	active: boolean | null;
+	/** The ticket it was made from (a ticket's Mod action). */
+	ticket: number | null;
 };
 
 /** Case durations (seconds) as the bot's embeds write them: 45s, 10m, 1h 30m, 7d. */

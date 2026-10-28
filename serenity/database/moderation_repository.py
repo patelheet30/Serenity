@@ -326,7 +326,8 @@ class ModerationRepository:
             add("case_number < ?", before)
         params.append(limit)
         rows = await self.pool.fetch(
-            f"""SELECT * FROM mod_cases WHERE {" AND ".join(where)}
+            f"""SELECT *, (SELECT number FROM tickets t WHERE t.id = source_ticket_id) AS source_ticket_number
+            FROM mod_cases WHERE {" AND ".join(where)}
             ORDER BY case_number DESC LIMIT ${len(params)}""",
             *params,
         )
