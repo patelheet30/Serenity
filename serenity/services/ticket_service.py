@@ -811,9 +811,12 @@ class TicketService:
             raise TicketError(f"This is already a **{new_type['name']}** ticket.")
         # Keep everyone added to the ticket; replace only the role overwrites. The overwrite list
         # replaces the channel's whole set, so read it from Discord if the cache doesn't have it.
-        channel = self.cache.get_guild_channel(ticket["channel_id"]) or await self.rest.fetch_channel(
-            ticket["channel_id"]
-        )
+        try:
+            channel = self.cache.get_guild_channel(ticket["channel_id"]) or await self.rest.fetch_channel(
+                ticket["channel_id"]
+            )
+        except (hikari.NotFoundError, hikari.ForbiddenError):
+            raise TicketError("I can't read this channel's permissions, so I can't move it.") from None
         overwrites = getattr(channel, "permission_overwrites", {}).values()
         me = self.cache.get_me()
         members = [
@@ -829,11 +832,16 @@ class TicketService:
             updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"])
             await self.rest.edit_channel(
                 ticket["channel_id"],
-                name=self.channel_name(updated, new_type, self._opener_name(ticket)),  # type: ignore[arg-type]
                 parent_category=category if category is not None else hikari.UNDEFINED,
                 permission_overwrites=self.overwrites(ticket["guild_id"], new_type, members),
                 reason=f"Ticket #{ticket['number']} moved to {new_type['name']}",
             )
+        # Renamed outside the queue: a rename can wait 10 minutes on Discord's limit, and every
+        # open in the guild waits on the queue.
+        await self.rest.edit_channel(
+            ticket["channel_id"],
+            name=self.channel_name(updated, new_type, self._opener_name(ticket)),  # type: ignore[arg-type]
+        )
         if updated["assignee_id"]:  # type: ignore[index]  # the old type's staff may not see it any more
             updated = await self.repo.unclaim(ticket["id"])
         await self.repo.add_event(

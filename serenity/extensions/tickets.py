@@ -559,7 +559,10 @@ async def priority(
         raise TicketError(f"This ticket is already {level} priority.")
     # Answer first: a rename can wait up to 10 minutes on Discord's rate limit.
     await ctx.respond(f"🚦 Priority set to **{level}**.")
-    await service.set_priority(current, ticket_type, level, ctx.user.id)
+    try:
+        await service.set_priority(current, ticket_type, level, ctx.user.id)
+    except TicketError as exc:  # rolled back: correct the answer rather than add to it
+        await ctx.edit_initial_response(f"❌ {exc}")
 
 
 @ticket.include
