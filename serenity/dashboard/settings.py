@@ -11,7 +11,12 @@ from typing import Any, Optional
 import hikari
 from aiohttp import web
 
-from serenity.core.modules import MODULE_DEPENDENCIES, ModuleType
+from serenity.core.modules import (
+    MODULE_DEPENDENCIES,
+    ModuleType,
+    available_modules,
+    module_available,
+)
 from serenity.dashboard.common import (
     BOT,
     CHANGES,
@@ -46,10 +51,15 @@ def _record(request: web.Request, setting: str, old: Any, new: Any) -> None:
 
 
 async def _modules_json(request: web.Request) -> dict[str, Any]:
-    enabled = set(await request.app[MODULES].get_enabled_modules(guild_id(request)))
+    gid = guild_id(request)
+    enabled = set(await request.app[MODULES].get_enabled_modules(gid))
     return {
-        "enabled": {m.value: m in enabled for m in ModuleType},
-        "requires": {m.value: [d.value for d in deps] for m, deps in MODULE_DEPENDENCIES.items()},
+        "enabled": {m.value: m in enabled for m in available_modules(gid)},
+        "requires": {
+            m.value: [d.value for d in deps]
+            for m, deps in MODULE_DEPENDENCIES.items()
+            if module_available(gid, m)
+        },
     }
 
 
@@ -65,6 +75,8 @@ async def put_module(request: web.Request) -> web.Response:
         module = ModuleType(request.match_info["module"])
     except ValueError:
         raise ApiError(404, "not_found", "No such module.") from None
+    if not module_available(guild_id(request), module):
+        raise ApiError(404, "not_found", "No such module.")
     enabled = bool_field(await read_json(request), "enabled")
     manager = request.app[MODULES]
     gid = guild_id(request)
