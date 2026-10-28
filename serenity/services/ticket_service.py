@@ -330,7 +330,7 @@ class TicketService:
             except BaseException:  # don't leave a channel and an open ticket nobody can find
                 try:
                     await self.rest.delete_channel(channel.id)
-                except hikari.HTTPError:
+                except Exception:  # keep the original error as the one that surfaces
                     logger.exception(f"Couldn't remove the channel of failed ticket {ticket['id']}")
                 finally:
                     await self.repo.delete_ticket(ticket["id"])
