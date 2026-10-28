@@ -792,6 +792,8 @@ async def purge_transcripts(service: TicketService) -> None:
 
 @plugin.listen()
 async def on_started(_: hikari.StartedEvent) -> None:
+    # StartedEvent can fire before main.py's startup hook has registered TicketService.
+    await plugin.client.wait_until_started()
     service = plugin.client.get_type_dependency(TicketService)
     auto_unclaim.start(service=service)
     purge_transcripts.start(service=service)
