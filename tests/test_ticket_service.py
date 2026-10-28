@@ -78,3 +78,16 @@ async def test_panel_deleted_by_hand_is_reposted():
     repo.forget_panel_message.assert_awaited_once_with(555)
     await service.panel_message_deleted(1234)  # not a panel: no query
     assert repo.forget_panel_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_type_name_is_a_friendly_error():
+    from unittest.mock import AsyncMock, MagicMock
+
+    import asyncpg
+
+    from serenity.extensions.tickets import on_error
+
+    ctx = MagicMock(respond=AsyncMock())
+    await on_error(ctx, asyncpg.UniqueViolationError("duplicate key"))
+    assert "already exists" in ctx.respond.call_args.args[0]
