@@ -594,6 +594,8 @@ async def auto_unclaim(service: TicketService) -> None:
 
 @plugin.listen()
 async def on_started(_: hikari.StartedEvent) -> None:
+    # StartedEvent can fire before main.py's startup hook has registered TicketService.
+    await plugin.client.wait_until_started()
     auto_unclaim.start(service=plugin.client.get_type_dependency(TicketService))
 
 
