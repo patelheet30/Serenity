@@ -31,6 +31,9 @@ TYPE_COLUMNS = (
     "open_off_hours",
 )
 
+# Columns a tier can be created or updated with.
+TIER_COLUMNS = ("name", "position", "role_ids", "can_summon", "requires_reason", "reping_minutes")
+
 
 def _decode(row: Optional[asyncpg.Record]) -> Optional[dict]:
     if row is None:
@@ -335,7 +338,10 @@ class TicketRepository:
 
     async def update_ticket(self, ticket_id: int, /, **values: Any) -> Optional[dict]:
         pool = self._require_pool()
-        allowed = ("type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at")
+        allowed = (
+            "type_id", "assignee_id", "priority", "stage", "waiting_on", "last_activity_at",
+            "tier_id", "tier_pinged_at",
+        )
         sets, params = [], [ticket_id]
         for key, value in values.items():
             if key not in allowed:
@@ -378,8 +384,9 @@ class TicketRepository:
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window.
-                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3
+                # Claiming counts as activity, so auto-unclaim gives the new assignee a full window,
+                # and it answers an escalation: the tier stops being re-pinged.
+                f"""UPDATE tickets SET assignee_id = $2, last_activity_at = $3, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' {"" if force else "AND assignee_id IS NULL"}
                 RETURNING *""",
                 ticket_id,
@@ -468,6 +475,62 @@ class TicketRepository:
         )
         return [_decode(r) for r in rows]  # type: ignore[misc]
 
+    # Escalation tiers
+
+    async def list_tiers(self, type_id: int) -> list[dict]:
+        """A type's ladder, lowest tier first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM ticket_tiers WHERE type_id = $1 ORDER BY position", type_id
+        )
+        return [dict(r) for r in rows]
+
+    async def create_tier(self, type_id: int, /, **values: Any) -> dict:
+        pool = self._require_pool()
+        columns = ["type_id", "created_at"]
+        params: list[Any] = [type_id, int(time.time())]
+        for key, value in values.items():
+            if key not in TIER_COLUMNS:
+                raise ValueError(f"Unknown ticket tier column: {key}")
+            columns.append(key)
+            params.append(value)
+        placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+        row = await pool.fetchrow(
+            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({placeholders}) RETURNING *",
+            *params,
+        )
+        return dict(row)
+
+    async def update_tier(self, tier_id: int, /, **values: Any) -> Optional[dict]:
+        pool = self._require_pool()
+        sets, params = [], [tier_id]
+        for key, value in values.items():
+            if key not in TIER_COLUMNS:
+                raise ValueError(f"Unknown ticket tier column: {key}")
+            params.append(value)
+            sets.append(f"{key} = ${len(params)}")
+        row = await pool.fetchrow(
+            f"UPDATE ticket_tiers SET {', '.join(sets)} WHERE id = $1 RETURNING *", *params
+        )
+        return dict(row) if row else None
+
+    async def delete_tier(self, tier_id: int) -> None:
+        pool = self._require_pool()
+        await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
+
+    async def due_for_reping(self, now: int) -> list[dict]:
+        """Escalated tickets their tier hasn't picked up within its re-ping time."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, tr.name AS tier_name, tr.role_ids AS tier_role_ids, tr.reping_minutes
+            FROM tickets t JOIN ticket_tiers tr ON tr.id = t.tier_id
+            WHERE t.status = 'open' AND t.tier_pinged_at IS NOT NULL
+            AND tr.reping_minutes IS NOT NULL
+            AND t.tier_pinged_at < $1 - tr.reping_minutes * 60""",
+            now,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
     # Closing and reopening
 
     async def close_ticket(
@@ -479,7 +542,7 @@ class TicketRepository:
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """UPDATE tickets SET status = 'closed', closed_at = $2, closed_by = $3,
-                close_reason = $4, channel_id = NULL
+                close_reason = $4, channel_id = NULL, tier_pinged_at = NULL
                 WHERE id = $1 AND status = 'open' RETURNING *""",
                 ticket_id,
                 now,
