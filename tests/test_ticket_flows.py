@@ -557,3 +557,113 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+T2_ROLE = 1_241_890_335_472_164_910
+T3_ROLE = 1_241_890_335_472_164_911
+DEV_ROLE = 1_241_890_335_472_164_912
+
+
+async def ladder(service: TicketService) -> dict:
+    """Support with T1 (its staff) → T2 → T3, and Developers off to the side."""
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    t1 = await service.repo.create_tier(support["id"], name="T1", position=1, role_ids=[STAFF_ROLE])
+    await service.repo.create_tier(support["id"], name="T2", position=2, role_ids=[T2_ROLE], reping_minutes=30)
+    await service.repo.create_tier(support["id"], name="T3", position=3, role_ids=[T3_ROLE], requires_reason=True)
+    dev = await service.repo.create_tier(support["id"], name="Developers", position=9, role_ids=[DEV_ROLE])
+    await service.repo.update_tier(t1["id"], can_summon=[dev["id"]])
+    return support
+
+
+def in_role(user_id: int, name: str, role: int) -> MagicMock:
+    m = member(user_id, name)
+    m.role_ids = [role]
+    return m
+
+
+@pytest.mark.asyncio
+async def test_t1_t2_t3_escalation_credits_all_three(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+    dave = 1_029_384_756_102_938_478
+
+    await service.on_message(message(channel, staff(BOB, "bob")))  # T1 claims by replying
+    current, full = await service.ticket_here(channel)
+    current = await service.escalate(current, full, BOB, None, None)
+    overwrite = service.rest.edit_permission_overwrite.call_args
+    assert overwrite.args[1] == T2_ROLE and overwrite.kwargs["target_type"] == hikari.PermissionOverwriteType.ROLE
+    ping = service.rest.create_message.call_args
+    assert f"<@&{T2_ROLE}>" in ping.args[1] and ping.kwargs["role_mentions"] == [T2_ROLE]
+
+    await service.on_message(message(channel, in_role(CAROL, "carol", T2_ROLE)))  # T2 picks it up
+    current, full = await service.ticket_here(channel)
+    assert current["assignee_id"] == CAROL and current["tier_pinged_at"] is None
+
+    with pytest.raises(TicketError, match="needs a reason"):
+        await service.escalate(current, full, CAROL, None, None)
+    await service.escalate(current, full, CAROL, None, "needs a refund")
+    await service.on_message(message(channel, in_role(dave, "dave", T3_ROLE)))
+    current, full = await service.ticket_here(channel)
+    assert current["assignee_id"] == dave
+
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    await service.close(current, full, dave, "done")
+    handlers = {h["user_id"]: h["credited"] for h in await service.repo.list_handlers(ticket["id"])}
+    assert handlers == {BOB: True, CAROL: True, dave: True}
+
+
+@pytest.mark.asyncio
+async def test_a_tier_cant_summon_a_tier_it_isnt_allowed_to(service: TicketService):
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    current, full = await service.ticket_here(ticket["channel_id"])
+
+    with pytest.raises(TicketError, match=r"T1\*\* can't summon \*\*T3"):
+        await service.escalate(current, full, BOB, "T3", "skip the queue")
+    with pytest.raises(TicketError, match="no tier called"):
+        await service.escalate(current, full, BOB, "Nope", None)
+    moved = await service.escalate(current, full, BOB, "developers", None)  # sideways, allowed
+    assert moved["tier_id"] == full["tiers"][3]["id"]
+
+    current, full = await service.ticket_here(ticket["channel_id"])
+    with pytest.raises(TicketError, match="already the top tier"):
+        await service.escalate(current, full, BOB, None, None)
+
+
+@pytest.mark.asyncio
+async def test_deescalate_reping_and_reassign(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.NONE)
+    support = await ladder(service)
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    channel = ticket["channel_id"]
+    current, full = await service.ticket_here(channel)
+    with pytest.raises(TicketError, match="hasn't been escalated"):
+        await service.deescalate(current, full, BOB, "back")
+    assert not service.can_reassign(staff(BOB, "bob"), current, full)
+
+    escalated = await service.escalate(current, full, BOB, None, None)
+    assert service.can_reassign(in_role(CAROL, "carol", T2_ROLE), escalated, full)
+    assert not service.can_reassign(staff(BOB, "bob"), escalated, full)
+
+    # Unanswered: re-pinged once 30 minutes have passed, then not again for another 30.
+    await service.reping_tiers(escalated["tier_pinged_at"] + 29 * 60)
+    pings = service.rest.create_message.await_count
+    await service.reping_tiers(escalated["tier_pinged_at"] + 31 * 60)
+    assert service.rest.create_message.await_count == pings + 1
+    assert "Nobody from **T2**" in service.rest.create_message.call_args.args[1]
+    await service.reping_tiers(escalated["tier_pinged_at"] + 32 * 60)
+    assert service.rest.create_message.await_count == pings + 1
+
+    current, full = await service.ticket_here(channel)
+    back = await service.deescalate(current, full, CAROL, "just a password reset")
+    assert back["tier_id"] == full["tiers"][0]["id"] and back["tier_pinged_at"] is None
+    assert "back to **T1**" in service.rest.create_message.call_args.args[1]
+    with pytest.raises(TicketError, match="hasn't been escalated"):
+        await service.deescalate(back, full, BOB, "again")

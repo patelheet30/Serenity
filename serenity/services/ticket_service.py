@@ -144,10 +144,17 @@ def render_transcript(document: dict, *, staff: bool) -> str:
 def is_staff(
     ticket_type: dict, role_ids: Sequence[int], permissions: hikari.Permissions
 ) -> bool:
-    """Staff of a type: one of its staff roles, or Manage Server."""
+    """Staff of a type: one of its staff or tier roles (tiers come from full_type), or Manage Server."""
     if permissions & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
         return True
-    return any(role in ticket_type["staff_role_ids"] for role in role_ids)
+    staff = {*ticket_type["staff_role_ids"], *(r for t in ticket_type.get("tiers", ()) for r in t["role_ids"])}
+    return any(role in staff for role in role_ids)
+
+
+def current_tier(ticket: dict, ticket_type: dict) -> Optional[dict]:
+    """The tier a ticket is with: the one it was escalated to, else its type's lowest."""
+    tiers = ticket_type["tiers"]
+    return next((t for t in tiers if t["id"] == ticket["tier_id"]), tiers[0] if tiers else None)
 
 
 def member_permissions(member: hikari.Member) -> hikari.Permissions:
@@ -482,8 +489,12 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(channel_id)
         if ticket is None or ticket["status"] != "open":
             raise TicketError("This isn't an open ticket channel.")
+        return ticket, await self.full_type(ticket)
+
+    async def full_type(self, ticket: dict) -> dict:
+        """A ticket's type with its tier ladder, whose roles count as the type's staff."""
         ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        return ticket, ticket_type  # type: ignore[return-value]
+        return {**ticket_type, "tiers": await self.repo.list_tiers(ticket["type_id"])}  # type: ignore[dict-item]
 
     def is_staff(self, member: hikari.Member, ticket_type: dict) -> bool:
         return is_staff(ticket_type, member.role_ids, member_permissions(member))
@@ -494,10 +505,17 @@ class TicketService:
         return member
 
     async def claim(
-        self, ticket: dict, user_id: int, *, by: Optional[int] = None, announce: bool = True
+        self,
+        ticket: dict,
+        user_id: int,
+        *,
+        by: Optional[int] = None,
+        announce: bool = True,
+        force: bool = False,
     ) -> dict:
-        """Give the ticket to `user_id`. `by` is the admin reassigning it, if it isn't them."""
-        updated = await self.repo.claim(ticket["id"], user_id, force=by is not None)
+        """Give the ticket to `user_id`. `by` is whoever reassigns it, if it isn't them; `force`
+        takes it from the current assignee (an escalated tier picking it up)."""
+        updated = await self.repo.claim(ticket["id"], user_id, force=force or by is not None)
         if updated is None:
             current = await self.repo.get_ticket_by_id(ticket["id"])
             assignee = current["assignee_id"] if current else None
@@ -540,10 +558,16 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(event.channel_id)
         if ticket is None or ticket["status"] != "open":
             return
-        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
+        ticket_type = await self.full_type(ticket)
+        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)
         await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
-        if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]
+        tier = current_tier(ticket, ticket_type)
+        if staff and ticket["tier_pinged_at"] and tier and set(event.member.role_ids) & set(tier["role_ids"]):
+            # The first of an escalated tier to reply takes the ticket; earlier handlers keep
+            # their place (and credit) in the chain. ponytail: two replies at once both claim, the later wins.
+            await self.repo.update_ticket(ticket["id"], tier_pinged_at=None)
+            await self.claim(ticket, event.author_id, announce=False, force=True)
+        elif staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):
             try:
                 await self.claim(ticket, event.author_id, announce=False)
             except TicketError:
@@ -562,6 +586,118 @@ class TicketService:
                 )
             except Exception:  # one deleted or locked channel can't hold up the rest
                 logger.exception(f"Auto-unclaim failed for ticket {ticket['id']}")
+
+    # Escalation
+
+    async def _ping_tier(self, ticket: dict, tier: dict, headline: str, reason: Optional[str] = None) -> None:
+        roles = " ".join(f"<@&{r}>" for r in tier["role_ids"])
+        lines = [
+            f"{headline} {roles}".strip(),
+            f"Ticket #{ticket['number']} · opened by <@{ticket['opener_id']}> <t:{ticket['opened_at']}:R>",
+        ]
+        if reason:
+            lines.append(f"> {reason}")
+        await self.rest.create_message(
+            ticket["channel_id"], "\n".join(lines), role_mentions=tier["role_ids"], user_mentions=False
+        )
+
+    async def escalate(
+        self, ticket: dict, ticket_type: dict, actor_id: int, target_name: Optional[str], reason: Optional[str]
+    ) -> dict:
+        """Bring a higher tier into the ticket: the next rung up, or a tier the current one may summon."""
+        tiers = ticket_type["tiers"]
+        current = current_tier(ticket, ticket_type)
+        if current is None:
+            raise TicketError(
+                f"**{ticket_type['name']}** tickets have no tiers. Add them with `/ticket type tier`."
+            )
+        above = next((t for t in tiers if t["position"] > current["position"]), None)
+        if target_name is None:
+            target = above
+            if target is None:
+                raise TicketError(f"**{current['name']}** is already the top tier.")
+        else:
+            target = next((t for t in tiers if t["name"].lower() == target_name.lower()), None)
+            if target is None:
+                raise TicketError(f"**{ticket_type['name']}** has no tier called **{target_name}**.")
+            if target is current:
+                raise TicketError(f"This ticket is already with **{current['name']}**.")
+            if target is not above and target["id"] not in current["can_summon"]:
+                raise TicketError(f"**{current['name']}** can't summon **{target['name']}**.")
+        if target["requires_reason"] and not reason:
+            raise TicketError(f"Escalating to **{target['name']}** needs a reason.")
+
+        for role in target["role_ids"]:
+            await self.rest.edit_permission_overwrite(
+                ticket["channel_id"], role, target_type=hikari.PermissionOverwriteType.ROLE,
+                allow=TICKET_MEMBER_ALLOW, reason=f"Ticket #{ticket['number']} escalated to {target['name']}",
+            )
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=target["id"], tier_pinged_at=int(time.time())
+        )
+        await self.repo.add_event(
+            ticket["id"], "escalated", actor_id, {"from": current["id"], "to": target["id"], "reason": reason}
+        )
+        await self.log(
+            updated, ticket_type, "escalated", actor_id,  # type: ignore[arg-type]
+            f"{current['name']} → {target['name']}" + (f": {reason}" if reason else ""),
+        )
+        await self._ping_tier(
+            updated, target, f"⬆️ <@{actor_id}> escalated this ticket to **{target['name']}**.", reason  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    async def deescalate(self, ticket: dict, ticket_type: dict, actor_id: int, note: Optional[str]) -> dict:
+        """Hand the ticket back to the tier that escalated it, unassigned so that tier picks it up.
+
+        ponytail: the higher tier keeps channel access (and its credit); nothing removes its role.
+        """
+        events = await self.repo.list_events(ticket["id"])
+        last = next(
+            (e for e in reversed(events) if e["kind"] == "escalated" and e["data"]["to"] == ticket["tier_id"]),
+            None,
+        )
+        if last is None:
+            raise TicketError("This ticket hasn't been escalated.")
+        if not note:
+            raise TicketError("Add a reason: it's posted for the tier taking the ticket back.")
+        tiers = {t["id"]: t for t in ticket_type["tiers"]}
+        back = tiers.get(last["data"]["from"]) or ticket_type["tiers"][0]
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=back["id"], tier_pinged_at=None, assignee_id=None
+        )
+        await self.repo.add_event(
+            ticket["id"], "deescalated", actor_id, {"from": ticket["tier_id"], "to": back["id"], "reason": note}
+        )
+        await self.log(updated, ticket_type, "deescalated", actor_id, f"Back to {back['name']}: {note}")  # type: ignore[arg-type]
+        await self._ping_tier(
+            updated, back, f"⬇️ <@{actor_id}> handed this ticket back to **{back['name']}**.", note  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    def can_reassign(self, member: hikari.Member, ticket: dict, ticket_type: dict) -> bool:
+        """Admins, and the tier a ticket was escalated to (higher tiers may reassign)."""
+        if member_permissions(member) & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
+            return True
+        tier = current_tier(ticket, ticket_type)
+        return (
+            tier is not None
+            and tier is not ticket_type["tiers"][0]
+            and any(r in tier["role_ids"] for r in member.role_ids)
+        )
+
+    async def reping_tiers(self, now: int) -> None:
+        """Ping escalated tiers again when nobody from them has replied in their re-ping time."""
+        for ticket in await self.repo.due_for_reping(now):
+            try:
+                await self.repo.update_ticket(ticket["id"], tier_pinged_at=now)
+                await self._ping_tier(
+                    ticket,
+                    {"role_ids": ticket["tier_role_ids"]},
+                    f"⏰ Nobody from **{ticket['tier_name']}** has picked this ticket up yet.",
+                )
+            except Exception:  # one deleted or locked channel can't hold up the rest
+                logger.exception(f"Tier re-ping failed for ticket {ticket['id']}")
 
     # Closing
 
@@ -844,7 +980,10 @@ class TicketService:
 
         async with self._open_locks[ticket["guild_id"]]:  # _category may create an overflow
             category = await self._category(ticket["guild_id"], new_type["category_id"])
-            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"])
+            # Tiers belong to a type: the ticket starts the new type's ladder at the bottom.
+            updated = await self.repo.update_ticket(
+                ticket["id"], type_id=new_type["id"], tier_id=None, tier_pinged_at=None
+            )
             await self.rest.edit_channel(
                 ticket["channel_id"],
                 parent_category=category if category is not None else hikari.UNDEFINED,

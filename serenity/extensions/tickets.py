@@ -270,6 +270,91 @@ async def type_delete(
     await ctx.respond(f"🗑️ Deleted the **{ticket_type['name']}** ticket type.")
 
 
+def describe_tiers(tiers: list[dict]) -> str:
+    names = {t["id"]: t["name"] for t in tiers}
+    lines = []
+    for t in tiers:
+        extras = [", ".join(f"<@&{r}>" for r in t["role_ids"]) or "no roles"]
+        if t["can_summon"]:
+            extras.append("also summons " + ", ".join(names[i] for i in t["can_summon"] if i in names))
+        if t["requires_reason"]:
+            extras.append("needs a reason")
+        if t["reping_minutes"]:
+            extras.append(f"re-pinged after {t['reping_minutes']} min")
+        lines.append(f"**{t['position']}. {t['name']}** · " + " · ".join(extras))
+    return "\n".join(lines) or "No tiers, so these tickets can't be escalated."
+
+
+@type_group.include
+@arc.slash_subcommand("tier", "Add, change or remove an escalation tier on a ticket type.")
+async def type_tier(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[str, arc.StrParams("The tier, e.g. Senior staff.", max_length=50)],
+    role: arc.Option[
+        Optional[hikari.Role], arc.RoleParams("Role to add to the tier, or remove if it's in it.")
+    ] = None,
+    position: arc.Option[
+        Optional[int], arc.IntParams("Rung on the ladder; tickets start on the lowest.", min=1, max=25)
+    ] = None,
+    can_summon: arc.Option[
+        Optional[str],
+        arc.StrParams("Tiers it may jump to besides the next one up, by commas (\"none\" to clear).", max_length=300),
+    ] = None,
+    requires_reason: arc.Option[Optional[bool], arc.BoolParams("Escalating to it needs a reason.")] = None,
+    reping_minutes: arc.Option[
+        Optional[int], arc.IntParams("Ping it again after this many minutes unanswered (0 = never).", min=0, max=1440)
+    ] = None,
+    delete: arc.Option[bool, arc.BoolParams("Remove this tier.")] = False,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    tiers = await repo.list_tiers(ticket_type["id"])
+    existing = next((t for t in tiers if t["name"].lower() == name.lower()), None)
+    if delete:
+        if existing is None:
+            raise TicketError(f"**{ticket_type['name']}** has no tier called **{name}**.")
+        await repo.delete_tier(existing["id"])
+    else:
+        values: dict = {}
+        if role is not None:
+            roles: list[int] = existing["role_ids"] if existing else []
+            values["role_ids"] = [r for r in roles if r != role.id] if role.id in roles else [*roles, role.id]
+        if position is not None:
+            taken = next((t for t in tiers if t["position"] == position and t is not existing), None)
+            if taken:
+                raise TicketError(f"**{taken['name']}** is already at position {position}.")
+            values["position"] = position
+        if can_summon is not None:
+            ids = {t["name"].lower(): t["id"] for t in tiers}
+            wanted = [] if can_summon.strip().lower() == "none" else [n.strip() for n in can_summon.split(",") if n.strip()]
+            missing = [n for n in wanted if n.lower() not in ids]
+            if missing:
+                raise TicketError(f"**{ticket_type['name']}** has no tier called **{missing[0]}**.")
+            values["can_summon"] = [ids[n.lower()] for n in wanted]
+        if requires_reason is not None:
+            values["requires_reason"] = requires_reason
+        if reping_minutes is not None:
+            values["reping_minutes"] = reping_minutes or None
+        if existing is None:
+            if role is None:
+                raise TicketError("A new tier needs a role.")
+            values.setdefault("position", max((t["position"] for t in tiers), default=0) + 1)
+            await repo.create_tier(ticket_type["id"], name=name, **values)
+        elif values:
+            await repo.update_tier(existing["id"], **values)
+    await ctx.respond(
+        embed=hikari.Embed(
+            title=f"🪜 {ticket_type['name']} tiers",
+            description=describe_tiers(await repo.list_tiers(ticket_type["id"])),
+            color=_GREEN,
+        ).set_footer("Tickets start on the lowest tier; /ticket escalate moves them up."),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 @type_group.include
 @arc.slash_subcommand("list", "List this server's ticket types.")
 async def type_list(
@@ -463,19 +548,52 @@ async def unclaim(ctx: arc.GatewayContext, service: TicketService = arc.inject()
 
 
 @ticket.include
-@arc.slash_subcommand("assign", "Give this ticket to a staff member (admins).")
+@arc.slash_subcommand("assign", "Give this ticket to a staff member (admins and escalated tiers).")
 async def assign(
     ctx: arc.GatewayContext,
     member: arc.Option[hikari.Member, arc.MemberParams("Who should handle it.")],
     service: TicketService = arc.inject(),
 ) -> None:
-    require_manage_guild(ctx)
     current, ticket_type = await service.ticket_here(ctx.channel_id)
+    if ctx.member is None or not service.can_reassign(ctx.member, current, ticket_type):
+        raise SerenityPermissionError("Only admins, or the tier this ticket was escalated to, can reassign it.")
     service.require_staff(member, ticket_type)
     await service.claim(current, member.id, by=ctx.user.id, announce=False)
     await ctx.respond(
         f"📌 Assigned this ticket to {member.mention}.", user_mentions=[member.id]
     )
+
+
+async def tier_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list[str]:
+    repo = data.client.get_type_dependency(TicketRepository)
+    found = await repo.get_ticket_by_channel(data.channel_id)
+    if found is None:
+        return []
+    typed = (data.focused_value or "").lower()
+    return [t["name"] for t in await repo.list_tiers(found["type_id"]) if typed in t["name"].lower()][:25]
+
+
+@ticket.include
+@arc.slash_subcommand("escalate", "Bring a higher tier into this ticket, or hand it back down.")
+async def escalate(
+    ctx: arc.GatewayContext,
+    direction: arc.Option[
+        str, arc.StrParams("Up to a higher tier, or back to the one that escalated it.", choices={"Up": "up", "Down": "down"})
+    ] = "up",
+    tier: arc.Option[
+        Optional[str], arc.StrParams("Tier to summon (default: the next one up).", autocomplete_with=tier_names)
+    ] = None,
+    reason: arc.Option[Optional[str], arc.StrParams("Why; shown to the tier.", max_length=500)] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await ctx.defer(flags=hikari.MessageFlag.EPHEMERAL)
+    if direction == "down":
+        await service.deescalate(current, ticket_type, ctx.user.id, reason)
+    else:
+        await service.escalate(current, ticket_type, ctx.user.id, tier, reason)
+    await ctx.respond("✅ Done.", flags=hikari.MessageFlag.EPHEMERAL)
 
 
 @ticket.include
@@ -792,7 +910,7 @@ async def ticket_for(
     found = await service.repo.get_ticket_by_id(ticket_id)
     if found is None or found["guild_id"] != interaction.guild_id or found["status"] != "open":
         raise TicketError("This ticket is already closed.")
-    return found, await service.repo.get_type(found["guild_id"], found["type_id"])  # type: ignore[return-value]
+    return found, await service.full_type(found)
 
 
 async def request_deletion(
@@ -892,6 +1010,11 @@ async def auto_unclaim(service: TicketService) -> None:
         await service.auto_unclaim(int(time.time()))
     except Exception:
         logger.exception("Ticket auto-unclaim failed")
+    # ponytail: re-pings ride this loop, so they land up to 10 minutes late; fine for minute-scale timers.
+    try:
+        await service.reping_tiers(int(time.time()))
+    except Exception:
+        logger.exception("Ticket tier re-ping failed")
 
 
 @arc.utils.cron_loop("30 4 * * *")  # nightly, after the 03:30 UTC backup
