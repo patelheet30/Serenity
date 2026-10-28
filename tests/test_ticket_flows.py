@@ -496,3 +496,17 @@ async def test_priority_survives_reopen_and_rolls_back_without_permission(servic
     await service.close(urgent, support, BOB, None)
     await service.reopen(GUILD, 1, staff(BOB, "bob"))
     assert service.rest.create_guild_text_channel.call_args.args[1] == "urgent-support-1"
+
+
+async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    assert ticket["channel_id"] in service.open_channels
+
+    service.rest.create_message.side_effect = None
+    service.repo.set_ticket_channel = AsyncMock(side_effect=RuntimeError("db down"))
+    with pytest.raises(RuntimeError):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    service.rest.delete_channel.assert_awaited_once()
+    assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
