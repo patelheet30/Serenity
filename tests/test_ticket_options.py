@@ -68,6 +68,14 @@ def test_panel_styles_map_to_stored_values():
     assert choices(tickets.panel_edit, "style") == choices(tickets.panel_post, "style")
 
 
+def test_priority_choices_are_the_stored_values():
+    from serenity.services.ticket_service import PRIORITIES
+
+    # PRIORITIES mirrors the tickets.priority CHECK; normal is the column default.
+    assert choices(tickets.priority, "level") == {p.title(): p for p in PRIORITIES}
+    assert PRIORITIES == ("low", "normal", "high", "urgent")
+
+
 def test_module_hook_gates_every_ticket_command(client):
     """The plugin-wide require_module hook reaches every /ticket command, subgroups included."""
     # The plugin the client loaded: unload_extension drops the module, so a reload is a new one.

@@ -361,6 +361,61 @@ async def test_ticket_flows_are_logged(service: TicketService):
 
 
 @pytest.mark.asyncio
+async def test_transfer_changes_who_can_see_the_ticket(service: TicketService):
+    other_role = 1_241_890_335_472_164_907
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    billing = await service.repo.create_type(GUILD, "Billing", staff_role_ids=[other_role])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.claim(ticket, BOB, announce=False)
+    guest = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(CAROL), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    opener = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(ALICE), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.cache.get_guild_channel.return_value = MagicMock(
+        permission_overwrites={ALICE: opener, CAROL: guest}
+    )
+    service.cache.get_member.return_value = None
+
+    moved = await service.transfer(ticket, support, billing, BOB)
+    assert moved["type_id"] == billing["id"]
+    move, rename = (c.kwargs for c in service.rest.edit_channel.call_args_list)
+    assert rename["name"] == "billing-1"
+    edit = move
+    roles = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.ROLE}
+    users = {o.id for o in edit["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.MEMBER}
+    assert roles == {GUILD, other_role} and users == {ALICE, CAROL}
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["assignee_id"] is None  # type: ignore[index]
+    with pytest.raises(TicketError, match="already"):
+        await service.transfer(moved, billing, billing, BOB)
+
+
+@pytest.mark.asyncio
+async def test_priority_renames_and_opener_cant_be_removed(service: TicketService):
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+
+    updated = await service.set_priority(ticket, support, "urgent", BOB)
+    assert updated["priority"] == "urgent"
+    assert service.rest.edit_channel.call_args.kwargs["name"] == "urgent-support-1"
+    await service.set_priority(updated, support, "normal", BOB)
+    assert service.rest.edit_channel.call_args.kwargs["name"] == "support-1"
+
+    with pytest.raises(TicketError, match="opener"):
+        await service.remove_member(ticket, ALICE, BOB)
+    await service.add_member(ticket, support, CAROL, BOB)
+    await service.remove_member(ticket, CAROL, BOB)
+    kinds = [e["kind"] for e in await service.repo.list_events(ticket["id"])]
+    assert kinds == ["opened", "priority", "priority", "member_added", "member_removed"]
+
+
+
+
+@pytest.mark.asyncio
 async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=1)
     first = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
@@ -424,6 +479,29 @@ async def test_close_survives_a_channel_deleted_by_hand(service: TicketService):
 
 
 @pytest.mark.asyncio
+async def test_priority_survives_reopen_and_rolls_back_without_permission(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.MANAGE_GUILD)
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    urgent = await service.set_priority(ticket, support, "urgent", BOB)
+
+    service.rest.edit_channel.side_effect = hikari.ForbiddenError("", {}, b"")
+    with pytest.raises(TicketError, match="Manage Channels"):
+        await service.set_priority(urgent, support, "low", BOB)
+    assert (await service.repo.get_ticket_by_id(ticket["id"]))["priority"] == "urgent"  # type: ignore[index]
+
+    await service.close(urgent, support, BOB, None)
+    await service.reopen(GUILD, 1, staff(BOB, "bob"))
+    assert service.rest.create_guild_text_channel.call_args.args[1] == "urgent-support-1"
+
+
+
+
+@pytest.mark.asyncio
 async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
     support = await service.repo.create_type(GUILD, "Support")
     service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
@@ -448,3 +526,34 @@ async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: Ti
     with pytest.raises(RuntimeError):
         await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
     assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: TicketService):
+    other_role = 1_241_890_335_472_164_907
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    billing = await service.repo.create_type(GUILD, "Billing", staff_role_ids=[other_role])
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    guest = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(CAROL), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.cache.get_guild_channel.return_value = None
+    service.cache.get_member.return_value = None
+    opener = hikari.PermissionOverwrite(
+        id=hikari.Snowflake(ALICE), type=hikari.PermissionOverwriteType.MEMBER,
+        allow=hikari.Permissions.VIEW_CHANNEL,
+    )
+    service.rest.fetch_channel.return_value = MagicMock(
+        permission_overwrites={ALICE: opener, CAROL: guest}
+    )
+
+    await service.transfer(ticket, support, billing, BOB)
+    move = service.rest.edit_channel.call_args_list[0].kwargs
+    users = {o.id for o in move["permission_overwrites"] if o.type == hikari.PermissionOverwriteType.MEMBER}
+    assert users == {ALICE, CAROL}  # the opener and the guest both keep access
+
+    service.rest.fetch_channel.side_effect = hikari.NotFoundError("", {}, b"")
+    moved = await service.repo.get_ticket_by_id(ticket["id"])
+    with pytest.raises(TicketError, match="can't read this channel"):
+        await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]

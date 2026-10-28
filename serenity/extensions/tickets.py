@@ -12,6 +12,7 @@ from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleTy
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
+    PRIORITIES,
     TicketError,
     TicketService,
     member_permissions,
@@ -521,6 +522,88 @@ async def closed_ticket(service: TicketService, ctx: arc.GatewayContext, number:
     if found is None:
         raise TicketError(f"There's no ticket #{number}.")
     return found, await service.repo.get_type(ctx.guild_id, found["type_id"])  # type: ignore[return-value]
+
+
+@ticket.include
+@arc.slash_subcommand("add", "Let someone else see and reply in this ticket.")
+async def add(
+    ctx: arc.GatewayContext,
+    member: arc.Option[hikari.Member, arc.MemberParams("Who to add.")],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.add_member(current, ticket_type, member.id, ctx.user.id)
+    await ctx.respond(f"➕ Added {member.mention} to this ticket.", user_mentions=[member.id])
+
+
+@ticket.include
+@arc.slash_subcommand("remove", "Remove someone you added to this ticket.")
+async def remove(
+    ctx: arc.GatewayContext,
+    member: arc.Option[hikari.User, arc.UserParams("Who to remove.")],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.remove_member(current, member.id, ctx.user.id)
+    await ctx.respond(f"➖ Removed {member.mention} from this ticket.", user_mentions=False)
+
+
+@ticket.include
+@arc.slash_subcommand("priority", "Set this ticket's priority (shown in the channel name).")
+async def priority(
+    ctx: arc.GatewayContext,
+    level: arc.Option[str, arc.StrParams("Priority.", choices={p.title(): p for p in PRIORITIES})],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    if current["priority"] == level:
+        raise TicketError(f"This ticket is already {level} priority.")
+    # Answer first: a rename can wait up to 10 minutes on Discord's rate limit.
+    await ctx.respond(f"🚦 Priority set to **{level}**.")
+    try:
+        await service.set_priority(current, ticket_type, level, ctx.user.id)
+    except TicketError as exc:  # rolled back: correct the answer rather than add to it
+        await ctx.edit_initial_response(f"❌ {exc}")
+
+
+@ticket.include
+@arc.slash_subcommand("transfer", "Move this ticket to another type (and its staff).")
+async def transfer(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    new_type = await service.resolve_type(ctx.guild_id, type)  # type: ignore[arg-type]
+    await ctx.respond("🔀 Transferring…", flags=hikari.MessageFlag.EPHEMERAL)
+    try:
+        await service.transfer(current, ticket_type, new_type, ctx.user.id)
+    except TicketError as exc:  # answer with the reason, not a follow-up under "Transferring…"
+        await ctx.edit_initial_response(f"❌ {exc}")
+
+
+@ticket.include
+@arc.slash_subcommand("note", "Add a private staff note (never shown to the opener).")
+async def note(
+    ctx: arc.GatewayContext,
+    text: arc.Option[str, arc.StrParams("The note.", max_length=2000)],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    if not ticket_type["transcripts"]:
+        raise TicketError(
+            f"Notes are kept in the transcript, and **{ticket_type['name']}** tickets don't keep one."
+        )
+    await service.repo.add_note(current["id"], ctx.user.id, text)
+    await ctx.respond(
+        "🗒️ Note saved. Only staff see it, in the transcript (`/ticket transcript get`).",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
 
 
 @transcript_group.include
