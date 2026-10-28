@@ -181,8 +181,8 @@ class TicketService:
                         panel["channel_id"], panel["message_id"], embed=embed, components=rows
                     )
                     return panel
-                except hikari.NotFoundError:
-                    pass  # deleted while we weren't looking: post a new one
+                except hikari.NotFoundError:  # deleted while we weren't looking: post a new one
+                    self.panel_messages.discard(panel["message_id"])
             message = await self.rest.create_message(
                 panel["channel_id"], embed=embed, components=rows
             )
