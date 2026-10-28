@@ -13,16 +13,13 @@ import toolbox
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
-<<<<<<< HEAD
-from serenity.services.ticket_hours import business_seconds_between, format_schedule, offline_status
-=======
 from serenity.services.ticket_hours import (
+    business_seconds_between,
     effective_schedule,
     format_schedule,
     offline_status,
     within_hours,
 )
->>>>>>> feat/tickets-hours
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -716,7 +713,7 @@ class TicketService:
                 if ticket["guild_id"] not in settings:
                     settings[ticket["guild_id"]] = await self._settings(ticket["guild_id"])
                 guild = settings[ticket["guild_id"]]
-                schedule = ticket_type["schedule"] or guild.get("schedule")  # type: ignore[index]
+                schedule = effective_schedule(ticket_type["schedule"], guild)  # type: ignore[index]
 
                 def quiet_since(ts: int) -> int:
                     return business_seconds_between(
