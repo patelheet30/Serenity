@@ -441,6 +441,15 @@ async def test_modules_follow_the_dependency_rules(settings):
 
 
 @pytest.mark.asyncio
+async def test_tickets_module_only_exists_for_allowlisted_servers(settings, monkeypatch):
+    assert (await settings("PUT", "/modules/tickets", {"enabled": True}))[0] == 404
+
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+    status, body = await settings("PUT", "/modules/tickets", {"enabled": True})
+    assert status == 200 and body["enabled"]["tickets"] is True
+
+
+@pytest.mark.asyncio
 async def test_slowmode_settings_match_the_command_limits(settings):
     status, body = await settings("GET", "/slowmode")
     assert (status, body["enabled"], body["default_threshold"]) == (200, True, 10)

@@ -1,7 +1,12 @@
 import arc
 import hikari
 
-from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType
+from serenity.core.modules import (
+    ModuleManager,
+    ModuleNotEnabledError,
+    ModuleType,
+    available_modules,
+)
 from serenity.utils.errors import ConfigurationError
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -34,6 +39,16 @@ async def on_command_error(ctx: arc.GatewayContext, exc: Exception) -> None:
 
 module = plugin.include_slash_group("module", "Module management commands.")
 
+async def module_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> dict[str, str]:
+    """/module enable and disable offer the modules this server can use (autocomplete, not
+    fixed choices, because choices are the same in every server)."""
+    if not data.guild_id:
+        return {}
+    typed = (data.focused_value or "").lower()
+    return {
+        m.value.title(): m.value for m in available_modules(data.guild_id) if typed in m.value
+    }
+
 
 @module.include
 @arc.slash_subcommand("list", "List all available modules and their status.")
@@ -59,7 +74,7 @@ async def list_modules(
             color=hikari.Color(0x5865F2),
         )
 
-        core_modules = [ModuleType.SLOWMODE, ModuleType.MODERATION, ModuleType.LOGGING]
+        core_modules = available_modules(ctx.guild_id)
         core_status = []
 
         for mod in core_modules:
@@ -100,11 +115,7 @@ async def enable_module(
         str,
         arc.StrParams(
             "The module to enable.",
-            choices=[
-                hikari.CommandChoice(name="Slowmode", value="slowmode"),
-                hikari.CommandChoice(name="Moderation", value="moderation"),
-                hikari.CommandChoice(name="Logging", value="logging"),
-            ],
+            autocomplete_with=module_names,
         ),
     ],
     manager: ModuleManager = arc.inject(),
@@ -123,6 +134,8 @@ async def enable_module(
         return
 
     try:
+        if module not in {m.value for m in available_modules(ctx.guild_id)}:
+            raise ConfigurationError(f"There's no module called '{module}'. See `/module list`.")
         module_type = ModuleType(module)
 
         if await manager.is_enabled(ctx.guild_id, module_type):
@@ -166,6 +179,12 @@ async def enable_module(
                 value="Use `/logging setup` to configure log channels.",
                 inline=False,
             )
+        elif module_type == ModuleType.TICKETS:
+            embed.add_field(
+                name="Next Steps",
+                value="Create a ticket type with `/ticket type create`, then post a panel with `/ticket panel post`.",
+                inline=False,
+            )
 
         await ctx.respond(embed=embed)
         logger.info(f"Enabled module {module} in guild {ctx.guild_id} by user {ctx.user.id}")
@@ -189,11 +208,7 @@ async def disable_module(
         str,
         arc.StrParams(
             "The module to disable.",
-            choices=[
-                hikari.CommandChoice(name="Slowmode", value="slowmode"),
-                hikari.CommandChoice(name="Moderation", value="moderation"),
-                hikari.CommandChoice(name="Logging", value="logging"),
-            ],
+            autocomplete_with=module_names,
         ),
     ],
     manager: ModuleManager = arc.inject(),
@@ -211,6 +226,8 @@ async def disable_module(
         return
 
     try:
+        if module not in {m.value for m in available_modules(ctx.guild_id)}:
+            raise ConfigurationError(f"There's no module called '{module}'. See `/module list`.")
         module_type = ModuleType(module)
 
         if not await manager.is_enabled(ctx.guild_id, module_type):

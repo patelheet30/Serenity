@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List
@@ -19,6 +20,7 @@ class ModuleType(Enum):
     SLOWMODE = "slowmode"
     MODERATION = "moderation"
     LOGGING = "logging"
+    TICKETS = "tickets"
 
     # Future module types will be added here
 
@@ -38,8 +40,26 @@ MODULE_DEPENDENCIES: Dict[ModuleType, List[ModuleType]] = {
     ModuleType.SLOWMODE: [],
     ModuleType.LOGGING: [],
     ModuleType.MODERATION: [ModuleType.LOGGING],
+    ModuleType.TICKETS: [],
     # Future dependencies will be added here
 }
+
+
+def tickets_guilds() -> set[int]:
+    """Servers Tickets is available in before it launches everywhere: TICKETS_GUILDS, a
+    comma-separated list of server ids. Read when asked, since .env loads after imports.
+
+    ponytail: a launch gate; remove it (and its callers) when Tickets ships to everyone.
+    """
+    return {int(g) for g in os.getenv("TICKETS_GUILDS", "").split(",") if g.strip()}
+
+
+def module_available(guild_id: int, module: "ModuleType") -> bool:
+    return module != ModuleType.TICKETS or guild_id in tickets_guilds()
+
+
+def available_modules(guild_id: int) -> List["ModuleType"]:
+    return [m for m in ModuleType if module_available(guild_id, m)]
 
 
 class ModuleManager:
@@ -59,6 +79,8 @@ class ModuleManager:
 
     async def enable_module(self, guild_id: int, module: ModuleType) -> None:
         """Enable a module for a guild, checking dependencies first"""
+        if not module_available(guild_id, module):
+            raise ConfigurationError(f"The {module.value} module isn't available in this server yet.")
         dependencies = MODULE_DEPENDENCIES.get(module, [])
         for dep in dependencies:
             if not await self.is_enabled(guild_id, dep):

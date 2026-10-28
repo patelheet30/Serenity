@@ -15,11 +15,13 @@ from serenity.database.import_sqlite import cutover_if_needed
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
+from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
 from serenity.services.metrics import BOT_INFO, COMMANDS_USED
 from serenity.services.metrics_server import MetricsServer
 from serenity.services.moderation_service import ModerationService
 from serenity.services.slowmode_engine import SlowmodeEngine
+from serenity.services.ticket_service import TicketService
 
 load_dotenv()
 
@@ -79,6 +81,9 @@ async def on_startup(_: arc.GatewayClient) -> None:
         logging_svc=logging_svc,
         rest=bot.rest,
     )
+    ticket_repo = TicketRepository(repo.pool)
+    ticket_svc = TicketService(repo=ticket_repo, rest=bot.rest, cache=bot.cache, modules=module_manager)
+    await ticket_svc.load()
 
     client.set_type_dependency(Repository, repo)
     client.set_type_dependency(SlowmodeEngine, engine)
@@ -87,6 +92,8 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(LoggingService, logging_svc)
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
+    client.set_type_dependency(TicketRepository, ticket_repo)
+    client.set_type_dependency(TicketService, ticket_svc)
 
     await metrics_server.start(api=build_api(bot, repo))
 
