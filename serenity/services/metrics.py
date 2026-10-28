@@ -91,7 +91,7 @@ LOG_EVENTS = (
     "member_join", "member_leave", "member_update", "voice_state_update",
     "channel_create", "channel_delete", "channel_update",
     "role_create", "role_delete", "role_update", "guild_update", "emoji_update",
-    "dashboard_change",
+    "dashboard_change", "ticket_raid_brake",
     "mod_ban", "mod_softban", "mod_unban", "mod_kick", "mod_timeout", "mod_untimeout", "mod_warn",
 )
 

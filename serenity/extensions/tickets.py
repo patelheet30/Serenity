@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo, available_timezones
 
 import arc
 import asyncpg
@@ -11,13 +13,23 @@ from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType, tickets_guilds
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.ticket_repository import TicketRepository
+from serenity.services.ticket_hours import format_schedule, parse_schedule
 from serenity.services.ticket_service import (
+    PICKED,
     PRIORITIES,
     TicketError,
     TicketService,
+    asked_fields,
+    check_answers,
+    field_type,
+    find_stage,
     member_permissions,
+    parse_color,
     parse_questions,
+    placeholder,
     render_transcript,
+    set_field,
+    with_stage,
 )
 from serenity.utils.errors import PermissionError as SerenityPermissionError
 from serenity.utils.logging import get_logger
@@ -28,6 +40,16 @@ _GREEN = hikari.Color(0x57F287)
 _BLUE = hikari.Color(0x5865F2)
 
 CLAIM_MODES = {"First staff reply": "reply", "Claim button": "button", "Both": "both"}
+FIELD_KINDS = {
+    "Short text": "short",
+    "Paragraph": "paragraph",
+    "Number": "number",
+    "Date": "date",
+    "Dropdown": "select",
+    "Link": "url",
+    "Member": "user",
+    "Pattern (regex)": "pattern",
+}
 
 # Staff-only by default; server admins can grant /ticket to their staff roles in
 # Server Settings → Integrations. Openers use the buttons inside their ticket instead.
@@ -59,10 +81,13 @@ async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
     if isinstance(exc, (TicketError, SerenityPermissionError)):
         await ctx.respond(f"❌ {exc}", flags=hikari.MessageFlag.EPHEMERAL)
         return
-    if isinstance(exc, asyncpg.UniqueViolationError):  # type names, case-insensitively
-        await ctx.respond(
-            "❌ A ticket type with that name already exists.", flags=hikari.MessageFlag.EPHEMERAL
+    if isinstance(exc, asyncpg.UniqueViolationError):  # names (case-insensitively), tier positions
+        taken = (
+            "Another change took that tier name or position a moment ago. Try again."
+            if "ticket_tiers" in (exc.constraint_name or "")
+            else "A ticket type with that name already exists."
         )
+        await ctx.respond(f"❌ {taken}", flags=hikari.MessageFlag.EPHEMERAL)
         return
     raise exc
 
@@ -89,19 +114,36 @@ async def type_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list
 TypeOption = arc.Option[str, arc.StrParams("The ticket type.", autocomplete_with=type_names)]
 
 
+def describe_field(field: dict) -> str:
+    flags = [field_type(field)]
+    if field.get("staff_only"):
+        flags.append("staff only")
+    elif not field["required"]:
+        flags.append("optional")
+    if field.get("identity"):
+        flags.append("links tickets")
+    return ", ".join(flags)
+
+
 def describe_type(ticket_type: dict, service: TicketService) -> str:
     roles = ", ".join(f"<@&{r}>" for r in ticket_type["staff_role_ids"]) or "Manage Server only"
     category = f"<#{ticket_type['category_id']}>" if ticket_type["category_id"] else "None"
-    questions = "\n".join(f"• {f['label']}" for f in ticket_type["fields"]) or "None"
+    questions = "\n".join(f"• {f['label']} ({describe_field(f)})" for f in ticket_type["fields"]) or "None"
     retention = ticket_type["retention_days"]
+    stages = " → ".join(
+        s["name"] + (" ✓" if s["terminal"] else "") for s in ticket_type["stages"]
+    ) or "None"
     return (
         f"**{service.type_label(ticket_type)}**\n"
         f"Staff: {roles}\nCategory: {category}\n"
         f"Claiming: {ticket_type['claim_mode']} · Open limit: {ticket_type['open_limit']}\n"
         f"Channel name: `{ticket_type['name_template']}`\n"
+        f"Hours: {format_schedule(ticket_type['schedule']) if ticket_type['schedule'] else 'server default'}"
+        f" · Outside hours: {'can open' if ticket_type['open_off_hours'] else 'closed'}\n"
         f"Transcripts: {'on' if ticket_type['transcripts'] else 'off'}"
         f" · Retention: {'server default' if retention is None else 'until deleted' if retention == 0 else f'{retention} days'}\n"
         f"Ratings: {'on' if ticket_type['ratings'] else 'off'}\n"
+        f"Stages: {stages}\n"
         f"Questions:\n{questions}"
     )
 
@@ -193,6 +235,13 @@ async def type_edit(
     ratings: arc.Option[
         Optional[bool], arc.BoolParams("Ask openers to rate closed tickets (turn off for appeals).")
     ] = None,
+    hours: arc.Option[
+        Optional[str],
+        arc.StrParams('Own support hours, e.g. "mon-fri 09:00-17:00" ("default" = the server\'s).', max_length=200),
+    ] = None,
+    open_off_hours: arc.Option[
+        Optional[bool], arc.BoolParams("Let members open these tickets outside support hours.")
+    ] = None,
     repo: TicketRepository = arc.inject(),
     service: TicketService = arc.inject(),
 ) -> None:
@@ -212,12 +261,15 @@ async def type_edit(
         "transcripts": transcripts,
         "retention_days": retention_days,
         "ratings": ratings,
+        "open_off_hours": open_off_hours,
     }
     values = {k: v for k, v in values.items() if v is not None}
     if questions is not None:
         values["fields"] = [] if questions.strip().lower() == "none" else parse_questions(questions)
     if auto_unclaim_hours is not None:
         values["auto_unclaim_hours"] = auto_unclaim_hours or None
+    if hours is not None:
+        values["schedule"] = schedule_from(hours)
     if not values:
         raise TicketError("Nothing to change.")
 
@@ -258,6 +310,126 @@ async def type_staff(
 
 
 @type_group.include
+@arc.slash_subcommand("field", "Add, change or remove one field of a ticket type's form.")
+async def type_field(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    # Left out, these keep an existing field's setting; a new field is a required short text.
+    label: arc.Option[str, arc.StrParams("The question; an existing one is changed.", max_length=45)],
+    kind: arc.Option[
+        Optional[str], arc.StrParams("What the answer is (new fields: short text).", choices=FIELD_KINDS)
+    ] = None,
+    required: arc.Option[
+        Optional[bool], arc.BoolParams("The opener must answer it (new fields: yes).")
+    ] = None,
+    options: arc.Option[
+        Optional[str],
+        arc.StrParams("Dropdown: options separated by commas. Pattern: the regex.", max_length=1000),
+    ] = None,
+    identity: arc.Option[
+        Optional[bool], arc.BoolParams("Link tickets with the same answer (e.g. an IGN), across types.")
+    ] = None,
+    staff_only: arc.Option[Optional[bool], arc.BoolParams("Never asked; staff fill it in.")] = None,
+    remove: arc.Option[bool, arc.BoolParams("Remove this field instead.")] = False,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    fields: list[dict] = ticket_type["fields"]
+    if remove:
+        kept = [f for f in fields if f["label"].lower() != label.strip().lower()]
+        if len(kept) == len(fields):
+            raise TicketError(f"**{ticket_type['name']}** has no field called “{label}”.")
+        fields = kept
+    else:
+        fields = set_field(
+            fields, label, kind, required=required, options=options, identity=identity,
+            staff_only=staff_only,
+        )
+    updated = await repo.update_type(guild_id, ticket_type["id"], fields=fields)
+    if updated is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="✅ Ticket type updated", description=describe_type(updated, service), color=_GREEN
+        ),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
+@arc.slash_subcommand("stage-add", "Add a stage to a ticket type's workflow, or change one.")
+async def type_stage_add(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[
+        str, arc.StrParams("Stage name; an existing one is changed.", min_length=1, max_length=50)
+    ],
+    color: arc.Option[Optional[str], arc.StrParams("Hex colour, like #5865F2.", max_length=7)] = None,
+    terminal: arc.Option[
+        Optional[bool], arc.BoolParams("Reaching it offers to close the ticket with this outcome.")
+    ] = None,
+    auto_close: arc.Option[
+        Optional[bool], arc.BoolParams("Inactive tickets at this stage may be closed automatically.")
+    ] = None,
+    position: arc.Option[
+        Optional[int], arc.IntParams("Place in the order (1 = first, where new tickets start).", min=1)
+    ] = None,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    if not name.strip():
+        raise TicketError("A stage needs a name.")
+    # Changing a stage keeps whatever isn't given; a new one gets the defaults.
+    existing = find_stage(ticket_type, name.strip()) or {
+        "color": None, "terminal": False, "auto_close": True
+    }
+    stage = {
+        "name": name.strip(),
+        "color": parse_color(color) if color else existing["color"],
+        "terminal": existing["terminal"] if terminal is None else terminal,
+        "auto_close": existing["auto_close"] if auto_close is None else auto_close,
+    }
+    stages = with_stage(ticket_type["stages"], stage, position)
+    updated = await repo.update_type(guild_id, ticket_type["id"], stages=stages)
+    if updated is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        embed=hikari.Embed(
+            title="✅ Stage saved", description=describe_type(updated, service), color=_GREEN
+        ),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
+@arc.slash_subcommand("stage-remove", "Remove a stage from a ticket type's workflow.")
+async def type_stage_remove(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[str, arc.StrParams("Stage name.", max_length=50)],
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    stage = find_stage(ticket_type, name)
+    if stage is None:
+        raise TicketError(f"**{ticket_type['name']}** has no stage called **{name}**.")
+    stages = [s for s in ticket_type["stages"] if s is not stage]
+    if await repo.update_type(guild_id, ticket_type["id"], stages=stages) is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
+    await ctx.respond(
+        f"🗑️ Removed **{stage['name']}** from **{ticket_type['name']}**. "
+        "Tickets already at it keep it until they're moved.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@type_group.include
 @arc.slash_subcommand("delete", "Delete a ticket type no panel shows and that has no tickets.")
 async def type_delete(
     ctx: arc.GatewayContext,
@@ -273,6 +445,91 @@ async def type_delete(
             "history). Take it off your panels; types with tickets can't be deleted."
         )
     await ctx.respond(f"🗑️ Deleted the **{ticket_type['name']}** ticket type.")
+
+
+def describe_tiers(tiers: list[dict]) -> str:
+    names = {t["id"]: t["name"] for t in tiers}
+    lines = []
+    for t in tiers:
+        extras = [", ".join(f"<@&{r}>" for r in t["role_ids"]) or "no roles"]
+        if t["can_summon"]:
+            extras.append("also summons " + ", ".join(names[i] for i in t["can_summon"] if i in names))
+        if t["requires_reason"]:
+            extras.append("needs a reason")
+        if t["reping_minutes"]:
+            extras.append(f"re-pinged after {t['reping_minutes']} min")
+        lines.append(f"**{t['position']}. {t['name']}** · " + " · ".join(extras))
+    return "\n".join(lines) or "No tiers, so these tickets can't be escalated."
+
+
+@type_group.include
+@arc.slash_subcommand("tier", "Add, change or remove an escalation tier on a ticket type.")
+async def type_tier(
+    ctx: arc.GatewayContext,
+    type: TypeOption,
+    name: arc.Option[str, arc.StrParams("The tier, e.g. Senior staff.", max_length=50)],
+    role: arc.Option[
+        Optional[hikari.Role], arc.RoleParams("Role to add to the tier, or remove if it's in it.")
+    ] = None,
+    position: arc.Option[
+        Optional[int], arc.IntParams("Rung on the ladder; tickets start on the lowest.", min=1, max=25)
+    ] = None,
+    can_summon: arc.Option[
+        Optional[str],
+        arc.StrParams("Tiers it may jump to besides the next one up, by commas (\"none\" to clear).", max_length=300),
+    ] = None,
+    requires_reason: arc.Option[Optional[bool], arc.BoolParams("Escalating to it needs a reason.")] = None,
+    reping_minutes: arc.Option[
+        Optional[int], arc.IntParams("Ping it again after this many minutes unanswered (0 = never).", min=0, max=1440)
+    ] = None,
+    delete: arc.Option[bool, arc.BoolParams("Remove this tier.")] = False,
+    repo: TicketRepository = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    ticket_type = await service.resolve_type(guild_id, type)
+    tiers = await repo.list_tiers(ticket_type["id"])
+    existing = next((t for t in tiers if t["name"].lower() == name.lower()), None)
+    if delete:
+        if existing is None:
+            raise TicketError(f"**{ticket_type['name']}** has no tier called **{name}**.")
+        await repo.delete_tier(existing["id"])
+    else:
+        values: dict = {}
+        if role is not None:
+            roles: list[int] = existing["role_ids"] if existing else []
+            values["role_ids"] = [r for r in roles if r != role.id] if role.id in roles else [*roles, role.id]
+        if position is not None:
+            taken = next((t for t in tiers if t["position"] == position and t is not existing), None)
+            if taken:
+                raise TicketError(f"**{taken['name']}** is already at position {position}.")
+            values["position"] = position
+        if can_summon is not None:
+            ids = {t["name"].lower(): t["id"] for t in tiers}
+            wanted = [] if can_summon.strip().lower() == "none" else [n.strip() for n in can_summon.split(",") if n.strip()]
+            missing = [n for n in wanted if n.lower() not in ids]
+            if missing:
+                raise TicketError(f"**{ticket_type['name']}** has no tier called **{missing[0]}**.")
+            values["can_summon"] = [ids[n.lower()] for n in wanted]
+        if requires_reason is not None:
+            values["requires_reason"] = requires_reason
+        if reping_minutes is not None:
+            values["reping_minutes"] = reping_minutes or None
+        if existing is None:
+            if role is None:
+                raise TicketError("A new tier needs a role.")
+            values.setdefault("position", max((t["position"] for t in tiers), default=0) + 1)
+            await repo.create_tier(ticket_type["id"], name=name, **values)
+        elif values:
+            await repo.update_tier(existing["id"], **values)
+    await ctx.respond(
+        embed=hikari.Embed(
+            title=f"🪜 {ticket_type['name']} tiers",
+            description=describe_tiers(await repo.list_tiers(ticket_type["id"]))[:4096],
+            color=_GREEN,
+        ).set_footer("Tickets start on the lowest tier; /ticket escalate moves them up."),
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
 
 
 @type_group.include
@@ -468,19 +725,52 @@ async def unclaim(ctx: arc.GatewayContext, service: TicketService = arc.inject()
 
 
 @ticket.include
-@arc.slash_subcommand("assign", "Give this ticket to a staff member (admins).")
+@arc.slash_subcommand("assign", "Give this ticket to a staff member (admins and escalated tiers).")
 async def assign(
     ctx: arc.GatewayContext,
     member: arc.Option[hikari.Member, arc.MemberParams("Who should handle it.")],
     service: TicketService = arc.inject(),
 ) -> None:
-    require_manage_guild(ctx)
     current, ticket_type = await service.ticket_here(ctx.channel_id)
+    if ctx.member is None or not service.can_reassign(ctx.member, current, ticket_type):
+        raise SerenityPermissionError("Only admins, or the tier this ticket was escalated to, can reassign it.")
     service.require_staff(member, ticket_type)
     await service.claim(current, member.id, by=ctx.user.id, announce=False)
     await ctx.respond(
         f"📌 Assigned this ticket to {member.mention}.", user_mentions=[member.id]
     )
+
+
+async def tier_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list[str]:
+    repo = data.client.get_type_dependency(TicketRepository)
+    found = await repo.get_ticket_by_channel(data.channel_id)
+    if found is None:
+        return []
+    typed = (data.focused_value or "").lower()
+    return [t["name"] for t in await repo.list_tiers(found["type_id"]) if typed in t["name"].lower()][:25]
+
+
+@ticket.include
+@arc.slash_subcommand("escalate", "Bring a higher tier into this ticket, or hand it back down.")
+async def escalate(
+    ctx: arc.GatewayContext,
+    direction: arc.Option[
+        str, arc.StrParams("Up to a higher tier, or back to the one that escalated it.", choices={"Up": "up", "Down": "down"})
+    ] = "up",
+    tier: arc.Option[
+        Optional[str], arc.StrParams("Tier to summon (default: the next one up).", autocomplete_with=tier_names)
+    ] = None,
+    reason: arc.Option[Optional[str], arc.StrParams("Why; shown to the tier.", max_length=500)] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await ctx.defer(flags=hikari.MessageFlag.EPHEMERAL)
+    if direction == "down":
+        await service.deescalate(current, ticket_type, ctx.user.id, reason)
+    else:
+        await service.escalate(current, ticket_type, ctx.user.id, tier, reason)
+    await ctx.respond("✅ Done.", flags=hikari.MessageFlag.EPHEMERAL)
 
 
 @ticket.include
@@ -591,8 +881,32 @@ async def transfer(
         await ctx.edit_initial_response(f"❌ {exc}")
 
 
+async def stage_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list[str]:
+    """The stages of the ticket in the channel the command is typed in."""
+    repo = data.client.get_type_dependency(TicketRepository)
+    found = await repo.get_ticket_by_channel(data.channel_id) if data.channel_id else None
+    if found is None:
+        return []
+    ticket_type = await repo.get_type(found["guild_id"], found["type_id"])
+    typed = (data.focused_value or "").lower()
+    return [s["name"] for s in (ticket_type or {}).get("stages", []) if typed in s["name"].lower()][:25]
+
+
 @ticket.include
-@arc.slash_subcommand("note", "Add a private staff note (never shown to the opener).")
+@arc.slash_subcommand("stage", "Move this ticket to another stage of its workflow.")
+async def move_stage(
+    ctx: arc.GatewayContext,
+    stage: arc.Option[str, arc.StrParams("The stage.", autocomplete_with=stage_names)],
+    service: TicketService = arc.inject(),
+) -> None:
+    current, ticket_type = await service.ticket_here(ctx.channel_id)
+    service.require_staff(ctx.member, ticket_type)
+    await service.set_stage(current, ticket_type, stage, ctx.user.id)
+    await ctx.respond("✅ Stage changed.", flags=hikari.MessageFlag.EPHEMERAL)
+
+
+@ticket.include
+@arc.slash_subcommand("note","Add a private staff note (never shown to the opener).")
 async def note(
     ctx: arc.GatewayContext,
     text: arc.Option[str, arc.StrParams("The note.", max_length=2000)],
@@ -728,6 +1042,167 @@ async def settings_ratings(
     )
 
 
+@settings_group.include
+@arc.slash_subcommand("cooldown", "How long a member waits between opening tickets.")
+async def settings_cooldown(
+    ctx: arc.GatewayContext,
+    minutes: arc.Option[int, arc.IntParams("Minutes (0 turns it off).", min=0, max=1440)],
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(guild_id, open_cooldown_minutes=minutes)
+    await ctx.respond(
+        f"✅ Members can open a ticket every {minutes} minutes." if minutes
+        else "✅ There's no cooldown between tickets.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("requirements", "What a member needs before they can open tickets.")
+async def settings_requirements(
+    ctx: arc.GatewayContext,
+    account_age_days: arc.Option[
+        Optional[int], arc.IntParams("Minimum Discord account age in days (0: none).", min=0, max=365)
+    ] = None,
+    role: arc.Option[Optional[hikari.Role], arc.RoleParams("A role they need.")] = None,
+    no_role: arc.Option[bool, arc.BoolParams("Stop requiring a role.")] = False,
+    service: TicketService = arc.inject(),
+) -> None:
+    # ponytail: server-wide; per-type requirements come with the dashboard's type editor.
+    guild_id = require_manage_guild(ctx)
+    changes: dict = {}
+    if account_age_days is not None:
+        changes["min_account_age_days"] = account_age_days
+    if role or no_role:
+        changes["required_role_id"] = None if no_role else role.id  # type: ignore[union-attr]
+    if not changes:
+        raise TicketError("Nothing to change.")
+    await service.update_settings(guild_id, **changes)
+    settings = await service.settings(guild_id)
+    age, role_id = settings.get("min_account_age_days", 0), settings.get("required_role_id")
+    needs = [f"an account at least {age} days old"] if age else []
+    needs += [f"the <@&{role_id}> role"] if role_id else []
+    await ctx.respond(
+        f"✅ Opening a ticket needs {' and '.join(needs)}." if needs
+        else "✅ Anyone can open a ticket.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("raid-brake", "Pause opening when too many tickets open at once (also resumes).")
+async def settings_raid_brake(
+    ctx: arc.GatewayContext,
+    tickets: arc.Option[int, arc.IntParams("Pause once this many open (0 turns it off).", min=0, max=100)],
+    minutes: arc.Option[int, arc.IntParams("Within this many minutes.", min=1, max=60)] = 5,
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(guild_id, raid_limit=tickets, raid_window_minutes=minutes)
+    await service.resume_opening(guild_id)
+    await ctx.respond(
+        f"✅ Opening pauses if {tickets} tickets open within {minutes} minutes; staff are pinged in "
+        "the ticket log with a button to resume." if tickets
+        else "✅ The raid brake is off.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+def schedule_from(text: str) -> Optional[list]:
+    """A parsed schedule; "default" is None, so a type follows the server's hours again."""
+    if text.strip().lower() == "default":
+        return None
+    try:
+        return parse_schedule(text)
+    except ValueError as exc:
+        raise TicketError(str(exc)) from None
+
+
+async def timezones(data: arc.AutocompleteData[arc.GatewayClient, str]) -> list[str]:
+    typed = (data.focused_value or "").lower().replace(" ", "_")
+    return [z for z in sorted(available_timezones()) if typed in z.lower()][:25]
+
+
+@settings_group.include
+@arc.slash_subcommand("hours", "Support hours. Tickets opened outside them get an auto-reply.")
+async def settings_hours(
+    ctx: arc.GatewayContext,
+    schedule: arc.Option[
+        str, arc.StrParams('e.g. "mon-fri 09:00-17:00; sat 10:00-14:00", or "off".', max_length=200)
+    ],
+    timezone: arc.Option[
+        Optional[str], arc.StrParams("Where those times are, e.g. Europe/London.", autocomplete_with=timezones)
+    ] = None,
+    message: arc.Option[
+        Optional[str],
+        arc.StrParams("The auto-reply. Placeholders: {user} {hours} {next_open}", max_length=1000),
+    ] = None,
+    modules: ModuleManager = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    if timezone is not None and timezone not in available_timezones():
+        raise TicketError(f"“{timezone}” isn't a timezone I know. Pick one from the list.")
+    settings = dict((await modules.get_module_config(guild_id, ModuleType.TICKETS)).settings)
+    parsed = None if schedule.strip().lower() == "off" else schedule_from(schedule)
+    if parsed is None:  # "off" (or "default", which is the same thing server-wide)
+        settings.pop("schedule", None)
+    else:
+        settings["schedule"] = parsed
+    if timezone is not None:
+        settings["timezone"] = timezone
+    if message is not None:
+        settings["off_hours_message"] = message
+    await modules.update_module_settings(guild_id, ModuleType.TICKETS, settings)
+    await service.refresh_panels(guild_id)
+    await ctx.respond(
+        f"✅ Support hours: {format_schedule(settings['schedule'])} ({settings.get('timezone', 'UTC')})."
+        if "schedule" in settings
+        else "✅ Support hours are off: staff count as always around.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("away", "Away mode: tell members staff are out (holidays, events).")
+async def settings_away(
+    ctx: arc.GatewayContext,
+    on: arc.Option[bool, arc.BoolParams("Turn away mode on or off.")],
+    until: arc.Option[
+        Optional[str],
+        arc.StrParams("When you're back, e.g. 2026-12-27 09:00 (support hours' timezone).", max_length=16),
+    ] = None,
+    note: arc.Option[Optional[str], arc.StrParams("Added to the auto-reply.", max_length=500)] = None,
+    modules: ModuleManager = arc.inject(),
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    settings = dict((await modules.get_module_config(guild_id, ModuleType.TICKETS)).settings)
+    if not on:
+        settings.pop("away", None)
+    else:
+        until_ts = None
+        if until:
+            try:
+                parsed = datetime.fromisoformat(until.strip())
+            except ValueError:
+                raise TicketError("Write the date like `2026-12-27 09:00`.") from None
+            until_ts = int(parsed.replace(tzinfo=ZoneInfo(settings.get("timezone", "UTC"))).timestamp())
+            if until_ts <= time.time():
+                raise TicketError("That's in the past.")
+        settings["away"] = {"until": until_ts, "note": note}
+    await modules.update_module_settings(guild_id, ModuleType.TICKETS, settings)
+    await service.refresh_panels(guild_id)
+    until_ts = settings.get("away", {}).get("until")
+    await ctx.respond(
+        "✅ Away mode is off." if not on
+        else f"🌙 Away mode is on{f' until <t:{until_ts}:F>' if until_ts else ' until you turn it off'}. "
+        "New tickets get the auto-reply.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -751,25 +1226,78 @@ async def open_from_panel(
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
     # Checked before the form too, so nobody fills one in only to be refused.
-    await service.check_can_open(guild_id, interaction.user.id, ticket_type)
+    await service.check_can_open(guild_id, interaction.member, ticket_type)  # type: ignore[arg-type]
 
-    if not ticket_type["fields"]:
+    asked = asked_fields(ticket_type)
+    typed = [f for f in asked if field_type(f) not in PICKED]
+    if typed:
+        await interaction.create_modal_response(
+            ticket_type["name"][:45], f"ticket:form:{type_id}", components=text_inputs(service, typed)
+        )
+    elif asked:
+        await ask_picks(interaction, service, ticket_type, {})
+    else:
         await create_and_confirm(interaction, service, ticket_type, {})
-        return
-    rows = [
+
+
+def text_inputs(
+    service: TicketService, fields: list[dict], values: Optional[dict[str, str]] = None
+) -> list[hikari.api.ModalActionRowBuilder]:
+    """A modal's rows for `fields`, prefilled from `values`. Picked fields are typed in here (staff
+    editing) and checked like any other answer."""
+    return [
         service.rest.build_modal_action_row().add_text_input(
             f["key"],
             f["label"],
             style=hikari.TextInputStyle.PARAGRAPH
-            if f["style"] == "paragraph"
+            if field_type(f) == "paragraph"
             else hikari.TextInputStyle.SHORT,
+            placeholder=placeholder(f),
+            # Clamped: Discord rejects a value longer than the input, and a field's type (so its
+            # max length) can change after answers were given.
+            value=((values or {}).get(f["key"]) or "")[: f.get("max_length", 1000)] or hikari.UNDEFINED,
             required=f["required"],
             max_length=f.get("max_length", 1000),
         )
-        for f in ticket_type["fields"]
+        for f in fields
     ]
-    await interaction.create_modal_response(
-        ticket_type["name"][:45], f"ticket:form:{type_id}", components=rows
+
+
+async def ask_picks(
+    interaction: hikari.ComponentInteraction | hikari.ModalInteraction,
+    service: TicketService,
+    ticket_type: dict,
+    answers: dict[str, str],
+) -> None:
+    """The dropdown and member questions, as select menus, after the text form."""
+    service.save_draft((interaction.guild_id, interaction.user.id, ticket_type["id"]), answers)  # type: ignore[arg-type]
+    rows: list[hikari.api.MessageActionRowBuilder] = []
+    for f in asked_fields(ticket_type):
+        kind = field_type(f)
+        if kind not in PICKED:
+            continue
+        custom_id = f"ticket:pick:{ticket_type['id']}:{f['key']}"
+        row = service.rest.build_message_action_row()
+        if kind == "user":
+            row.add_select_menu(
+                hikari.ComponentType.USER_SELECT_MENU, custom_id, placeholder=f["label"],
+                min_values=int(f["required"]),
+            )
+        else:
+            menu = row.add_text_menu(custom_id, placeholder=f["label"], min_values=int(f["required"]))
+            for option in f["options"]:
+                menu.add_option(option, option)
+        rows.append(row)
+    rows.append(
+        service.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.PRIMARY, f"ticket:submit:{ticket_type['id']}", label="Open ticket"
+        )
+    )
+    await interaction.create_initial_response(
+        hikari.ResponseType.MESSAGE_CREATE,
+        f"**{ticket_type['name']}**: a few more questions, then press **Open ticket**.",
+        components=rows,
+        flags=hikari.MessageFlag.EPHEMERAL,
     )
 
 
@@ -788,12 +1316,58 @@ async def submit_form(
     ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
-    answers = modal_values(interaction)
-    fields = {f["key"]: answers.get(f["key"], "") for f in ticket_type["fields"]}
-    missing = [f["label"] for f in ticket_type["fields"] if f["required"] and not fields[f["key"]]]
-    if missing:
-        raise TicketError(f"Please answer: {', '.join(missing)}.")
-    await create_and_confirm(interaction, service, ticket_type, fields)
+    asked = asked_fields(ticket_type)
+    typed = [f for f in asked if field_type(f) not in PICKED]
+    answers = check_answers(typed, modal_values(interaction))  # an invalid answer stops here
+    if len(typed) < len(asked):
+        await ask_picks(interaction, service, ticket_type, answers)
+    else:
+        await create_and_confirm(interaction, service, ticket_type, answers)
+
+
+async def submit_picks(
+    interaction: hikari.ComponentInteraction, service: TicketService, type_id: int
+) -> None:
+    key = (interaction.guild_id, interaction.user.id, type_id)
+    draft = service.get_draft(key)  # type: ignore[arg-type]
+    ticket_type = await service.repo.get_type(interaction.guild_id, type_id)  # type: ignore[arg-type]
+    if ticket_type is None:
+        raise TicketError("That ticket type no longer exists.")
+    answers = check_answers(asked_fields(ticket_type), draft)
+    await create_and_confirm(interaction, service, ticket_type, answers)
+    # Only now: if the open was refused (open limit, blacklist), a retry keeps the answers.
+    service.drafts.pop(key, None)  # type: ignore[arg-type]
+
+
+async def edit_fields_form(
+    interaction: hikari.ComponentInteraction, service: TicketService, ticket_id: int
+) -> None:
+    current, ticket_type = await ticket_for(service, interaction, ticket_id)
+    service.require_staff(interaction.member, ticket_type)
+    if not ticket_type["fields"]:
+        raise TicketError(f"**{ticket_type['name']}** tickets have no fields.")
+    await interaction.create_modal_response(
+        f"Ticket #{current['number']}",
+        f"ticket:fieldsave:{ticket_id}",
+        components=text_inputs(service, ticket_type["fields"], current["fields"]),
+    )
+
+
+async def save_fields(
+    interaction: hikari.ModalInteraction, service: TicketService, ticket_id: int
+) -> None:
+    current, ticket_type = await ticket_for(service, interaction, ticket_id)
+    service.require_staff(interaction.member, ticket_type)
+    updated = await service.edit_fields(
+        current, ticket_type, modal_values(interaction), interaction.user.id
+    )
+    if interaction.message and interaction.message.embeds:  # the welcome message the button is on
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_UPDATE,
+            embed=service.show_answers(interaction.message.embeds[0], updated, ticket_type),
+        )
+    else:
+        await reply(interaction, "✅ Fields saved.")
 
 
 async def create_and_confirm(
@@ -808,7 +1382,10 @@ async def create_and_confirm(
     ticket = await service.open_ticket(
         interaction.guild_id, interaction.member, ticket_type, fields  # type: ignore[arg-type]
     )
-    await interaction.edit_initial_response(f"✅ Your ticket is open: <#{ticket['channel_id']}>")
+    notice = ticket.get("off_hours_notice")
+    await interaction.edit_initial_response(
+        f"✅ Your ticket is open: <#{ticket['channel_id']}>" + (f"\n\n{notice}" if notice else "")
+    )
 
 
 async def ticket_for(
@@ -820,7 +1397,7 @@ async def ticket_for(
     found = await service.repo.get_ticket_by_id(ticket_id)
     if found is None or found["guild_id"] != interaction.guild_id or found["status"] != "open":
         raise TicketError("This ticket is already closed.")
-    return found, await service.repo.get_type(found["guild_id"], found["type_id"])  # type: ignore[return-value]
+    return found, await service.full_type(found)
 
 
 async def request_deletion(
@@ -884,6 +1461,29 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(interaction.values[0]))
         elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
             await submit_form(interaction, service, int(target))
+        elif action == "resume" and isinstance(interaction, hikari.ComponentInteraction):
+            if not interaction.member or not interaction.member.permissions & (
+                hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
+            ):
+                raise TicketError("You need **Manage Server** to resume opening tickets.")
+            await service.resume_opening(interaction.guild_id)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE,
+                f"✅ {interaction.user.mention} resumed opening tickets.",
+                components=[],
+                role_mentions=False,
+            )
+        elif action == "pick" and isinstance(interaction, hikari.ComponentInteraction):
+            type_id, key = target.split(":", 1)
+            draft = service.get_draft((interaction.guild_id, interaction.user.id, int(type_id)))
+            draft[key] = interaction.values[0] if interaction.values else ""
+            await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_UPDATE)
+        elif action == "submit" and isinstance(interaction, hikari.ComponentInteraction):
+            await submit_picks(interaction, service, int(target))
+        elif action == "fields" and isinstance(interaction, hikari.ComponentInteraction):
+            await edit_fields_form(interaction, service, int(target))
+        elif action == "fieldsave" and isinstance(interaction, hikari.ModalInteraction):
+            await save_fields(interaction, service, int(target))
         elif action == "claim":
             current, ticket_type = await service.ticket_here(interaction.channel_id)
             service.require_staff(interaction.member, ticket_type)
@@ -926,6 +1526,39 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
                 hikari.ResponseType.MESSAGE_UPDATE, "🔒 Closing this ticket…", components=[]
             )
             await service.close(current, ticket_type, interaction.user.id, "Opener agreed to close")
+        elif action == "stagemenu" and isinstance(interaction, hikari.ComponentInteraction):
+            # Built when pressed, so it shows the type's stages as they are now.
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            if not ticket_type["stages"]:
+                raise TicketError(f"**{ticket_type['name']}** tickets have no stages.")
+            menu = service.rest.build_message_action_row().add_text_menu(
+                f"ticket:stage:{target}", placeholder="Move to stage…"
+            )
+            for s in ticket_type["stages"]:
+                menu.add_option(s["name"], s["name"], is_default=s["name"] == current["stage"])
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE, component=menu.parent, flags=hikari.MessageFlag.EPHEMERAL
+            )
+        elif action == "stage" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            # Acknowledged first: set_stage posts to the channel and the log, which can take a while.
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE, f"Moving to **{interaction.values[0]}**…", components=[]
+            )
+            await service.set_stage(current, ticket_type, interaction.values[0], interaction.user.id)
+            await interaction.edit_initial_response(f"✅ Moved to **{interaction.values[0]}**.")
+        elif action == "closeas" and isinstance(interaction, hikari.ComponentInteraction):
+            current, ticket_type = await ticket_for(service, interaction, int(target))
+            service.require_staff(interaction.member, ticket_type)
+            stage = find_stage(ticket_type, current["stage"])
+            if stage is None or not stage["terminal"]:
+                raise TicketError("This ticket has moved on from that stage since.")
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE, "🔒 Closing this ticket…", components=[]
+            )
+            await service.close(current, ticket_type, interaction.user.id, stage["name"])
         else:
             await reply(interaction, "This button isn't available yet.")
     except TicketError as exc:
@@ -946,6 +1579,19 @@ async def auto_unclaim(service: TicketService) -> None:
         await service.auto_unclaim(int(time.time()))
     except Exception:
         logger.exception("Ticket auto-unclaim failed")
+    # ponytail: re-pings ride this loop, so they land up to 10 minutes late; fine for minute-scale timers.
+    try:
+        await service.reping_tiers(int(time.time()))
+    except Exception:
+        logger.exception("Ticket tier re-ping failed")
+
+
+@arc.utils.interval_loop(minutes=1)
+async def panel_statuses(service: TicketService) -> None:
+    try:
+        await service.refresh_panel_statuses()
+    except Exception:
+        logger.exception("Ticket panel status refresh failed")
 
 
 @arc.utils.cron_loop("30 4 * * *")  # nightly, after the 03:30 UTC backup
@@ -963,6 +1609,7 @@ async def on_started(_: hikari.StartedEvent) -> None:
     service = plugin.client.get_type_dependency(TicketService)
     auto_unclaim.start(service=service)
     purge_transcripts.start(service=service)
+    panel_statuses.start(service=service)
 
 
 @plugin.listen()
@@ -991,5 +1638,6 @@ def load(client: arc.GatewayClient) -> None:
 def unload(client: arc.GatewayClient) -> None:
     auto_unclaim.stop()
     purge_transcripts.stop()
+    panel_statuses.stop()
     if plugin.name in client.plugins:
         client.remove_plugin(plugin)
