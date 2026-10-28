@@ -18,6 +18,7 @@ from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
 from serenity.services.moderation_service import ModerationService
 from serenity.services.ticket_hours import (
+    business_seconds_between,
     effective_schedule,
     format_schedule,
     offline_status,
@@ -40,6 +41,8 @@ DEFAULT_RATING_WINDOW_DAYS = 7
 LOW_RATING = 2  # ratings at or below this alert the ticket log
 RAID_PAUSED = "Opening tickets is paused because a lot were opened at once. Please try again later."
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
+AUTO_CLOSE_GRACE = 12 * 3600  # from the inactivity warning to the close, in support time
+AUTO_CLOSES_PER_SWEEP = 25
 DEFAULT_OFF_HOURS = (
     "Hi {user}, our support team is away right now, so a reply may take a while. "
     "We're back {next_open}. Our hours: {hours}."
@@ -1314,6 +1317,69 @@ class TicketService:
                 )
             except Exception:  # one deleted or locked channel can't hold up the rest
                 logger.exception(f"Tier re-ping failed for ticket {ticket['id']}")
+
+    async def auto_close(self, now: int) -> None:
+        """Warn openers who went quiet past their type's timeout; close AUTO_CLOSE_GRACE later.
+
+        Only tickets waiting on the opener, never at a stage with auto-close off, and only
+        support hours count. ponytail: away mode doesn't pause the clock, only the schedule does.
+        """
+        at = datetime.fromtimestamp(now, timezone.utc)
+        settings: dict[int, dict] = {}
+        closes = 0
+        for ticket in await self.repo.due_for_auto_close(now):
+            try:
+                ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+                stage = find_stage(ticket_type, ticket["stage"])  # type: ignore[arg-type]
+                if stage is not None and not stage.get("auto_close", True):
+                    continue
+                if ticket["guild_id"] not in settings:
+                    settings[ticket["guild_id"]] = await self.settings(ticket["guild_id"])
+                guild = settings[ticket["guild_id"]]
+                schedule = effective_schedule(ticket_type["schedule"], guild)  # type: ignore[index]
+
+                def quiet_since(ts: int) -> int:
+                    return business_seconds_between(
+                        schedule, guild.get("timezone", "UTC"), datetime.fromtimestamp(ts, timezone.utc), at
+                    )
+
+                warned = ticket["close_warned_at"]
+                if warned is None or warned < ticket["last_activity_at"]:  # no warning since the last reply
+                    if quiet_since(ticket["last_activity_at"]) >= ticket["auto_close_hours"] * 3600:
+                        await self.rest.create_message(
+                            ticket["channel_id"],
+                            f"⏰ <@{ticket['opener_id']}>, this ticket has been quiet for a while. It closes "
+                            f"automatically after {AUTO_CLOSE_GRACE // 3600} more "
+                            f"{'support ' if schedule else ''}hours unless someone replies.",
+                            user_mentions=[ticket["opener_id"]],
+                        )
+                        await self.repo.update_ticket(ticket["id"], close_warned_at=now)
+                elif quiet_since(warned) >= AUTO_CLOSE_GRACE and closes < AUTO_CLOSES_PER_SWEEP:
+                    # Tickets warned together come due together; a close builds a transcript, so
+                    # the rest wait for the next sweep. Capped here, not in the query, so tickets
+                    # that are skipped (stage, off-hours, grace) can't crowd out due ones.
+                    closes += 1
+                    await self._auto_close(ticket, ticket_type)  # type: ignore[arg-type]
+            except Exception:  # one deleted or locked channel can't hold up the rest
+                logger.exception(f"Auto-close failed for ticket {ticket['id']}")
+
+    async def _auto_close(self, ticket: dict, ticket_type: dict) -> None:
+        # Re-read just before closing: a reply since the sweep's query keeps it open.
+        # ponytail: a reply in the seconds close() takes still loses; make close_ticket conditional if it matters.
+        fresh = await self.repo.get_ticket_by_id(ticket["id"])
+        if (
+            fresh is None
+            or fresh["status"] != "open"
+            or fresh["waiting_on"] != "opener"
+            or fresh["last_activity_at"] != ticket["last_activity_at"]
+        ):
+            return
+        me = self.cache.get_me()
+        await self.close(
+            fresh, ticket_type, me.id if me else 0,
+            f"Auto-closed: no reply for {ticket['auto_close_hours']}h and the reminder after it",
+        )
+        await self.repo.add_event(ticket["id"], "auto_closed", None)  # what stats count
 
     # Closing
 
