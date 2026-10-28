@@ -259,6 +259,8 @@ async def test_dropdown_questions_follow_the_form(monkeypatch):
         (r"((a?){30}){2}b", True),
         (r"(a?){2,}b", True),
         (r"(\d{3}-)+\d", False),
+        ("a?" * 7 + "b", True),  # a chain of optionals: 2^n paths without any nesting
+        (r"^https?://(www\.)?[\w.-]+(/\S*)?$", False),
         (r"(\d{3}-){2}\d{4}", False),  # a fixed-size repeat inside a bounded one is fine
     ],
 )
