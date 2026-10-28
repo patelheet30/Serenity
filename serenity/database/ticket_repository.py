@@ -10,7 +10,7 @@ from serenity.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # asyncpg returns JSONB as text unless the pool has a codec; the pool is shared, so decode here.
-_JSON_COLUMNS = ("fields", "stages", "data", "document")
+_JSON_COLUMNS = ("fields", "stages", "data", "document", "schedule")
 
 # Columns a ticket type can be created or updated with.
 TYPE_COLUMNS = (
@@ -27,6 +27,8 @@ TYPE_COLUMNS = (
     "transcripts",
     "retention_days",
     "auto_unclaim_hours",
+    "schedule",
+    "open_off_hours",
 )
 
 # Columns a tier can be created or updated with.
@@ -212,6 +214,12 @@ class TicketRepository:
         rows = await pool.fetch("SELECT message_id FROM ticket_panels WHERE message_id IS NOT NULL")
         return [r["message_id"] for r in rows]
 
+    async def panel_guilds(self) -> list[int]:
+        """Guilds with a posted panel, whose support status the panels show."""
+        pool = self._require_pool()
+        rows = await pool.fetch("SELECT DISTINCT guild_id FROM ticket_panels WHERE message_id IS NOT NULL")
+        return [r["guild_id"] for r in rows]
+
     async def forget_panel_message(self, message_id: int) -> Optional[dict]:
         """The panel's message was deleted by hand: keep the panel, unpost it."""
         pool = self._require_pool()
@@ -224,9 +232,15 @@ class TicketRepository:
     # Tickets
 
     async def create_ticket(
-        self, guild_id: int, type_id: int, opener_id: int, fields: dict[str, str]
+        self,
+        guild_id: int,
+        type_id: int,
+        opener_id: int,
+        fields: dict[str, str],
+        identity: Optional[dict[str, str]] = None,
     ) -> dict:
-        """Insert a ticket with the guild's next number (no channel yet)."""
+        """Insert a ticket with the guild's next number (no channel yet), and its identity
+        values (normalised identity-field answers, by key)."""
         pool = self._require_pool()
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
@@ -234,8 +248,9 @@ class TicketRepository:
             # means a case and a ticket in one guild can briefly wait on each other.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
             row = await conn.fetchrow(
-                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at)
-                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5
+                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at, stage)
+                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5,
+                       (SELECT stages -> 0 ->> 'name' FROM ticket_types WHERE id = $2)  -- the first stage
                 FROM tickets WHERE guild_id = $1
                 HAVING EXISTS (SELECT 1 FROM ticket_types WHERE id = $2 AND guild_id = $1)
                 RETURNING *""",
@@ -253,7 +268,48 @@ class TicketRepository:
                 opener_id,
                 now,
             )
+            await self._set_identity(conn, row["id"], guild_id, identity or {})
         return _decode(row)  # type: ignore[return-value]
+
+    async def _set_identity(
+        self, conn: asyncpg.Connection, ticket_id: int, guild_id: int, identity: dict[str, str]
+    ) -> None:
+        await conn.execute("DELETE FROM ticket_identity WHERE ticket_id = $1", ticket_id)
+        await conn.executemany(
+            "INSERT INTO ticket_identity (ticket_id, guild_id, field_key, value) VALUES ($1, $2, $3, $4)",
+            [(ticket_id, guild_id, key, value) for key, value in identity.items()],
+        )
+
+    async def update_fields(
+        self, ticket_id: int, guild_id: int, fields: dict[str, str], identity: dict[str, str]
+    ) -> dict:
+        pool = self._require_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE tickets SET fields = $2 WHERE id = $1 RETURNING *",
+                ticket_id,
+                _encode("fields", fields),
+            )
+            await self._set_identity(conn, ticket_id, guild_id, identity)
+        return _decode(row)  # type: ignore[return-value]
+
+    async def linked_tickets(self, ticket_id: int, limit: int = 10) -> list[dict]:
+        """Other tickets, of any type, sharing an identity value with this one; newest first.
+        Each has `linked_by`: the field keys they share."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT t.*, array_agg(other.field_key ORDER BY other.field_key) AS linked_by
+            FROM ticket_identity mine
+            JOIN ticket_identity other ON other.guild_id = mine.guild_id
+                AND other.field_key = mine.field_key AND other.value = mine.value
+                AND other.ticket_id <> mine.ticket_id
+            JOIN tickets t ON t.id = other.ticket_id
+            WHERE mine.ticket_id = $1
+            GROUP BY t.id ORDER BY t.opened_at DESC, t.id DESC LIMIT $2""",
+            ticket_id,
+            limit,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
 
     async def delete_ticket(self, ticket_id: int) -> None:
         """Undo a ticket whose channel couldn't be created."""
@@ -362,7 +418,7 @@ class TicketRepository:
         )
         return _decode(row)
 
-    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> dict:
+    async def record_message(self, ticket_id: int, author_id: int, *, staff: bool) -> Optional[dict]:
         """Count a message: staff replies join the credit chain and hand the turn to the opener."""
         pool = self._require_pool()
         now = int(time.time())
@@ -387,7 +443,7 @@ class TicketRepository:
                 "opener" if staff else "staff",
                 staff,
             )
-        return _decode(row)  # type: ignore[return-value]
+        return _decode(row)
 
     async def list_handlers(self, ticket_id: int) -> list[dict]:
         pool = self._require_pool()

@@ -38,7 +38,7 @@ WORKDIR /app
 
 # Install runtime dependencies (no need to install uv here!)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the fully built virtual environment and app code from the builder
