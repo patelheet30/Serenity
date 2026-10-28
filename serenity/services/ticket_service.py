@@ -682,6 +682,8 @@ class TicketService:
             await self.rest.create_message(dm, embed=embed, **kwargs)
         except (hikari.ForbiddenError, hikari.NotFoundError, hikari.BadRequestError):
             pass  # DMs closed, or the opener left: they still have nothing to lose
+        except hikari.HTTPError as exc:  # the close already happened; don't report it as failed
+            logger.warning(f"Couldn't DM the opener of closed ticket {ticket['id']}: {exc}")
 
     async def request_close(self, ticket: dict, staff_id: int) -> None:
         row = (
