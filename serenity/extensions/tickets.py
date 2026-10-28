@@ -700,6 +700,66 @@ async def settings_retention(
     )
 
 
+@settings_group.include
+@arc.slash_subcommand("cooldown", "How long a member waits between opening tickets.")
+async def settings_cooldown(
+    ctx: arc.GatewayContext,
+    minutes: arc.Option[int, arc.IntParams("Minutes (0 turns it off).", min=0, max=1440)],
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(guild_id, open_cooldown_minutes=minutes)
+    await ctx.respond(
+        f"✅ Members can open a ticket every {minutes} minutes." if minutes
+        else "✅ There's no cooldown between tickets.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("requirements", "What a member needs before they can open tickets.")
+async def settings_requirements(
+    ctx: arc.GatewayContext,
+    account_age_days: arc.Option[
+        int, arc.IntParams("Minimum Discord account age in days (0: none).", min=0, max=365)
+    ] = 0,
+    role: arc.Option[Optional[hikari.Role], arc.RoleParams("A role they need (leave out: none).")] = None,
+    service: TicketService = arc.inject(),
+) -> None:
+    # ponytail: server-wide; per-type requirements come with the dashboard's type editor.
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(
+        guild_id, min_account_age_days=account_age_days, required_role_id=role.id if role else None
+    )
+    needs = [f"an account at least {account_age_days} days old"] if account_age_days else []
+    needs += [f"the {role.mention} role"] if role else []
+    await ctx.respond(
+        f"✅ Opening a ticket needs {' and '.join(needs)}." if needs
+        else "✅ Anyone can open a ticket.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
+@arc.slash_subcommand("raid-brake", "Pause opening when too many tickets open at once (also resumes).")
+async def settings_raid_brake(
+    ctx: arc.GatewayContext,
+    tickets: arc.Option[int, arc.IntParams("Pause once this many open (0 turns it off).", min=0, max=100)],
+    minutes: arc.Option[int, arc.IntParams("Within this many minutes.", min=1, max=60)] = 5,
+    service: TicketService = arc.inject(),
+) -> None:
+    guild_id = require_manage_guild(ctx)
+    await service.update_settings(
+        guild_id, raid_limit=tickets, raid_window_minutes=minutes, raid_paused=False
+    )
+    await ctx.respond(
+        f"✅ Opening pauses if {tickets} tickets open within {minutes} minutes; staff are pinged in "
+        "the ticket log with a button to resume." if tickets
+        else "✅ The raid brake is off.",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
 # Buttons, dropdowns and forms. custom_ids are "ticket:<action>:<id>" and handled here rather
 # than by in-memory component handlers, so they keep working after a restart.
 
@@ -723,7 +783,7 @@ async def open_from_panel(
     if ticket_type is None:
         raise TicketError("That ticket type no longer exists.")
     # Checked before the form too, so nobody fills one in only to be refused.
-    await service.check_can_open(guild_id, interaction.user.id, ticket_type)
+    await service.check_can_open(guild_id, interaction.member, ticket_type)  # type: ignore[arg-type]
 
     if not ticket_type["fields"]:
         await create_and_confirm(interaction, service, ticket_type, {})
@@ -830,6 +890,18 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             await open_from_panel(interaction, service, int(interaction.values[0]))
         elif action == "form" and isinstance(interaction, hikari.ModalInteraction):
             await submit_form(interaction, service, int(target))
+        elif action == "resume" and isinstance(interaction, hikari.ComponentInteraction):
+            if not interaction.member or not interaction.member.permissions & (
+                hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
+            ):
+                raise TicketError("You need **Manage Server** to resume opening tickets.")
+            await service.update_settings(interaction.guild_id, raid_paused=False)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_UPDATE,
+                f"✅ {interaction.user.mention} resumed opening tickets.",
+                components=[],
+                role_mentions=False,
+            )
         elif action == "claim":
             current, ticket_type = await service.ticket_here(interaction.channel_id)
             service.require_staff(interaction.member, ticket_type)

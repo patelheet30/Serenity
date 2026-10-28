@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import hikari
@@ -557,3 +558,45 @@ async def test_transfer_reads_overwrites_from_discord_on_a_cache_miss(service: T
     moved = await service.repo.get_ticket_by_id(ticket["id"])
     with pytest.raises(TicketError, match="can't read this channel"):
         await service.transfer(moved, billing, support, BOB)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_and_requirements_refuse_opens(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support", open_limit=5)
+    await service.update_settings(GUILD, open_cooldown_minutes=10)
+    await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    with pytest.raises(TicketError, match="open another ticket <t:"):
+        await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+
+    await service.update_settings(GUILD, min_account_age_days=7, required_role_id=STAFF_ROLE)
+    bob = member(BOB, "bob")
+    with pytest.raises(TicketError, match="role to open tickets"):
+        await service.check_can_open(GUILD, bob, support)
+    bob.role_ids = [STAFF_ROLE]
+    bob.created_at = datetime.now(timezone.utc) - timedelta(days=1)
+    with pytest.raises(TicketError, match="at least 7 days old"):
+        await service.check_can_open(GUILD, bob, support)
+    bob.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+    await service.check_can_open(GUILD, bob, support)
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_opens_trips_the_raid_brake(service: TicketService):
+    service.logging = AsyncMock()
+    support = await service.repo.create_type(GUILD, "Support", staff_role_ids=[STAFF_ROLE])
+    await service.update_settings(GUILD, raid_limit=2, raid_window_minutes=5)
+    for i in range(2):
+        await service.open_ticket(GUILD, member(ALICE + 10 + i, f"user{i}"), support, {})
+
+    with pytest.raises(TicketError, match="paused"):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    service.logging.log_ticket_raid_brake.assert_awaited_once()
+    assert service.logging.log_ticket_raid_brake.await_args.kwargs["role_ids"] == [STAFF_ROLE]
+    # Stays paused, without alerting again, until staff resume.
+    with pytest.raises(TicketError, match="paused"):
+        await service.check_can_open(GUILD, member(BOB, "bob"), support)
+    service.logging.log_ticket_raid_brake.assert_awaited_once()
+    assert await service.repo.get_ticket(GUILD, 3) is None
+
+    await service.update_settings(GUILD, raid_paused=False, raid_limit=0)
+    await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
