@@ -36,3 +36,19 @@ async def test_duplicate_type_name_is_a_friendly_error():
     ctx = MagicMock(respond=AsyncMock())
     await on_error(ctx, asyncpg.UniqueViolationError("duplicate key"))
     assert "already exists" in ctx.respond.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tickets_module_cant_be_enabled_outside_the_allowlist(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from serenity.core.modules import ModuleManager, ModuleType
+    from serenity.utils.errors import ConfigurationError
+
+    repo = AsyncMock()
+    manager = ModuleManager(repo)
+    monkeypatch.setenv("TICKETS_GUILDS", "1")
+    await manager.enable_module(1, ModuleType.TICKETS)
+    with pytest.raises(ConfigurationError, match="isn't available"):
+        await manager.enable_module(2, ModuleType.TICKETS)
+    repo.set_module_enabled.assert_awaited_once()
