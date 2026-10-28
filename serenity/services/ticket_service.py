@@ -620,7 +620,9 @@ class TicketService:
             except hikari.NotFoundError:
                 pass
             except hikari.HTTPError as exc:  # the ticket is closed either way; staff can delete it
-                logger.warning(f"Couldn't delete the channel of closed ticket {ticket['id']}: {exc}")
+                logger.warning(
+                    f"Couldn't delete channel {ticket['channel_id']} of closed ticket {ticket['id']}: {exc}"
+                )
 
         await self._dm_closed(closed, ticket_type, closed_by, reason, document)
         return closed
