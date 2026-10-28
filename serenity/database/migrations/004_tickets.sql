@@ -21,11 +21,13 @@ CREATE TABLE ticket_types (
     retention_days     INTEGER,                        -- NULL: server default; 0: keep until deleted
     auto_unclaim_hours INTEGER,                        -- NULL: never
     created_at         BIGINT NOT NULL,
-    UNIQUE (guild_id, name),
     CHECK (claim_mode IN ('reply', 'button', 'both')),
     CHECK (open_limit >= 1),
     CHECK (retention_days IS NULL OR retention_days = 0 OR retention_days BETWEEN 7 AND 365)
 );
+
+-- Names are looked up case-insensitively, so they're unique case-insensitively too.
+CREATE UNIQUE INDEX idx_ticket_types_name ON ticket_types (guild_id, lower(name));
 
 -- A posted message with one button per type, or a dropdown of them.
 CREATE TABLE ticket_panels (
@@ -41,6 +43,7 @@ CREATE TABLE ticket_panels (
     CHECK (style IN ('buttons', 'menu'))
 );
 
+CREATE INDEX idx_ticket_panels_guild ON ticket_panels (guild_id);
 CREATE INDEX idx_ticket_panels_message ON ticket_panels (message_id);
 
 CREATE TABLE tickets (
@@ -120,6 +123,8 @@ CREATE TABLE ticket_transcripts (
 
 CREATE INDEX idx_ticket_transcripts_expiry ON ticket_transcripts (expires_at)
     WHERE expires_at IS NOT NULL AND held_by_case_number IS NULL;
+CREATE INDEX idx_ticket_transcripts_deletion_requests ON ticket_transcripts (guild_id)
+    WHERE deletion_requested_at IS NOT NULL;
 
 CREATE TABLE ticket_blacklist (
     guild_id     BIGINT NOT NULL,
