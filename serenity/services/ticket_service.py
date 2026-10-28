@@ -967,6 +967,21 @@ class TicketService:
         await self.repo.add_event(ticket["id"], "fields_edited", actor_id, {"keys": changed})
         return updated
 
+    async def refresh_welcome(self, ticket: dict, ticket_type: dict) -> None:
+        """Show a ticket's answers, edited elsewhere than its Edit fields button (the dashboard),
+        on its welcome message: the bot's first message with an embed."""
+        me = self.cache.get_me()
+        try:
+            async for message in self.rest.fetch_messages(
+                ticket["channel_id"], after=hikari.Snowflake.min()
+            ).limit(5):
+                if me and message.author.id == me.id and message.embeds:
+                    embed = self.show_answers(message.embeds[0], ticket, ticket_type)
+                    await self.rest.edit_message(ticket["channel_id"], message, embed=embed)
+                    return
+        except hikari.HTTPError as exc:  # the answers are saved either way
+            logger.warning(f"Couldn't update the welcome message of ticket {ticket['id']}: {exc}")
+
     # Staff context
 
     async def staff_context(
