@@ -443,18 +443,21 @@ class TicketRepository:
             )
         return _decode(row)
 
-    async def reopen_ticket(self, ticket_id: int, channel_id: int, actor_id: int) -> dict:
+    async def reopen_ticket(self, ticket_id: int, channel_id: int, actor_id: int) -> Optional[dict]:
+        """Reopen a closed ticket in `channel_id`; None if it isn't closed (any more)."""
         pool = self._require_pool()
         now = int(time.time())
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """UPDATE tickets SET status = 'open', channel_id = $2, closed_at = NULL,
                 closed_by = NULL, close_reason = NULL, waiting_on = 'staff', last_activity_at = $3
-                WHERE id = $1 RETURNING *""",
+                WHERE id = $1 AND status = 'closed' RETURNING *""",
                 ticket_id,
                 channel_id,
                 now,
             )
+            if row is None:
+                return None
             # Kept until the ticket closes again, when it's rebuilt with the new messages.
             await conn.execute(
                 "UPDATE ticket_transcripts SET expires_at = NULL WHERE ticket_id = $1", ticket_id
@@ -466,7 +469,7 @@ class TicketRepository:
                 actor_id,
                 now,
             )
-        return _decode(row)  # type: ignore[return-value]
+        return _decode(row)
 
     # Events and notes
 
