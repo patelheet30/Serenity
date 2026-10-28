@@ -213,3 +213,11 @@
 		</section>
 	</div>
 {/if}
+
+<style>
+	/* An open picker lies over the panes after this one. */
+	.grid > :global(.pane:focus-within) {
+		position: relative;
+		z-index: 2;
+	}
+</style>
