@@ -566,14 +566,19 @@ class TicketService:
         seen = {m["id"] for m in messages}
         colors: dict[int, Optional[int]] = {}
         if ticket["channel_id"]:
-            async for message in self.rest.fetch_messages(
-                ticket["channel_id"], after=hikari.Snowflake.min()
-            ).limit(TRANSCRIPT_MESSAGE_LIMIT):
-                if message.id in seen:
-                    continue
-                if message.author.id not in colors:
-                    colors[message.author.id] = self._role_color(ticket["guild_id"], message.author.id)
-                messages.append(message_entry(message, colors[message.author.id]))
+            try:
+                async for message in self.rest.fetch_messages(
+                    ticket["channel_id"], after=hikari.Snowflake.min()
+                ).limit(TRANSCRIPT_MESSAGE_LIMIT):
+                    if message.id in seen:
+                        continue
+                    if message.author.id not in colors:
+                        colors[message.author.id] = self._role_color(ticket["guild_id"], message.author.id)
+                    messages.append(message_entry(message, colors[message.author.id]))
+            except (hikari.NotFoundError, hikari.ForbiddenError) as exc:
+                # The channel was deleted by hand, or the bot lost access: still close the ticket,
+                # with whatever was read, rather than leave it open forever.
+                logger.warning(f"Transcript of ticket {ticket['id']} is incomplete: {exc}")
         labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
         return {
             "ticket": {
@@ -628,6 +633,8 @@ class TicketService:
                 await self.rest.delete_channel(ticket["channel_id"], reason=f"Ticket #{ticket['number']} closed")
             except hikari.NotFoundError:
                 pass
+            except hikari.HTTPError as exc:  # the ticket is closed either way; staff can delete it
+                logger.warning(f"Couldn't delete the channel of closed ticket {ticket['id']}: {exc}")
 
         await self._dm_closed(closed, ticket_type, closed_by, reason, document)
         await self.log(closed, ticket_type, "closed", closed_by, reason or "No reason given")
@@ -675,17 +682,18 @@ class TicketService:
         await self.repo.add_event(ticket["id"], "close_requested", staff_id)
 
     async def reopen(self, guild_id: int, number: int, actor: hikari.Member) -> dict:
-        ticket = await self.repo.get_ticket(guild_id, number)
-        if ticket is None:
-            raise TicketError(f"There's no ticket #{number}.")
-        if ticket["status"] == "open":
-            raise TicketError(f"Ticket #{number} is still open: <#{ticket['channel_id']}>.")
-        if ticket["closed_at"] < time.time() - REOPEN_WINDOW:
-            raise TicketError(f"Ticket #{number} closed more than 7 days ago, so it can't be reopened.")
-        ticket_type = await self.repo.get_type(guild_id, ticket["type_id"])
-        self.require_staff(actor, ticket_type)  # type: ignore[arg-type]
-
+        # Checked inside the guild's queue, so two reopens at once can't both create a channel.
         async with self._open_locks[guild_id]:
+            ticket = await self.repo.get_ticket(guild_id, number)
+            if ticket is None:
+                raise TicketError(f"There's no ticket #{number}.")
+            if ticket["status"] == "open":
+                raise TicketError(f"Ticket #{number} is still open: <#{ticket['channel_id']}>.")
+            if ticket["closed_at"] < time.time() - REOPEN_WINDOW:
+                raise TicketError(f"Ticket #{number} closed more than 7 days ago, so it can't be reopened.")
+            ticket_type = await self.repo.get_type(guild_id, ticket["type_id"])
+            self.require_staff(actor, ticket_type)  # type: ignore[arg-type]
+
             opener = self.cache.get_member(guild_id, ticket["opener_id"])
             channel = await self.rest.create_guild_text_channel(
                 guild_id,
@@ -700,7 +708,11 @@ class TicketService:
                 permission_overwrites=self.overwrites(guild_id, ticket_type, [ticket["opener_id"]]),  # type: ignore[arg-type]
                 reason=f"Ticket #{number} reopened by {actor.username}",
             )
-            ticket = await self.repo.reopen_ticket(ticket["id"], channel.id, actor.id)
+            reopened = await self.repo.reopen_ticket(ticket["id"], channel.id, actor.id)
+            if reopened is None:  # closed→open by something outside this queue
+                await self.rest.delete_channel(channel.id)
+                raise TicketError(f"Ticket #{number} was reopened a moment ago.")
+            ticket = reopened
             self.open_channels.add(channel.id)
 
         await self.post_welcome(ticket, ticket_type, ticket["opener_id"])  # type: ignore[arg-type]
