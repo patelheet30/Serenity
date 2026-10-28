@@ -39,10 +39,50 @@ def test_log_types_match_the_schema_and_setup_channel_names():
         "voice": "voice-log",
         "server": "server-log",
         "mod": "mod-log",
+        "ticket": "ticket-log",
     }
-    schema = Path("serenity/database/migrations/001_initial.sql").read_text()
-    table = re.search(r"CREATE TABLE log_channels \((.*?)\n\);", schema, re.S)
-    assert table is not None
-    check = re.search(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1))
-    assert check is not None
-    assert [t.strip(" '") for t in check.group(1).split(",")] == LOG_TYPES
+    # The newest migration that (re)defines the log_channels CHECK wins.
+    checks = []
+    for path in sorted(Path("serenity/database/migrations").glob("*.sql")):
+        sql = path.read_text()
+        table = re.search(r"CREATE TABLE log_channels \((.*?)\n\);", sql, re.S)
+        checks += re.findall(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1) if table else "")
+        checks += re.findall(
+            r"log_channels_log_type_check\s+CHECK \(log_type IN \(([^)]*)\)\)", sql
+        )
+    assert checks
+    assert [t.strip(" '") for t in checks[-1].split(",")] == LOG_TYPES
+
+    # log_ignores allows the same types plus "*" (every type).
+    ignores = []
+    for path in sorted(Path("serenity/database/migrations").glob("*.sql")):
+        sql = path.read_text()
+        table = re.search(r"CREATE TABLE log_ignores \((.*?)\n\);", sql, re.S)
+        ignores += re.findall(r"CHECK \(log_type IN \(([^)]*)\)\)", table.group(1) if table else "")
+        ignores += re.findall(
+            r"log_ignores_log_type_check\s+CHECK \(log_type IN \(([^)]*)\)\)", sql
+        )
+    assert ignores
+    assert [t.strip(" '") for t in ignores[-1].split(",")] == ["*", *LOG_TYPES]
+
+
+def test_dashboard_labels_every_log_type():
+    """The dashboard's Logging page looks each log type up in TYPES; a missing one crashes it."""
+    import re
+    from pathlib import Path
+
+    from serenity.services.logging_service import LOG_TYPES
+
+    page = Path("dashboard/src/lib/sections/Logging.svelte").read_text()
+    block = re.search(r"const TYPES[^=]*= \{(.*?)\n\t\};", page, re.S)
+    assert block is not None
+    assert re.findall(r"^\t\t(\w+): \{", block.group(1), re.M) == LOG_TYPES
+
+
+def test_global_logging_choices_leave_out_the_ticket_log():
+    """/logging is global; until Tickets launches its choices mustn't advertise the ticket log."""
+    for command in (logging_ext.enable_log, logging_ext.disable_log):
+        option = command.options["log_type"].to_command_option()
+        assert "ticket" not in {c.value for c in option.choices or []}
+    option = logging_ext.ignore_channel.options["log_type"].to_command_option()
+    assert "ticket" not in {c.value for c in option.choices or []}

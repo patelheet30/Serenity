@@ -4,7 +4,12 @@ import arc
 import hikari
 
 from serenity.core.hooks import require_module
-from serenity.core.modules import ModuleNotEnabledError, ModuleType
+from serenity.core.modules import (
+    ModuleManager,
+    ModuleNotEnabledError,
+    ModuleType,
+    module_available,
+)
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.logging_service import LOG_TYPES, setup_log_channels
 from serenity.utils.logging import get_logger
@@ -17,7 +22,13 @@ LOG_TYPE_LABELS: dict[str, str] = {
     "voice":   "🔊 Voice",
     "server":  "⚙️ Server",
     "mod":     "🔨 Mod",
+    "ticket":  "🎫 Ticket",
 }
+
+
+# /logging is global, so its log-type choices leave out the ticket log until Tickets launches;
+# allowlisted servers set it with /ticket log-channel. ponytail: drop with the TICKETS_GUILDS gate.
+CHOICE_LOG_TYPES = [t for t in LOG_TYPES if t != "ticket"]
 
 
 plugin = arc.GatewayPlugin(
@@ -137,15 +148,17 @@ async def _set_channel(
 @arc.with_hook(require_module(ModuleType.LOGGING))
 @arc.slash_subcommand(
     "setup",
-    "Quick setup — creates all 5 log channels automatically.",
+    "Quick setup — creates every log channel automatically.",
 )
 async def setup(
     ctx: arc.GatewayContext,
     repo: LoggingRepository = arc.inject(),
+    modules: ModuleManager = arc.inject(),
 ) -> None:
     """
     Gives each log type a channel under a '📋 Serenity Logs' category: member-log,
-    message-log, voice-log, server-log, mod-log. Safe to re-run: existing channels are kept.
+    message-log, voice-log, server-log, mod-log, ticket-log. Safe to re-run: existing channels
+    are kept.
 
     Permissions are set so only the bot can send messages.
     Admins can adjust visibility by editing the category permissions.
@@ -165,7 +178,12 @@ async def setup(
 
     try:
         channels, failed = await setup_log_channels(
-            app.rest, app.cache, repo, guild_id, bot_user.id if bot_user else None
+            app.rest,
+            app.cache,
+            repo,
+            guild_id,
+            bot_user.id if bot_user else None,
+            tickets_enabled=await modules.is_enabled(guild_id, ModuleType.TICKETS),
         )
     except hikari.ForbiddenError:
         await ctx.respond(
@@ -241,6 +259,8 @@ async def view(
     )
 
     for log_type in LOG_TYPES:
+        if log_type == "ticket" and not module_available(ctx.guild_id, ModuleType.TICKETS):
+            continue
         label = LOG_TYPE_LABELS[log_type]
         config = config_map.get(log_type)
 
@@ -339,7 +359,7 @@ async def mod_log(
 async def enable_log(
     ctx: arc.GatewayContext,
     log_type: arc.Option[
-        str, arc.StrParams("The log type to enable", choices=LOG_TYPES)
+        str, arc.StrParams("The log type to enable", choices=CHOICE_LOG_TYPES)
     ],
     repo: LoggingRepository = arc.inject(),
 ) -> None:
@@ -374,7 +394,7 @@ async def enable_log(
 async def disable_log(
     ctx: arc.GatewayContext,
     log_type: arc.Option[
-        str, arc.StrParams("The log type to disable", choices=LOG_TYPES)
+        str, arc.StrParams("The log type to disable", choices=CHOICE_LOG_TYPES)
     ],
     repo: LoggingRepository = arc.inject(),
 ) -> None:
@@ -395,7 +415,7 @@ async def disable_log(
     await ctx.respond(embed=embed)
 
 # Choice name -> value: picking "all" sends the "*" sentinel that log_ignores stores.
-_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in LOG_TYPES}}
+_LOG_TYPE_OR_ALL = {"all": "*", **{t: t for t in CHOICE_LOG_TYPES}}
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))

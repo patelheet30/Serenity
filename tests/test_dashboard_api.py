@@ -14,6 +14,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.fernet import Fernet
 
+from serenity.core.modules import ModuleType
 from serenity.dashboard import auth
 from serenity.dashboard.api import CHANGES, OAUTH, SESSION_COOKIE, SESSIONS, STATE_COOKIE, build_api
 from serenity.dashboard.auth import GuildAccess, NotInstalledError, Session, Sessions
@@ -443,10 +444,15 @@ async def test_modules_follow_the_dependency_rules(settings):
 @pytest.mark.asyncio
 async def test_tickets_module_only_exists_for_allowlisted_servers(settings, monkeypatch):
     assert (await settings("PUT", "/modules/tickets", {"enabled": True}))[0] == 404
+    status, body = await settings("GET", "/logging")
+    assert "ticket" not in {t["type"] for t in body["types"]}
+    assert (await settings("PUT", "/logging/ticket", {"enabled": False}))[0] == 404
 
     monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     status, body = await settings("PUT", "/modules/tickets", {"enabled": True})
     assert status == 200 and body["enabled"]["tickets"] is True
+    status, body = await settings("GET", "/logging")
+    assert "ticket" in {t["type"] for t in body["types"]}
 
 
 @pytest.mark.asyncio
@@ -555,11 +561,14 @@ async def test_log_types(settings):
 
 
 @pytest.mark.asyncio
-async def test_logging_setup_is_idempotent(settings, pg_repo):
+async def test_logging_setup_is_idempotent(settings, pg_repo, monkeypatch):
     rest = settings.bot.rest
     status, body = await settings("POST", "/logging/setup")
     assert status == 200 and body["failed"] == []
-    assert all(t["enabled"] and t["channel_id"] for t in body["types"])
+    # Everything but the ticket log, which only servers using tickets get.
+    assert {t["type"] for t in body["types"] if t["enabled"] and t["channel_id"]} == {
+        "member", "message", "voice", "server", "mod"
+    }
     assert rest.create_guild_category.await_count == 1
     assert rest.create_guild_text_channel.await_count == 5
 
@@ -572,6 +581,12 @@ async def test_logging_setup_is_idempotent(settings, pg_repo):
     assert next(t for t in body["types"] if t["type"] == "voice")["channel_id"]
     assert rest.create_guild_category.await_count == 1
     assert rest.create_guild_text_channel.await_count == 5
+
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+    await pg_repo.set_module_enabled(GUILD, ModuleType.TICKETS, True)
+    status, body = await settings("POST", "/logging/setup")
+    assert next(t for t in body["types"] if t["type"] == "ticket")["channel_id"]
+    assert rest.create_guild_text_channel.await_count == 6
 
     rest.create_guild_category.side_effect = hikari.ForbiddenError("", {}, b"")
     await pg_repo.pool.execute("DELETE FROM log_channels")

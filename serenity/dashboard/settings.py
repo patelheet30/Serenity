@@ -323,6 +323,7 @@ async def _logging_json(request: web.Request) -> dict[str, Any]:
                 "enabled": bool(c and c["is_enabled"] and c["channel_id"]),
             }
             for t in LOG_TYPES
+            if t != "ticket" or module_available(gid, ModuleType.TICKETS)
         ],
         "ignores": [
             {
@@ -345,7 +346,9 @@ async def get_logging(request: web.Request) -> web.Response:
 async def put_log_type(request: web.Request) -> web.Response:
     """Set a log type's channel and/or turn it on or off (/logging <type>-log, enable, disable)."""
     log_type = request.match_info["log_type"]
-    if log_type not in LOG_TYPES:
+    if log_type not in LOG_TYPES or (
+        log_type == "ticket" and not module_available(guild_id(request), ModuleType.TICKETS)
+    ):
         raise ApiError(404, "not_found", "No such log type.")
     data = await read_json(request)
     gid = guild_id(request)
@@ -380,7 +383,14 @@ async def logging_setup(request: web.Request) -> web.Response:
     me = bot.get_me()
     try:
         channels, failed = await setup_log_channels(
-            bot.rest, bot.cache, request.app[LOG_REPO], guild_id(request), me.id if me else None
+            bot.rest,
+            bot.cache,
+            request.app[LOG_REPO],
+            guild_id(request),
+            me.id if me else None,
+            tickets_enabled=await request.app[MODULES].is_enabled(
+                guild_id(request), ModuleType.TICKETS
+            ),
         )
     except hikari.ForbiddenError:
         raise ApiError(

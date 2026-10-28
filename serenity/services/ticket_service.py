@@ -12,6 +12,7 @@ import toolbox
 
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.ticket_repository import TicketRepository
+from serenity.services.logging_service import LoggingService
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -166,11 +167,13 @@ class TicketService:
         rest: hikari.api.RESTClient,
         cache: hikari.api.Cache,
         modules: ModuleManager,
+        logging: Optional[LoggingService] = None,
     ) -> None:
         self.repo = repo
         self.rest = rest
         self.cache = cache
         self.modules = modules
+        self.logging = logging
         # Channels of open tickets, so the message listener can skip every other message
         # without a query. ponytail: one bot process; shard across processes and this moves to the DB.
         self.open_channels: set[int] = set()
@@ -189,6 +192,26 @@ class TicketService:
         if ticket_type is None:
             raise TicketError(f"There's no ticket type called **{name}**.")
         return ticket_type
+
+    async def log(
+        self,
+        ticket: dict,
+        ticket_type: dict,
+        kind: str,
+        actor_id: Optional[int],
+        detail: Optional[str] = None,
+    ) -> None:
+        """Post a ticket event to the ticket log, if the server has one."""
+        if self.logging:
+            await self.logging.log_ticket_event(
+                guild_id=ticket["guild_id"],
+                kind=kind,
+                number=ticket["number"],
+                type_name=ticket_type["name"],
+                actor_id=actor_id,
+                channel_id=ticket["channel_id"],
+                detail=detail,
+            )
 
     def type_label(self, ticket_type: dict) -> str:
         emoji: Optional[str] = ticket_type["emoji"]
@@ -412,6 +435,7 @@ class TicketService:
             await self.post_welcome(ticket, ticket_type, member.id)
         except Exception:  # Discord or the settings read: the ticket is open and the opener gets its link regardless
             logger.exception(f"Couldn't post the welcome message for ticket {ticket['id']}")
+        await self.log(ticket, ticket_type, "opened", member.id)
         return ticket
 
     async def post_welcome(self, ticket: dict, ticket_type: dict, opener_id: int) -> None:
@@ -477,8 +501,11 @@ class TicketService:
             current = await self.repo.get_ticket_by_id(ticket["id"])
             assignee = current["assignee_id"] if current else None
             raise TicketError(f"<@{assignee}> already has this ticket." if assignee else "This ticket is closed.")
-        await self.repo.add_event(
-            ticket["id"], "assigned" if by else "claimed", by or user_id, {"assignee": user_id}
+        kind = "assigned" if by else "claimed"
+        await self.repo.add_event(ticket["id"], kind, by or user_id, {"assignee": user_id})
+        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+        await self.log(
+            updated, ticket_type, kind, by or user_id, f"Assigned to <@{user_id}>" if by else None  # type: ignore[arg-type]
         )
         if announce and ticket["channel_id"]:
             text = (
@@ -495,6 +522,11 @@ class TicketService:
             return False
         await self.repo.add_event(
             ticket["id"], "unclaimed", actor_id, {"previous": ticket["assignee_id"]}
+        )
+        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+        await self.log(
+            ticket, ticket_type, "unclaimed", actor_id,  # type: ignore[arg-type]
+            f"<@{ticket['assignee_id']}> " + ("unassigned after no reply" if actor_id is None else "unassigned"),
         )
         if ticket["channel_id"]:
             await self.rest.create_message(ticket["channel_id"], note, role_mentions=True)
@@ -625,6 +657,11 @@ class TicketService:
                 )
 
         await self._dm_closed(closed, ticket_type, closed_by, reason, document)
+        # closed has no channel any more; log the one it had, so channel ignores still apply.
+        await self.log(
+            {**closed, "channel_id": ticket["channel_id"]}, ticket_type, "closed", closed_by,
+            reason or "No reason given",
+        )
         return closed
 
     async def _dm_closed(
@@ -714,9 +751,25 @@ class TicketService:
             color=PANEL_COLOR,
         )
         await self.rest.create_message(channel.id, embed=embed)
+        await self.log(ticket, ticket_type, "reopened", actor.id)  # type: ignore[arg-type]
         return ticket
 
     async def purge_transcripts(self, now: int) -> None:
         purged = await self.repo.purge_expired_transcripts(now)
         if purged:
             logger.info(f"Deleted {purged} expired ticket transcript(s).")
+
+    async def request_transcript_deletion(self, ticket_id: int, user_id: int) -> bool:
+        """The opener asks for their transcript to be deleted; admins see it in the ticket log."""
+        ticket = await self.repo.get_ticket_by_id(ticket_id)
+        if ticket is None or ticket["opener_id"] != user_id:
+            raise TicketError("That transcript isn't yours.")
+        if not await self.repo.request_transcript_deletion(ticket_id):
+            return False
+        await self.repo.add_event(ticket_id, "deletion_requested", user_id)
+        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
+        await self.log(
+            ticket, ticket_type, "deletion_requested", user_id,  # type: ignore[arg-type]
+            f"Delete it with `/ticket transcript delete {ticket['number']}`.",
+        )
+        return True

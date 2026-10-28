@@ -23,6 +23,7 @@ from serenity.services.metrics import (
     TASK_ERRORS,
 )
 from serenity.services.slowmode_engine import SlowmodeEngine
+from serenity.services.ticket_service import TicketService
 from serenity.utils.logging import channel_id as ctx_channel_id
 from serenity.utils.logging import get_logger
 from serenity.utils.logging import guild_id as ctx_guild_id
@@ -105,7 +106,11 @@ async def update_slowmode(
 
             total_enabled_guilds += 1
 
-            channel_ids = await repo.get_enabled_channels(guild_id)
+            # Ticket channels never get auto-slowmode, even inside an enabled category.
+            ticket_channels = client.get_type_dependency(TicketService).open_channels
+            channel_ids = [
+                c for c in await repo.get_enabled_channels(guild_id) if c not in ticket_channels
+            ]
             total_enabled_channels += len(channel_ids)
 
             if channel_ids:

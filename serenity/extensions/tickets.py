@@ -9,6 +9,7 @@ import hikari
 
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType, tickets_guilds
+from serenity.database.logging_repository import LoggingRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.ticket_service import (
     TicketError,
@@ -582,6 +583,22 @@ async def transcript_hold(
 
 
 @settings_group.include
+@arc.slash_subcommand("log-channel", "Where ticket events are logged (the ticket log).")
+async def settings_log_channel(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[hikari.TextableGuildChannel, arc.ChannelParams("The ticket log channel.")],
+    logs: LoggingRepository = arc.inject(),
+) -> None:
+    # Here rather than /logging ticket-log while Tickets is allowlisted, since /logging is global.
+    guild_id = require_manage_guild(ctx)
+    await logs.set_log_channel(guild_id, "ticket", channel.id)
+    await ctx.respond(
+        f"✅ Ticket events will be logged in {channel.mention} (needs the Logging module on).",
+        flags=hikari.MessageFlag.EPHEMERAL,
+    )
+
+
+@settings_group.include
 @arc.slash_subcommand("retention", "How long transcripts are kept by default.")
 async def settings_retention(
     ctx: arc.GatewayContext,
@@ -700,11 +717,7 @@ async def request_deletion(
     service: TicketService,
     ticket_id: int,
 ) -> None:
-    found = await service.repo.get_ticket_by_id(ticket_id)
-    if found is None or found["opener_id"] != interaction.user.id:
-        raise TicketError("That transcript isn't yours.")
-    if await service.repo.request_transcript_deletion(ticket_id):
-        await service.repo.add_event(ticket_id, "deletion_requested", interaction.user.id)
+    if await service.request_transcript_deletion(ticket_id, interaction.user.id):
         await reply(interaction, "✅ Your request was sent to the server's admins.")
     else:
         await reply(interaction, "You've already asked, or the transcript is already gone.")

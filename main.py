@@ -82,7 +82,13 @@ async def on_startup(_: arc.GatewayClient) -> None:
         rest=bot.rest,
     )
     ticket_repo = TicketRepository(repo.pool)
-    ticket_svc = TicketService(repo=ticket_repo, rest=bot.rest, cache=bot.cache, modules=module_manager)
+    ticket_svc = TicketService(
+        repo=ticket_repo,
+        rest=bot.rest,
+        cache=bot.cache,
+        modules=module_manager,
+        logging=logging_svc,
+    )
     await ticket_svc.load()
 
     client.set_type_dependency(Repository, repo)
