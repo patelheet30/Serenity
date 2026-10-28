@@ -279,6 +279,7 @@
 				{#snippet cell(c, col)}
 					{#if col.key === 'number'}
 						<button class="linkish mono" aria-label="Open case {c.number}" onclick={() => open(c.number)}>#{c.number}</button>
+						{#if c.ticket}<a class="tkt" href="/dashboard/{guildId}/tickets/queue?t={c.ticket}" title="Made from ticket #{c.ticket}">ticket #{c.ticket}</a>{/if}
 					{:else if col.key === 'action'}
 						<span class="act" data-a={c.action}>{c.action}</span>
 					{:else if col.key === 'target'}
@@ -314,6 +315,7 @@
 			<div class="dhead">
 				<span class="act" data-a={detail.action}>{detail.action}</span>
 				<h2>Case #{detail.number}</h2>
+				{#if detail.ticket}<a class="tkt" href="/dashboard/{guildId}/tickets/queue?t={detail.ticket}">from ticket #{detail.ticket}</a>{/if}
 				<span style="flex:1"></span>
 				<button class="btn sm ghost" aria-label="Close case detail" onclick={close}><Icon name="x" /></button>
 			</div>
@@ -406,3 +408,17 @@
 		<button class="btn danger" onclick={clearWarnings}>Clear warnings</button>
 	{/snippet}
 </Modal>
+
+<style>
+	.tkt {
+		margin-left: 6px;
+		font-family: var(--mono);
+		font-size: 10.5px;
+		color: var(--lilac);
+		border: 1px solid currentColor;
+		border-radius: 4px;
+		padding: 0 4px;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+</style>
