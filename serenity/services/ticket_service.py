@@ -70,7 +70,8 @@ MAX_OPEN_REPEATS = 3  # on a 100-character answer, at most ~100^3 steps
 def _slow_pattern(parsed: Any) -> bool:
     """Whether a parsed regex can backtrack badly. Patterns run on the event loop, and Python's
     re has no timeout, so the shapes behind catastrophic backtracking are refused up front:
-    a repeat or `|` inside an open-ended repeat, backreferences, and many open-ended repeats.
+    a repeat or `|` inside any repeat (bounded ones too: `(a+){6}` explodes as well),
+    backreferences, and many open-ended repeats.
 
     ponytail: reads re's private parse tree and is deliberately strict; a `regex`-module
     timeout would allow more if admins need richer patterns.
@@ -83,12 +84,12 @@ def _slow_pattern(parsed: Any) -> bool:
         nonlocal open_repeats
         for op, av in items:
             if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
-                _, high, sub = av
-                if in_repeat and high > 1:
+                low, high, sub = av
+                if in_repeat and high > 1 and low != high:  # `{3}` can only match one way
                     return True
                 open_ended = high == c.MAXREPEAT
                 open_repeats += open_ended
-                if walk(sub, in_repeat or open_ended):
+                if walk(sub, in_repeat or high > 1):
                     return True
             elif op == c.BRANCH:
                 if in_repeat or any(walk(branch, in_repeat) for branch in av[1]):
