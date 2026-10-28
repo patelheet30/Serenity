@@ -698,16 +698,9 @@ class TicketService:
             ticket_type = await self.repo.get_type(guild_id, ticket["type_id"])
             self.require_staff(actor, ticket_type)  # type: ignore[arg-type]
 
-            opener = self.cache.get_member(guild_id, ticket["opener_id"])
             channel = await self.rest.create_guild_text_channel(
                 guild_id,
-                render_channel_name(
-                    ticket_type["name_template"],  # type: ignore[index]
-                    type_name=ticket_type["name"],  # type: ignore[index]
-                    number=number,
-                    username=opener.username if opener else str(ticket["opener_id"]),
-                    fields=ticket["fields"],
-                ),
+                self.channel_name(ticket, ticket_type, self._opener_name(ticket)),  # type: ignore[arg-type]
                 category=await self._category(guild_id, ticket_type["category_id"]) or hikari.UNDEFINED,  # type: ignore[index]
                 permission_overwrites=self.overwrites(guild_id, ticket_type, [ticket["opener_id"]]),  # type: ignore[arg-type]
                 reason=f"Ticket #{number} reopened by {actor.username}",
@@ -787,12 +780,20 @@ class TicketService:
 
     async def set_priority(self, ticket: dict, ticket_type: dict, priority: str, actor_id: int) -> dict:
         updated = await self.repo.update_ticket(ticket["id"], priority=priority)
+        # Discord allows 2 renames per 10 minutes; past that hikari waits for the window, so
+        # /ticket priority answers before calling this.
+        try:
+            await self.rest.edit_channel(
+                ticket["channel_id"], name=self.channel_name(updated, ticket_type, self._opener_name(ticket))  # type: ignore[arg-type]
+            )
+        except hikari.ForbiddenError:
+            await self.repo.update_ticket(ticket["id"], priority=ticket["priority"])
+            raise TicketError(
+                "I couldn't rename this channel, so the priority wasn't changed. "
+                "I need Manage Channels here."
+            ) from None
         await self.repo.add_event(
             ticket["id"], "priority", actor_id, {"from": ticket["priority"], "to": priority}
-        )
-        # ponytail: Discord allows 2 renames per 10 minutes; past that hikari waits for the window
-        await self.rest.edit_channel(
-            ticket["channel_id"], name=self.channel_name(updated, ticket_type, self._opener_name(ticket))  # type: ignore[arg-type]
         )
         return updated  # type: ignore[return-value]
 
@@ -800,26 +801,31 @@ class TicketService:
         """Move a ticket to another type: its category, staff roles and channel name follow."""
         if new_type["id"] == old_type["id"]:
             raise TicketError(f"This is already a **{new_type['name']}** ticket.")
-        channel = self.cache.get_guild_channel(ticket["channel_id"])
-        # Keep everyone added to the ticket; replace only the role overwrites.
+        # Keep everyone added to the ticket; replace only the role overwrites. The overwrite list
+        # replaces the channel's whole set, so read it from Discord if the cache doesn't have it.
+        channel = self.cache.get_guild_channel(ticket["channel_id"]) or await self.rest.fetch_channel(
+            ticket["channel_id"]
+        )
+        overwrites = getattr(channel, "permission_overwrites", {}).values()
+        me = self.cache.get_me()
         members = [
             ow.id
-            for ow in (channel.permission_overwrites.values() if channel else [])
+            for ow in overwrites
             if ow.type == hikari.PermissionOverwriteType.MEMBER
             and ow.allow & hikari.Permissions.VIEW_CHANNEL
+            and not (me and ow.id == me.id)
         ] or [ticket["opener_id"]]
-        me = self.cache.get_me()
-        members = [m for m in members if not me or m != me.id]
 
-        category = await self._category(ticket["guild_id"], new_type["category_id"])
-        updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"])
-        await self.rest.edit_channel(
-            ticket["channel_id"],
-            name=self.channel_name(updated, new_type, self._opener_name(ticket)),  # type: ignore[arg-type]
-            parent_category=category if category is not None else hikari.UNDEFINED,
-            permission_overwrites=self.overwrites(ticket["guild_id"], new_type, members),
-            reason=f"Ticket #{ticket['number']} moved to {new_type['name']}",
-        )
+        async with self._open_locks[ticket["guild_id"]]:  # _category may create an overflow
+            category = await self._category(ticket["guild_id"], new_type["category_id"])
+            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"])
+            await self.rest.edit_channel(
+                ticket["channel_id"],
+                name=self.channel_name(updated, new_type, self._opener_name(ticket)),  # type: ignore[arg-type]
+                parent_category=category if category is not None else hikari.UNDEFINED,
+                permission_overwrites=self.overwrites(ticket["guild_id"], new_type, members),
+                reason=f"Ticket #{ticket['number']} moved to {new_type['name']}",
+            )
         if updated["assignee_id"]:  # type: ignore[index]  # the old type's staff may not see it any more
             updated = await self.repo.unclaim(ticket["id"])
         await self.repo.add_event(

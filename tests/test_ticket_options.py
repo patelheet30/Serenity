@@ -55,3 +55,11 @@ def test_panel_styles_map_to_stored_values():
     assert choices(tickets.panel_post, "style") == {"Buttons": "buttons", "Dropdown": "menu"}
     assert default(tickets.panel_post, "style") == "buttons"
     assert choices(tickets.panel_edit, "style") == choices(tickets.panel_post, "style")
+
+
+def test_priority_choices_are_the_stored_values():
+    from serenity.services.ticket_service import PRIORITIES
+
+    # PRIORITIES mirrors the tickets.priority CHECK; normal is the column default.
+    assert choices(tickets.priority, "level") == {p.title(): p for p in PRIORITIES}
+    assert PRIORITIES == ("low", "normal", "high", "urgent")
