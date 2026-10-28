@@ -231,8 +231,9 @@ class TicketRepository:
             # means a case and a ticket in one guild can briefly wait on each other.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
             row = await conn.fetchrow(
-                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at)
-                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5
+                """INSERT INTO tickets (guild_id, number, type_id, opener_id, fields, opened_at, last_activity_at, stage)
+                SELECT $1, COALESCE(MAX(number), 0) + 1, $2, $3, $4, $5, $5,
+                       (SELECT stages -> 0 ->> 'name' FROM ticket_types WHERE id = $2)  -- the first stage
                 FROM tickets WHERE guild_id = $1
                 HAVING EXISTS (SELECT 1 FROM ticket_types WHERE id = $2 AND guild_id = $1)
                 RETURNING *""",

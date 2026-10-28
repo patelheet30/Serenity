@@ -3,7 +3,14 @@
 import hikari
 import pytest
 
-from serenity.services.ticket_service import TicketError, is_staff, parse_questions
+from serenity.services.ticket_service import (
+    TicketError,
+    is_staff,
+    parse_color,
+    parse_questions,
+    render_topic,
+    with_stage,
+)
 
 
 def test_parse_questions():
@@ -23,6 +30,41 @@ def test_is_staff():
     assert is_staff(ticket_type, [3, 2], none)
     assert not is_staff(ticket_type, [3], none)
     assert is_staff(ticket_type, [], hikari.Permissions.MANAGE_GUILD)
+
+
+def test_with_stage_orders_and_replaces_in_place():
+    def names(stages):
+        return [s["name"] for s in stages]
+
+    stages = []
+    for name in ("Inquiry", "Quoted", "Paid"):
+        stages = with_stage(stages, {"name": name})
+    assert names(stages) == ["Inquiry", "Quoted", "Paid"]
+    assert names(with_stage(stages, {"name": "In progress"}, 3)) == ["Inquiry", "Quoted", "In progress", "Paid"]
+    # An existing name is replaced where it is, unless a position moves it.
+    replaced = with_stage(stages, {"name": "quoted", "terminal": True})
+    assert names(replaced) == ["Inquiry", "quoted", "Paid"] and replaced[1]["terminal"]
+    assert names(with_stage(stages, {"name": "Paid"}, 1)) == ["Paid", "Inquiry", "Quoted"]
+    assert names(with_stage(stages, {"name": "Late"}, 99))[-1] == "Late"
+    full = [{"name": str(i)} for i in range(25)]
+    with pytest.raises(TicketError):
+        with_stage(full, {"name": "one more"})
+    assert len(with_stage(full, {"name": "3"})) == 25
+
+
+def test_parse_color():
+    assert parse_color("#5865F2") == 0x5865F2
+    assert parse_color("ffffff") == 0xFFFFFF
+    for bad in ("blue", "#1000000", "-1"):
+        with pytest.raises(TicketError):
+            parse_color(bad)
+
+
+def test_render_topic():
+    ticket = {"number": 4, "stage": "Quoted", "waiting_on": "opener"}
+    assert render_topic(ticket, {"name": "Sales"}, "alice") == "Ticket #4 · Sales · Quoted · waiting on alice"
+    ticket.update(stage=None, waiting_on="staff")
+    assert render_topic(ticket, {"name": "Sales"}, "alice") == "Ticket #4 · Sales · waiting on staff"
 
 
 def _service(rest=None, repo=None):
