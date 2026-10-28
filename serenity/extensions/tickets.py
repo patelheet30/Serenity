@@ -242,7 +242,7 @@ async def type_edit(
     if auto_close_hours is not None:
         values["auto_close_hours"] = auto_close_hours or None
     if hours is not None:
-        values["schedule"] = None if hours.strip().lower() == "default" else schedule_from(hours)
+        values["schedule"] = schedule_from(hours)
     if not values:
         raise TicketError("Nothing to change.")
 
@@ -817,7 +817,10 @@ async def settings_retention(
     )
 
 
-def schedule_from(text: str) -> list:
+def schedule_from(text: str) -> Optional[list]:
+    """A parsed schedule; "default" is None, so a type follows the server's hours again."""
+    if text.strip().lower() == "default":
+        return None
     try:
         return parse_schedule(text)
     except ValueError as exc:
@@ -850,10 +853,11 @@ async def settings_hours(
     if timezone is not None and timezone not in available_timezones():
         raise TicketError(f"“{timezone}” isn't a timezone I know. Pick one from the list.")
     settings = dict((await modules.get_module_config(guild_id, ModuleType.TICKETS)).settings)
-    if schedule.strip().lower() == "off":
+    parsed = None if schedule.strip().lower() == "off" else schedule_from(schedule)
+    if parsed is None:  # "off" (or "default", which is the same thing server-wide)
         settings.pop("schedule", None)
     else:
-        settings["schedule"] = schedule_from(schedule)
+        settings["schedule"] = parsed
     if timezone is not None:
         settings["timezone"] = timezone
     if message is not None:

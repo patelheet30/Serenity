@@ -216,6 +216,39 @@ async def test_panels_are_edited_only_when_the_support_status_changes():
 
     settings.pop("away")
     settings["schedule"] = [[[0, 1440]]] * 7
+    service.rest.edit_message.side_effect = [hikari.BadRequestError("", {}, b""), None]
+    await service.refresh_panel_statuses()  # the edit fails, so the next sweep tries again
     await service.refresh_panel_statuses()
-    assert service.rest.edit_message.await_count == 2
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 3
     assert service.rest.edit_message.call_args.kwargs["embed"].fields[0].value == "🟢 Online"
+    service.rest.edit_message.side_effect = None
+
+    # An away mode that ended by itself, with no schedule: the line goes.
+    settings.pop("schedule")
+    settings["away"] = {"until": 1, "note": None}
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 4
+    assert service.rest.edit_message.call_args.kwargs["embed"].fields == []
+
+    # After a restart nothing is known, so every guild is reconciled once, unconfigured or not.
+    service._panel_status.clear()
+    await service.refresh_panel_statuses()
+    await service.refresh_panel_statuses()
+    assert service.rest.edit_message.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_one_broken_guild_doesnt_stop_the_panel_status_sweep():
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo = AsyncMock()
+    repo.panel_guilds.return_value = [1, 2]
+    repo.list_panels.return_value = []
+    service = _service(repo=repo)
+    service.modules.get_module_config.side_effect = [
+        MagicMock(settings={"schedule": [[]] * 7, "timezone": "Not/AZone"}),
+        MagicMock(settings={}),
+    ]
+    await service.refresh_panel_statuses()
+    repo.list_panels.assert_awaited_once_with(2)
