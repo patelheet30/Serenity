@@ -23,3 +23,16 @@ def test_is_staff():
     assert is_staff(ticket_type, [3, 2], none)
     assert not is_staff(ticket_type, [3], none)
     assert is_staff(ticket_type, [], hikari.Permissions.MANAGE_GUILD)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_type_name_is_a_friendly_error():
+    from unittest.mock import AsyncMock, MagicMock
+
+    import asyncpg
+
+    from serenity.extensions.tickets import on_error
+
+    ctx = MagicMock(respond=AsyncMock())
+    await on_error(ctx, asyncpg.UniqueViolationError("duplicate key"))
+    assert "already exists" in ctx.respond.call_args.args[0]

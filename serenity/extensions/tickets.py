@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 import arc
+import asyncpg
 import hikari
 
 from serenity.core.hooks import require_module
@@ -38,6 +39,11 @@ async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
         return
     if isinstance(exc, (TicketError, SerenityPermissionError)):
         await ctx.respond(f"❌ {exc}", flags=hikari.MessageFlag.EPHEMERAL)
+        return
+    if isinstance(exc, asyncpg.UniqueViolationError):  # type names, case-insensitively
+        await ctx.respond(
+            "❌ A ticket type with that name already exists.", flags=hikari.MessageFlag.EPHEMERAL
+        )
         return
     raise exc
 
