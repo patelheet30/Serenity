@@ -34,6 +34,7 @@ DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 AUTO_CLOSE_GRACE = 12 * 3600  # from the inactivity warning to the close, in support time
+AUTO_CLOSES_PER_SWEEP = 25
 DEFAULT_OFF_HOURS = (
     "Hi {user}, our support team is away right now, so a reply may take a while. "
     "We're back {next_open}. Our hours: {hours}."
@@ -704,6 +705,7 @@ class TicketService:
         """
         at = datetime.fromtimestamp(now, timezone.utc)
         settings: dict[int, dict] = {}
+        closes = 0
         for ticket in await self.repo.due_for_auto_close(now):
             try:
                 ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
@@ -731,7 +733,11 @@ class TicketService:
                             user_mentions=[ticket["opener_id"]],
                         )
                         await self.repo.update_ticket(ticket["id"], close_warned_at=now)
-                elif quiet_since(warned) >= AUTO_CLOSE_GRACE:
+                elif quiet_since(warned) >= AUTO_CLOSE_GRACE and closes < AUTO_CLOSES_PER_SWEEP:
+                    # Tickets warned together come due together; a close builds a transcript, so
+                    # the rest wait for the next sweep. Capped here, not in the query, so tickets
+                    # that are skipped (stage, off-hours, grace) can't crowd out due ones.
+                    closes += 1
                     await self._auto_close(ticket, ticket_type)  # type: ignore[arg-type]
             except Exception:  # one deleted or locked channel can't hold up the rest
                 logger.exception(f"Auto-close failed for ticket {ticket['id']}")

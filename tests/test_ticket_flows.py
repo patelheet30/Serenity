@@ -678,6 +678,29 @@ async def test_auto_close_warns_then_closes_and_never_while_waiting_on_staff(ser
 
 
 @pytest.mark.asyncio
+async def test_auto_close_spreads_a_due_backlog_over_sweeps(service: TicketService, monkeypatch):
+    import serenity.services.ticket_service as ticket_service
+
+    monkeypatch.setattr(ticket_service, "AUTO_CLOSES_PER_SWEEP", 1)
+    support = await service.repo.create_type(
+        GUILD, "Support", staff_role_ids=[STAFF_ROLE], auto_close_hours=1, transcripts=False, open_limit=2
+    )
+    tickets = [await service.open_ticket(GUILD, member(ALICE, "alice"), support, {}) for _ in range(2)]
+    for t in tickets:
+        await service.on_message(message(t["channel_id"], staff(BOB, "bob")))
+    quiet = max([(await service.repo.get_ticket_by_id(t["id"]))["last_activity_at"] for t in tickets])  # type: ignore[index]
+    await service.auto_close(quiet + 3600 + 1)  # both warned
+    await service.auto_close(quiet + 13 * 3600 + 2)  # both due, one closed
+
+    async def open_count() -> int:
+        return await service.repo.count_open(GUILD, ALICE, support["id"])
+
+    assert await open_count() == 1
+    await service.auto_close(quiet + 13 * 3600 + 3)
+    assert await open_count() == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_close_skips_stages_with_it_off_and_pauses_outside_support_hours(service: TicketService):
     from datetime import datetime
     from zoneinfo import ZoneInfo
