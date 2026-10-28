@@ -376,3 +376,45 @@ async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: Ticket
 
     assert (await service.repo.get_ticket_by_id(first["id"]))["assignee_id"] == ALICE  # type: ignore[index]
     assert (await service.repo.get_ticket_by_id(second["id"]))["assignee_id"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reopens_create_one_channel(service: TicketService, monkeypatch):
+    from serenity.services import ticket_service
+
+    monkeypatch.setattr(ticket_service, "member_permissions", lambda _: hikari.Permissions.MANAGE_GUILD)
+    service.cache.get_member.return_value = None
+    service.rest.fetch_messages = MagicMock(return_value=FakeHistory([]))
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    await service.close(ticket, support, ALICE, None)
+    created = service.rest.create_guild_text_channel.await_count
+
+    results = await asyncio.gather(
+        service.reopen(GUILD, 1, staff(BOB, "bob")),
+        service.reopen(GUILD, 1, staff(CAROL, "carol")),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, TicketError) for r in results) == 1
+    assert service.rest.create_guild_text_channel.await_count == created + 1
+
+
+@pytest.mark.asyncio
+async def test_close_survives_a_channel_deleted_by_hand(service: TicketService):
+    service.cache.get_member.return_value = None
+    support = await service.repo.create_type(GUILD, "Support")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+
+    class Gone(FakeHistory):
+        def __aiter__(self):
+            async def gen():
+                raise hikari.NotFoundError("", {}, b"")
+                yield
+
+            return gen()
+
+    service.rest.fetch_messages = MagicMock(return_value=Gone([]))
+    service.rest.delete_channel.side_effect = hikari.InternalServerError("", 500, {}, b"")
+    closed = await service.close(ticket, support, ALICE, None)
+    assert closed["status"] == "closed"
+    assert (await service.repo.get_transcript(ticket["id"]))["document"]["messages"] == []  # type: ignore[index]
