@@ -209,11 +209,13 @@ async def type_edit(
         raise TicketError("Nothing to change.")
 
     updated = await repo.update_type(guild_id, ticket_type["id"], **values)
+    if updated is None:
+        raise TicketError(f"**{ticket_type['name']}** was deleted in the meantime.")
     await service.refresh_panels(guild_id, ticket_type["id"])
     await ctx.respond(
         embed=hikari.Embed(
             title="✅ Ticket type updated",
-            description=describe_type(updated, service),  # type: ignore[arg-type]
+            description=describe_type(updated, service),
             color=_GREEN,
         )
     )
