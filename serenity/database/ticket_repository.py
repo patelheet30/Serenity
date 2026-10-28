@@ -552,19 +552,30 @@ class TicketRepository:
         return status != "UPDATE 0"
 
     async def delete_transcript(self, ticket_id: int) -> bool:
+        """Delete a transcript and the staff notes that went into it."""
         pool = self._require_pool()
-        status = await pool.execute("DELETE FROM ticket_transcripts WHERE ticket_id = $1", ticket_id)
+        async with pool.acquire() as conn, conn.transaction():
+            status = await conn.execute(
+                "DELETE FROM ticket_transcripts WHERE ticket_id = $1", ticket_id
+            )
+            await conn.execute("DELETE FROM ticket_notes WHERE ticket_id = $1", ticket_id)
         return status != "DELETE 0"
 
     async def purge_expired_transcripts(self, now: int) -> int:
-        """Hard-delete transcripts past their expiry, except those held for a mod case."""
+        """Hard-delete transcripts past their expiry, and their staff notes, except those held
+        for a mod case."""
         pool = self._require_pool()
-        status = await pool.execute(
-            """DELETE FROM ticket_transcripts
-            WHERE expires_at IS NOT NULL AND expires_at < $1 AND held_by_case_number IS NULL""",
+        return await pool.fetchval(
+            """WITH gone AS (
+                DELETE FROM ticket_transcripts
+                WHERE expires_at IS NOT NULL AND expires_at < $1 AND held_by_case_number IS NULL
+                RETURNING ticket_id
+            ), notes AS (
+                DELETE FROM ticket_notes WHERE ticket_id IN (SELECT ticket_id FROM gone)
+            )
+            SELECT COUNT(*) FROM gone""",
             now,
         )
-        return int(status.split()[-1])
 
     # Blacklist
 
