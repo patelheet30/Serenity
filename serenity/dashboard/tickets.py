@@ -113,3 +113,7 @@ def _type_json(ticket_type: dict) -> dict[str, Any]:
 async def list_types(request: web.Request) -> web.Response:
     """The types the user can see tickets of, for pickers and facets."""
     return web.json_response([_type_json(t) for t in await visible_types(request)])
+
+
+# Route modules that add to the tables above.
+from serenity.dashboard import tickets_panels  # noqa: E402,F401
