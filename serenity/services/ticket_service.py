@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Optional, Sequence
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Optional, Sequence
+from urllib.parse import urlparse
 
 import hikari
 import toolbox
 
-from serenity.core.modules import ModuleManager, ModuleType
+from serenity.core.modules import ModuleManager, ModuleType, module_available
+from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
+from serenity.services.moderation_service import ModerationService
 from serenity.services.ticket_hours import (
     business_seconds_between,
     effective_schedule,
@@ -20,6 +24,7 @@ from serenity.services.ticket_hours import (
     offline_status,
     within_hours,
 )
+from serenity.services.ticket_webhooks import TicketWebhooks
 from serenity.utils.errors import SerenityError
 from serenity.utils.logging import get_logger
 
@@ -32,6 +37,9 @@ PRIORITIES = ("low", "normal", "high", "urgent")
 CATEGORY_LIMIT = 50  # channels Discord allows in one category
 DEFAULT_RETENTION_DAYS = 30
 REOPEN_WINDOW = 7 * 86400
+DEFAULT_RATING_WINDOW_DAYS = 7
+LOW_RATING = 2  # ratings at or below this alert the ticket log
+RAID_PAUSED = "Opening tickets is paused because a lot were opened at once. Please try again later."
 TRANSCRIPT_MESSAGE_LIMIT = 10_000  # ponytail: a cap, not paging; no real ticket gets close
 AUTO_CLOSE_GRACE = 12 * 3600  # from the inactivity warning to the close, in support time
 AUTO_CLOSES_PER_SWEEP = 25
@@ -51,17 +59,103 @@ TICKET_MEMBER_ALLOW = (
     | hikari.Permissions.EMBED_LINKS
 )
 BOT_ALLOW = TICKET_MEMBER_ALLOW | hikari.Permissions.MANAGE_CHANNELS | hikari.Permissions.MANAGE_MESSAGES
+# A ticket's Mod action, and the permission the moderator needs for it (as for the slash commands).
+MOD_ACTIONS = {
+    "warn": hikari.Permissions.MODERATE_MEMBERS,
+    "timeout": hikari.Permissions.MODERATE_MEMBERS,
+    "kick": hikari.Permissions.KICK_MEMBERS,
+    "ban": hikari.Permissions.BAN_MEMBERS,
+}
+MAX_TIMEOUT = 28 * 86400  # Discord's limit
+
+
+def parse_duration(text: str) -> int:
+    """"30m", "2h" or "7d" in seconds, up to Discord's 28-day timeout limit."""
+    match = re.fullmatch(r"\s*(\d{1,4})\s*([mhd])\s*", text.lower())
+    if not match:
+        raise TicketError("Give the duration as minutes, hours or days, like 30m, 2h or 7d.")
+    seconds = int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400}[match.group(2)]
+    if not 60 <= seconds <= MAX_TIMEOUT:
+        raise TicketError("A timeout is between 1 minute and 28 days.")
+    return seconds
 
 
 class TicketError(SerenityError):
     """A ticket action the member can't do; the message is shown to them as is."""
 
 
+FIELD_TYPES = ("short", "paragraph", "number", "date", "select", "url", "user", "pattern")
+PICKED = ("select", "user")  # asked with select menus after the form, since modals only hold text
+MAX_PICKED = 4  # those menus' rows, plus the row with the Open button
+MAX_OPTIONS = 25  # options in one select menu
+MAX_LENGTH = {"paragraph": 1000}  # answer length; 100 for everything else
+DRAFT_TTL = 15 * 60  # seconds a half-filled form waits for its dropdown picks
+MAX_DRAFTS = 1000  # half-filled forms kept at once, across guilds
+
+
+def field_type(field: dict) -> str:
+    return field.get("type") or field.get("style", "paragraph")  # fields from before #60 only have a style
+
+
+def _field_key(label: str, fields: list[dict]) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:32] or f"q{len(fields) + 1}"
+    while key in {f["key"] for f in fields}:
+        key += "_"
+    return key
+
+
+MAX_OPEN_REPEATS = 3  # wide repeats (`*`, `+`, `{0,100}`): on 100 characters, ~100^3 steps
+MAX_VARIABLE_REPEATS = 6  # `?` and `{0,n}` too: each one can double the paths
+
+
+def _slow_pattern(parsed: Any) -> bool:
+    """Whether a parsed regex can backtrack badly. Patterns run on the event loop, and Python's
+    re has no timeout, so the shapes behind catastrophic backtracking are refused up front:
+    a repeat or `|` inside any repeat (bounded ones too: `(a+){6}` explodes as well),
+    backreferences, and many open-ended repeats.
+
+    ponytail: reads re's private parse tree and is deliberately strict; a `regex`-module
+    timeout would allow more if admins need richer patterns.
+    """
+    from re import _constants as c  # type: ignore[attr-defined]
+
+    open_repeats = variable_repeats = 0
+
+    def walk(items: Any, in_repeat: bool) -> bool:
+        nonlocal open_repeats, variable_repeats
+        for op, av in items:
+            if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
+                low, high, sub = av
+                if in_repeat and low != high:  # `{3}` can only match one way; `?` can't
+                    return True
+                open_repeats += high - low > 1  # `{0,100}` splits an answer as many ways as `*`
+                variable_repeats += low != high
+                if walk(sub, in_repeat or high > 1):
+                    return True
+            elif op == c.BRANCH:
+                if in_repeat or any(walk(branch, in_repeat) for branch in av[1]):
+                    return True
+            elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
+                return True
+            elif op in (c.SUBPATTERN, c.ASSERT, c.ASSERT_NOT):
+                if walk(av[-1], in_repeat):
+                    return True
+            elif op == c.ATOMIC_GROUP:  # its argument is the subpattern itself
+                if walk(av, in_repeat):
+                    return True
+        return False
+
+    return (
+        walk(parsed, False)
+        or open_repeats > MAX_OPEN_REPEATS
+        or variable_repeats > MAX_VARIABLE_REPEATS
+    )
+
+
 def parse_questions(text: str) -> list[dict]:
     """`/ticket type` questions ("Order number | What went wrong?") as form fields.
 
-    ponytail: every field is a required paragraph; per-field style and optional fields come
-    with the dashboard's type editor.
+    Every question is a required paragraph; `/ticket type field` adds typed and optional ones.
     """
     labels = [q.strip() for q in text.split("|") if q.strip()]
     if len(labels) > MAX_FIELDS:
@@ -70,13 +164,171 @@ def parse_questions(text: str) -> list[dict]:
     for label in labels:
         if len(label) > MAX_LABEL:
             raise TicketError(f"Questions can be at most {MAX_LABEL} characters: “{label}”.")
-        key = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:32] or f"q{len(fields) + 1}"
-        while key in {f["key"] for f in fields}:
-            key += "_"
         fields.append(
-            {"key": key, "label": label, "style": "paragraph", "required": True, "max_length": 1000}
+            {"key": _field_key(label, fields), "label": label, "type": "paragraph",
+             "required": True, "max_length": 1000}
         )
     return fields
+
+
+def set_field(
+    fields: list[dict],
+    label: str,
+    kind: Optional[str] = None,
+    *,
+    required: Optional[bool] = None,
+    options: Optional[str] = None,
+    identity: Optional[bool] = None,
+    staff_only: Optional[bool] = None,
+) -> list[dict]:
+    """`fields` with the field called `label` added, or changed in place (keeping its key, so
+    answers already given still line up). On a change, anything left as None keeps its current
+    value; for a new field it's a required short-text question."""
+    label = label.strip()
+    if not label or len(label) > MAX_LABEL:
+        raise TicketError(f"A field's label is 1–{MAX_LABEL} characters.")
+    existing = next((f for f in fields if f["label"].lower() == label.lower()), None)
+    current = existing or {}
+    kind = kind or (field_type(existing) if existing else "short")
+    if kind not in FIELD_TYPES:
+        raise TicketError(f"Unknown field type {kind}.")
+    staff_only = bool(current.get("staff_only")) if staff_only is None else staff_only
+    identity = bool(current.get("identity")) if identity is None else identity
+    if required is None:
+        required = current["required"] if existing and not current.get("staff_only") else True
+    if options is None and existing and field_type(existing) == kind:  # same kind: keep its choices
+        options = ",".join(current["options"]) if kind == "select" else current.get("pattern")
+    field: dict = {
+        "key": existing["key"] if existing else _field_key(label, fields),
+        "label": label,
+        "type": kind,
+        "required": required and not staff_only,  # staff fill those in once it's open
+        "max_length": MAX_LENGTH.get(kind, 100),
+    }
+    if kind == "select":
+        choices = list(dict.fromkeys(o.strip()[:100] for o in (options or "").split(",") if o.strip()))
+        if not 1 <= len(choices) <= MAX_OPTIONS:
+            raise TicketError(f"A dropdown needs 1–{MAX_OPTIONS} options, separated by commas.")
+        field["options"] = choices
+    if kind == "pattern":
+        if not options:
+            raise TicketError("A pattern field needs its regular expression in `options`.")
+        try:
+            slow = len(options) > 200 or _slow_pattern(re._parser.parse(options))  # type: ignore[attr-defined]
+        except re.error as exc:
+            raise TicketError(f"That pattern isn't a valid regular expression: {exc}.") from None
+        if slow:
+            raise TicketError(
+                "That pattern could take too long to check. Keep it simple: no repeats inside "
+                "repeats (like `(a+)*`), no `|` inside a repeat, no backreferences, and at most "
+                f"{MAX_OPEN_REPEATS} wide repeats (`*`, `+`, `{{0,100}}`) and {MAX_VARIABLE_REPEATS} "
+                "repeats in all (counting `?`)."
+            )
+        field["pattern"] = options
+    if identity:
+        field["identity"] = True
+    if staff_only:
+        field["staff_only"] = True
+
+    result = [field if f is existing else f for f in fields] if existing else [*fields, field]
+    if len(result) > MAX_FIELDS:
+        raise TicketError(f"A ticket type can have at most {MAX_FIELDS} fields.")
+    if sum(1 for f in asked_fields({"fields": result}) if field_type(f) in PICKED) > MAX_PICKED:
+        raise TicketError(f"A form can ask at most {MAX_PICKED} dropdown or member questions.")
+    return result
+
+
+def asked_fields(ticket_type: dict) -> list[dict]:
+    """The fields the opener fills in (staff-only ones are never asked)."""
+    return [f for f in ticket_type["fields"] if not f.get("staff_only")]
+
+
+def placeholder(field: dict) -> hikari.UndefinedOr[str]:
+    kind = field_type(field)
+    if kind == "date":
+        return "YYYY-MM-DD"
+    if kind == "url":
+        return "https://…"
+    if kind == "user":
+        return "Member ID or @mention"
+    if kind == "select":
+        return f"One of: {', '.join(field['options'])}"[:100]
+    return hikari.UNDEFINED
+
+
+def check_answer(field: dict, value: str) -> str:
+    """An answer as stored, or a TicketError saying what's wrong with it."""
+    kind, label = field_type(field), field["label"]
+    limit = field.get("max_length", 1000)
+    if len(value) > limit:
+        raise TicketError(f"**{label}** can be at most {limit} characters.")
+    if kind == "number":
+        try:
+            ok = math.isfinite(float(value.replace(",", "")))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise TicketError(f"**{label}** must be a number.")
+    elif kind == "date":
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise TicketError(f"**{label}** must be a date like 2026-01-31.") from None
+    elif kind == "url":
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise TicketError(f"**{label}** must be a link starting with https://.")
+    elif kind == "pattern":
+        # set_field refused slow shapes, and the answer is at most 100 characters.
+        if not re.fullmatch(field["pattern"], value):
+            raise TicketError(f"**{label}** isn't in the expected format.")
+    elif kind == "select":
+        match = next((o for o in field["options"] if o.lower() == value.lower()), None)
+        if match is None:
+            raise TicketError(f"**{label}** must be one of: {', '.join(field['options'])}.")
+        value = match
+    elif kind == "user":
+        value = value.strip("<@!>")
+        if not value.isdigit():
+            raise TicketError(f"**{label}** must be a member: their ID or @mention.")
+    return value
+
+
+def check_answers(fields: list[dict], answers: dict[str, str]) -> dict[str, str]:
+    """Answers to `fields`, checked: one per field ("" when skipped), or a TicketError listing
+    every problem at once."""
+    checked: dict[str, str] = {}
+    problems: list[str] = []
+    for f in fields:
+        value = (answers.get(f["key"]) or "").strip()
+        checked[f["key"]] = ""
+        if not value:
+            if f["required"]:
+                problems.append(f"Please answer **{f['label']}**.")
+            continue
+        try:
+            checked[f["key"]] = check_answer(f, value)
+        except TicketError as exc:
+            problems.append(str(exc))
+    if problems:
+        raise TicketError("\n".join(problems))
+    return checked
+
+
+def identity_values(ticket_type: dict, fields: dict[str, str]) -> dict[str, str]:
+    """Identity answers, normalised, by field key. Tickets sharing one are linked, across types
+    too: fields with the same label have the same key."""
+    return {
+        f["key"]: fields[f["key"]].strip().lower()
+        for f in ticket_type["fields"]
+        if f.get("identity") and fields.get(f["key"], "").strip()
+    }
+
+
+def answer_text(field: Optional[dict], value: str) -> str:
+    if field is not None and field_type(field) == "user" and value:
+        return f"<@{value}>"
+    return value
 
 
 def parse_color(text: str) -> int:
@@ -185,6 +437,8 @@ def render_transcript(document: dict, *, staff: bool) -> str:
         lines.append(f"Closed {when(t['closed_at'])} by {t['closed_by']}: {t.get('reason') or 'no reason'}")
     for label, answer in document["fields"].items():
         lines.append(f"{label}: {answer}")
+    if staff:
+        lines += [f"{label} (staff): {answer}" for label, answer in document.get("staff_fields", {}).items()]
     lines.append("")
     for m in document["messages"]:
         lines.append(f"[{when(m['timestamp'])}] {m['author']['name']}: {m['content']}")
@@ -201,10 +455,17 @@ def render_transcript(document: dict, *, staff: bool) -> str:
 def is_staff(
     ticket_type: dict, role_ids: Sequence[int], permissions: hikari.Permissions
 ) -> bool:
-    """Staff of a type: one of its staff roles, or Manage Server."""
+    """Staff of a type: one of its staff or tier roles (tiers come from full_type), or Manage Server."""
     if permissions & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
         return True
-    return any(role in ticket_type["staff_role_ids"] for role in role_ids)
+    staff = {*ticket_type["staff_role_ids"], *(r for t in ticket_type.get("tiers", ()) for r in t["role_ids"])}
+    return any(role in staff for role in role_ids)
+
+
+def current_tier(ticket: dict, ticket_type: dict) -> Optional[dict]:
+    """The tier a ticket is with: the one it was escalated to, else its type's lowest."""
+    tiers = ticket_type["tiers"]
+    return next((t for t in tiers if t["id"] == ticket["tier_id"]), tiers[0] if tiers else None)
 
 
 def member_permissions(member: hikari.Member) -> hikari.Permissions:
@@ -232,6 +493,7 @@ class TicketService:
         self.cache = cache
         self.modules = modules
         self.logging = logging
+        self.webhooks = TicketWebhooks(repo)
         # Channels of open tickets, so the message listener can skip every other message
         # without a query. ponytail: one bot process; shard across processes and this moves to the DB.
         self.open_channels: set[int] = set()
@@ -247,6 +509,27 @@ class TicketService:
         # ponytail: in memory, so a restart drops a pending edit until the ticket next changes.
         self._topic_tasks: dict[int, asyncio.Task] = {}
         self._topic_edited: dict[int, float] = {}
+        # Form answers waiting on the opener's dropdown/member picks, by (guild, user, type), with
+        # when they were saved. Oldest first, so expiry and the cap only ever drop from the front.
+        # ponytail: in memory; a restart drops half-filled forms and the member starts again.
+        self.drafts: dict[tuple[int, int, int], tuple[float, dict[str, str]]] = {}
+
+    def save_draft(self, key: tuple[int, int, int], answers: dict[str, str]) -> None:
+        """Keep a form's answers for DRAFT_TTL, replacing that member's earlier form of the type.
+        Expired drafts are dropped here, and past MAX_DRAFTS the oldest go first."""
+        now = time.monotonic()
+        self.drafts.pop(key, None)
+        for old, (saved, _) in list(self.drafts.items()):
+            if now - saved < DRAFT_TTL and len(self.drafts) < MAX_DRAFTS:
+                break
+            del self.drafts[old]
+        self.drafts[key] = (now, answers)
+
+    def get_draft(self, key: tuple[int, int, int]) -> dict[str, str]:
+        draft = self.drafts.get(key)
+        if draft is None or time.monotonic() - draft[0] >= DRAFT_TTL:
+            raise TicketError("This form expired. Press the panel button again.")
+        return draft[1]
 
     async def load(self) -> None:
         self.open_channels = set(await self.repo.open_ticket_channels())
@@ -266,7 +549,8 @@ class TicketService:
         actor_id: Optional[int],
         detail: Optional[str] = None,
     ) -> None:
-        """Post a ticket event to the ticket log, if the server has one."""
+        """Post a ticket event to the ticket log, if the server has one, and to its webhooks."""
+        self.webhooks.dispatch(ticket, ticket_type, kind, actor_id, detail)
         if self.logging:
             await self.logging.log_ticket_event(
                 guild_id=ticket["guild_id"],
@@ -374,15 +658,12 @@ class TicketService:
 
     # Support hours
 
-    async def _settings(self, guild_id: int) -> dict:
-        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
-
     async def panel_status(self, guild_id: int) -> Optional[str]:
         """The panels' status line, if the server has support hours or away mode set.
 
         ponytail: the server's schedule only; a type with its own hours isn't shown separately.
         """
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, None, datetime.now(timezone.utc))
         if status is None:  # no line without a schedule, e.g. once away mode has ended
             return "🟢 Online" if settings.get("schedule") else None
@@ -400,7 +681,7 @@ class TicketService:
 
     async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
         """The auto-reply for a ticket opened now, or None while support is open."""
-        settings = await self._settings(guild_id)
+        settings = await self.settings(guild_id)
         status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
         if status is None:
             return None
@@ -424,25 +705,73 @@ class TicketService:
         config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
         return int(config.settings.get("retention_days", DEFAULT_RETENTION_DAYS))
 
-    async def check_can_open(self, guild_id: int, user_id: int, ticket_type: dict) -> None:
+    async def settings(self, guild_id: int) -> dict:
+        return (await self.modules.get_module_config(guild_id, ModuleType.TICKETS)).settings
+
+    async def update_settings(self, guild_id: int, **changes) -> None:
+        await self.modules.repo.merge_module_settings(guild_id, ModuleType.TICKETS, changes)
+
+    async def check_can_open(self, guild_id: int, member: hikari.Member, ticket_type: dict) -> None:
         """Raise if this member may not open a ticket of this type right now."""
-        if await self.repo.get_blacklist_entry(guild_id, user_id):
+        if await self.repo.get_blacklist_entry(guild_id, member.id):
             raise TicketError("You can't open tickets in this server.")
+        settings = await self.settings(guild_id)
+        if settings.get("raid_paused"):
+            raise TicketError(RAID_PAUSED)
+        role = settings.get("required_role_id")
+        if role and role not in member.role_ids:
+            raise TicketError(f"You need the <@&{role}> role to open tickets.")
+        age = settings.get("min_account_age_days", 0)
+        if age and member.created_at > datetime.now(timezone.utc) - timedelta(days=age):
+            raise TicketError(f"Your account needs to be at least {age} days old to open tickets.")
         limit = ticket_type["open_limit"]
-        if await self.repo.count_open(guild_id, user_id, ticket_type["id"]) >= limit:
+        if await self.repo.count_open(guild_id, member.id, ticket_type["id"]) >= limit:
             raise TicketError(
                 f"You already have {'an open' if limit == 1 else f'{limit} open'} "
                 f"**{ticket_type['name']}** ticket{'' if limit == 1 else 's'}."
             )
         if not ticket_type["open_off_hours"]:
             # The schedule decides; away mode only adds its auto-reply.
-            settings = await self._settings(guild_id)
             schedule = effective_schedule(ticket_type["schedule"], settings)
             if not within_hours(schedule, settings.get("timezone", "UTC"), datetime.now(timezone.utc)):
-                notice = await self.off_hours_notice(guild_id, ticket_type, user_id)
+                notice = await self.off_hours_notice(guild_id, ticket_type, member.id)
                 raise TicketError(
                     f"**{ticket_type['name']}** tickets can only be opened during support hours.\n{notice}"
                 )
+        now = int(time.time())
+        if cooldown := settings.get("open_cooldown_minutes", 0):
+            last = await self.repo.last_opened_at(guild_id, member.id)
+            if last and last + cooldown * 60 > now:
+                raise TicketError(f"You can open another ticket <t:{last + cooldown * 60}:R>.")
+        if raid_limit := settings.get("raid_limit", 0):
+            minutes = settings.get("raid_window_minutes", 5)
+            # A resume starts the count afresh (opened_at is whole seconds, so from the next one).
+            since = max(now - minutes * 60, settings.get("raid_resumed_at", -1) + 1)
+            opened = await self.repo.count_opened_since(guild_id, since)
+            if opened >= raid_limit:
+                # Latched only once staff have the alert and its Resume button; with no ticket log
+                # the brake still refuses opens, and lifts by itself as the burst leaves the window.
+                # ponytail: the pre-form check runs outside the open lock, so two members tripping
+                # it at the same instant can post two alerts; harmless.
+                if await self.raid_alert(guild_id, opened, minutes, ticket_type):
+                    await self.update_settings(guild_id, raid_paused=True)
+                raise TicketError(RAID_PAUSED)
+
+    async def raid_alert(self, guild_id: int, opened: int, minutes: int, ticket_type: dict) -> bool:
+        """Tell staff in the ticket log that the raid brake tripped, with a button to resume."""
+        if not self.logging:
+            return False
+        row = self.rest.build_message_action_row().add_interactive_button(
+            hikari.ButtonStyle.SUCCESS, "ticket:resume:0", label="Resume opening tickets"
+        )
+        return await self.logging.log_ticket_raid_brake(
+            guild_id=guild_id, opened=opened, minutes=minutes,
+            role_ids=ticket_type["staff_role_ids"], component=row,
+        )
+
+    async def resume_opening(self, guild_id: int) -> None:
+        """Lift the raid brake; only tickets opened from now on count towards the next one."""
+        await self.update_settings(guild_id, raid_paused=False, raid_resumed_at=int(time.time()))
 
     def overwrites(
         self, guild_id: int, ticket_type: dict, member_ids: Sequence[int]
@@ -513,9 +842,12 @@ class TicketService:
         self, guild_id: int, member: hikari.Member, ticket_type: dict, fields: dict[str, str]
     ) -> dict:
         """Create a ticket and its channel, and post the welcome message."""
+        fields = check_answers(asked_fields(ticket_type), fields)  # before anything is created
         async with self._open_locks[guild_id]:
-            await self.check_can_open(guild_id, member.id, ticket_type)
-            ticket = await self.repo.create_ticket(guild_id, ticket_type["id"], member.id, fields)
+            await self.check_can_open(guild_id, member, ticket_type)
+            ticket = await self.repo.create_ticket(
+                guild_id, ticket_type["id"], member.id, fields, identity_values(ticket_type, fields)
+            )
             try:
                 category_id = await self._category(guild_id, ticket_type["category_id"])
                 channel = await self.rest.create_guild_text_channel(
@@ -581,9 +913,7 @@ class TicketService:
             description="Thanks for reaching out. Staff will be with you shortly.",
             color=PANEL_COLOR,
         )
-        labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
-        for key, answer in ticket["fields"].items():
-            embed.add_field(labels.get(key, key), answer[:1024] or "—")
+        self.show_answers(embed, ticket, ticket_type)
         embed.set_footer(privacy)
 
         row = self.rest.build_message_action_row().add_interactive_button(
@@ -593,6 +923,13 @@ class TicketService:
             row.add_interactive_button(
                 hikari.ButtonStyle.SUCCESS, f"ticket:claim:{ticket['id']}", label="Claim", emoji="🙋"
             )
+        if ticket_type["fields"]:
+            row.add_interactive_button(
+                hikari.ButtonStyle.SECONDARY, f"ticket:fields:{ticket['id']}", label="Edit fields", emoji="✏️"
+            )
+        row.add_interactive_button(
+            hikari.ButtonStyle.SECONDARY, f"ticket:context:{ticket['id']}", label="Staff info", emoji="🔎"
+        )
         if ticket_type["stages"]:
             row.add_interactive_button(
                 hikari.ButtonStyle.SECONDARY, f"ticket:stagemenu:{ticket['id']}", label="Stage", emoji="🏷️"
@@ -607,6 +944,149 @@ class TicketService:
             role_mentions=ticket_type["staff_role_ids"],
         )
 
+    def show_answers(self, embed: hikari.Embed, ticket: dict, ticket_type: dict) -> hikari.Embed:
+        """The welcome embed's fields: the opener's answers, never staff-only ones (the opener
+        sees this message). Answers to fields removed since aren't shown either: they may have
+        been staff-only."""
+        while embed.fields:
+            embed.remove_field(0)
+        for field in asked_fields(ticket_type):
+            if field["key"] in ticket["fields"]:
+                embed.add_field(field["label"], answer_text(field, ticket["fields"][field["key"]])[:1024] or "—")
+        return embed
+
+    async def edit_fields(
+        self, ticket: dict, ticket_type: dict, answers: dict[str, str], actor_id: int
+    ) -> dict:
+        """Staff change a ticket's answers, staff-only fields included."""
+        fields = {**ticket["fields"], **check_answers(ticket_type["fields"], answers)}
+        updated = await self.repo.update_fields(
+            ticket["id"], ticket["guild_id"], fields, identity_values(ticket_type, fields)
+        )
+        changed = sorted(k for k in fields if fields[k] != ticket["fields"].get(k, ""))
+        await self.repo.add_event(ticket["id"], "fields_edited", actor_id, {"keys": changed})
+        return updated
+
+    # Staff context
+
+    async def staff_context(
+        self, ticket: dict, ticket_type: dict, mod_repo: Optional[ModerationRepository] = None
+    ) -> hikari.Embed:
+        """What staff should know about a ticket: who opened it, their other tickets, linked
+        tickets, notes, and (with `mod_repo`, when Moderation is on) everyone involved's record.
+        Sent ephemerally: the opener can see the channel."""
+        guild_id, opener_id = ticket["guild_id"], ticket["opener_id"]
+        embed = hikari.Embed(title=f"🔎 Ticket #{ticket['number']} · staff info", color=PANEL_COLOR)
+
+        about = [f"<@{opener_id}> · account made <t:{int(hikari.Snowflake(opener_id).created_at.timestamp())}:R>"]
+        opener = self.cache.get_member(guild_id, opener_id)
+        if opener is None:
+            try:
+                opener = await self.rest.fetch_member(guild_id, opener_id)
+            except hikari.NotFoundError:
+                about.append("Not in the server any more.")
+        if opener is not None:
+            about.append(f"Joined <t:{int(opener.joined_at.timestamp())}:R>")
+            roles = [f"<@&{r}>" for r in opener.role_ids if r != guild_id]
+            about.append(f"Roles: {' '.join(roles[:15]) or 'none'}")
+        embed.add_field("Opener", "\n".join(about)[:1024])
+
+        def line(t: dict) -> str:
+            when = t["closed_at"] or t["opened_at"]
+            state = "open" if t["status"] == "open" else "closed"
+            return f"#{t['number']} {t['type_name']} · {state} <t:{when}:R>"
+
+        previous, total = await self.repo.opener_tickets(guild_id, opener_id, ticket["id"])
+        history = "\n".join(line(t) for t in previous) or "None"
+        if total > len(previous):
+            history += f"\n…and {total - len(previous)} more"
+        embed.add_field("Their other tickets", history[:1024])
+
+        linked = await self.repo.linked_tickets(ticket["id"])
+        if linked:
+            embed.add_field(
+                "Linked tickets (same answers)",
+                "\n".join(f"{line(t)} · <@{t['opener_id']}> · {', '.join(t['linked_by'])}" for t in linked)[:1024],
+            )
+
+        notes = await self.repo.list_notes(ticket["id"])
+        if notes:
+            embed.add_field(
+                "Notes", "\n".join(f"<@{n['author_id']}>: {n['body'][:200]}" for n in notes[-5:])[:1024]
+            )
+
+        if mod_repo is not None:
+            involved = [opener_id] + [
+                int(ticket["fields"][f["key"]])
+                for f in ticket_type["fields"]
+                if field_type(f) == "user" and ticket["fields"].get(f["key"], "").isdigit()
+            ]
+            for user_id in list(dict.fromkeys(involved))[:4]:
+                warnings = await mod_repo.get_warning_count(guild_id, user_id)
+                cases = await mod_repo.get_user_cases(guild_id, user_id, limit=3)
+                record = [f"{warnings} active warning{'' if warnings == 1 else 's'}"] + [
+                    f"Case #{c['case_number']} {c['action']} <t:{c['created_at']}:R>: {(c['reason'] or '')[:80]}"
+                    for c in cases
+                ]
+                embed.add_field("Moderation record", f"<@{user_id}>\n" + "\n".join(record)[:1000])
+        return embed
+
+    def _top_role(self, member: hikari.Member) -> int:
+        roles = self.cache.get_roles_view_for_guild(member.guild_id)
+        return max((roles[r].position for r in member.role_ids if r in roles), default=0)
+
+    async def mod_action(
+        self,
+        ticket: dict,
+        ticket_type: dict,
+        moderator: hikari.Member,
+        target_id: int,
+        action: str,
+        reason: Optional[str],
+        duration: Optional[int],
+        mod: ModerationService,
+        mod_repo: ModerationRepository,
+    ) -> int:
+        """Warn, time out, kick or ban from a ticket. The case links to the ticket, and holds its
+        transcript as evidence (now if it has one from before a reopen, otherwise when it closes)."""
+        self.require_staff(moderator, ticket_type)
+        needed = MOD_ACTIONS[action]
+        if not member_permissions(moderator) & (needed | hikari.Permissions.ADMINISTRATOR):
+            raise TicketError(f"You need **{needed.name.replace('_', ' ').title()}** to {action} members.")  # type: ignore[union-attr]
+
+        guild_id = ticket["guild_id"]
+        target: Optional[hikari.Member] = self.cache.get_member(guild_id, target_id)
+        if target is None:
+            try:
+                target = await self.rest.fetch_member(guild_id, target_id)
+            except hikari.NotFoundError:
+                if action != "ban":
+                    raise TicketError(f"<@{target_id}> isn't in the server.") from None
+        if target is not None:
+            guild = self.cache.get_guild(guild_id)
+            me = self.cache.get_me()
+            if target.id == moderator.id or (me and target.id == me.id) or (guild and target.id == guild.owner_id):
+                raise TicketError("You can't moderate yourself, me or the server owner.")
+            if self._top_role(moderator) <= self._top_role(target):
+                raise TicketError("You can't moderate someone with an equal or higher role than yours.")
+
+        kwargs = {"guild_id": guild_id, "moderator": moderator, "reason": reason}
+        if action == "warn":
+            case, _ = await mod.warn(target=target, **kwargs)  # type: ignore[arg-type]
+        elif action == "timeout":
+            case = await mod.timeout(target=target, duration_seconds=duration or 3600, **kwargs)  # type: ignore[arg-type]
+        elif action == "kick":
+            case = await mod.kick(target=target, **kwargs)  # type: ignore[arg-type]
+        else:
+            case = await mod.ban(target=target or await self.rest.fetch_user(target_id), **kwargs)  # type: ignore[arg-type]
+
+        await mod_repo.set_case_source(guild_id, case, ticket["id"])
+        await self.repo.hold_transcript(ticket["id"], case)
+        await self.repo.add_event(
+            ticket["id"], "mod_action", moderator.id, {"case": case, "action": action, "user": target_id}
+        )
+        return case
+
     # Claiming
 
     async def ticket_here(self, channel_id: int) -> tuple[dict, dict]:
@@ -614,8 +1094,12 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(channel_id)
         if ticket is None or ticket["status"] != "open":
             raise TicketError("This isn't an open ticket channel.")
+        return ticket, await self.full_type(ticket)
+
+    async def full_type(self, ticket: dict) -> dict:
+        """A ticket's type with its tier ladder, whose roles count as the type's staff."""
         ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        return ticket, ticket_type  # type: ignore[return-value]
+        return {**ticket_type, "tiers": await self.repo.list_tiers(ticket["type_id"])}  # type: ignore[dict-item]
 
     def is_staff(self, member: hikari.Member, ticket_type: dict) -> bool:
         return is_staff(ticket_type, member.role_ids, member_permissions(member))
@@ -626,10 +1110,17 @@ class TicketService:
         return member
 
     async def claim(
-        self, ticket: dict, user_id: int, *, by: Optional[int] = None, announce: bool = True
+        self,
+        ticket: dict,
+        user_id: int,
+        *,
+        by: Optional[int] = None,
+        announce: bool = True,
+        force: bool = False,
     ) -> dict:
-        """Give the ticket to `user_id`. `by` is the admin reassigning it, if it isn't them."""
-        updated = await self.repo.claim(ticket["id"], user_id, force=by is not None)
+        """Give the ticket to `user_id`. `by` is whoever reassigns it, if it isn't them; `force`
+        takes it from the current assignee (an escalated tier picking it up)."""
+        updated = await self.repo.claim(ticket["id"], user_id, force=force or by is not None)
         if updated is None:
             current = await self.repo.get_ticket_by_id(ticket["id"])
             assignee = current["assignee_id"] if current else None
@@ -672,14 +1163,30 @@ class TicketService:
         ticket = await self.repo.get_ticket_by_channel(event.channel_id)
         if ticket is None or ticket["status"] != "open":
             return
-        ticket_type = await self.repo.get_type(ticket["guild_id"], ticket["type_id"])
-        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)  # type: ignore[arg-type]
+        # Tier roles only get into the channel by escalating, so a never-escalated ticket skips the ladder.
+        if ticket["tier_id"] is not None:
+            ticket_type = await self.full_type(ticket)
+        else:
+            ticket_type = {**await self.repo.get_type(ticket["guild_id"], ticket["type_id"]), "tiers": []}  # type: ignore[dict-item]
+        staff = event.author_id != ticket["opener_id"] and self.is_staff(event.member, ticket_type)
         updated = await self.repo.record_message(ticket["id"], event.author_id, staff=staff)
         if updated is None:  # the ticket was rolled back (failed open) a moment ago
             return
         if updated["waiting_on"] != ticket["waiting_on"]:
             self.schedule_topic(event.channel_id)
-        if staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):  # type: ignore[index]
+        tier = current_tier(ticket, ticket_type)
+        if (
+            staff
+            and ticket["tier_pinged_at"]
+            and tier
+            and ticket_type["claim_mode"] in ("reply", "both")
+            and set(event.member.role_ids) & set(tier["role_ids"])
+        ):
+            # The first of an escalated tier to reply takes the ticket (claiming clears the re-ping);
+            # earlier handlers keep their place and credit in the chain. In button mode the tier
+            # takes it with /ticket assign. ponytail: two replies at once both claim, the later wins.
+            await self.claim(ticket, event.author_id, announce=False, force=True)
+        elif staff and ticket["assignee_id"] is None and ticket_type["claim_mode"] in ("reply", "both"):
             try:
                 await self.claim(ticket, event.author_id, announce=False)
             except TicketError:
@@ -699,6 +1206,118 @@ class TicketService:
             except Exception:  # one deleted or locked channel can't hold up the rest
                 logger.exception(f"Auto-unclaim failed for ticket {ticket['id']}")
 
+    # Escalation
+
+    async def _ping_tier(self, ticket: dict, tier: dict, headline: str, reason: Optional[str] = None) -> None:
+        roles = " ".join(f"<@&{r}>" for r in tier["role_ids"])
+        lines = [
+            f"{headline} {roles}".strip(),
+            f"Ticket #{ticket['number']} · opened by <@{ticket['opener_id']}> <t:{ticket['opened_at']}:R>",
+        ]
+        if reason:
+            lines.append(f"> {reason}")
+        await self.rest.create_message(
+            ticket["channel_id"], "\n".join(lines), role_mentions=tier["role_ids"], user_mentions=False
+        )
+
+    async def escalate(
+        self, ticket: dict, ticket_type: dict, actor_id: int, target_name: Optional[str], reason: Optional[str]
+    ) -> dict:
+        """Bring a higher tier into the ticket: the next rung up, or a tier the current one may summon."""
+        tiers = ticket_type["tiers"]
+        current = current_tier(ticket, ticket_type)
+        if current is None:
+            raise TicketError(
+                f"**{ticket_type['name']}** tickets have no tiers. Add them with `/ticket type tier`."
+            )
+        above = next((t for t in tiers if t["position"] > current["position"]), None)
+        if target_name is None:
+            target = above
+            if target is None:
+                raise TicketError(f"**{current['name']}** is already the top tier.")
+        else:
+            target = next((t for t in tiers if t["name"].lower() == target_name.lower()), None)
+            if target is None:
+                raise TicketError(f"**{ticket_type['name']}** has no tier called **{target_name}**.")
+            if target is current:
+                raise TicketError(f"This ticket is already with **{current['name']}**.")
+            if target is not above and target["id"] not in current["can_summon"]:
+                raise TicketError(f"**{current['name']}** can't summon **{target['name']}**.")
+        if target["requires_reason"] and not reason:
+            raise TicketError(f"Escalating to **{target['name']}** needs a reason.")
+
+        for role in target["role_ids"]:
+            await self.rest.edit_permission_overwrite(
+                ticket["channel_id"], role, target_type=hikari.PermissionOverwriteType.ROLE,
+                allow=TICKET_MEMBER_ALLOW, reason=f"Ticket #{ticket['number']} escalated to {target['name']}",
+            )
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=target["id"], tier_pinged_at=int(time.time())
+        )
+        await self.repo.add_event(
+            ticket["id"], "escalated", actor_id, {"from": current["id"], "to": target["id"], "reason": reason}
+        )
+        await self.log(
+            updated, ticket_type, "escalated", actor_id,  # type: ignore[arg-type]
+            f"{current['name']} → {target['name']}" + (f": {reason}" if reason else ""),
+        )
+        await self._ping_tier(
+            updated, target, f"⬆️ <@{actor_id}> escalated this ticket to **{target['name']}**.", reason  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    async def deescalate(self, ticket: dict, ticket_type: dict, actor_id: int, note: Optional[str]) -> dict:
+        """Hand the ticket back to the tier that escalated it, unassigned so that tier picks it up.
+
+        ponytail: the higher tier keeps channel access (and its credit); nothing removes its role.
+        """
+        events = await self.repo.list_events(ticket["id"])
+        last = next(
+            (e for e in reversed(events) if e["kind"] == "escalated" and e["data"]["to"] == ticket["tier_id"]),
+            None,
+        )
+        if last is None:
+            raise TicketError("This ticket hasn't been escalated.")
+        if not note:
+            raise TicketError("Add a reason: it's posted for the tier taking the ticket back.")
+        tiers = {t["id"]: t for t in ticket_type["tiers"]}
+        back = tiers.get(last["data"]["from"]) or ticket_type["tiers"][0]
+        updated = await self.repo.update_ticket(
+            ticket["id"], tier_id=back["id"], tier_pinged_at=None, assignee_id=None
+        )
+        await self.repo.add_event(
+            ticket["id"], "deescalated", actor_id, {"from": ticket["tier_id"], "to": back["id"], "reason": note}
+        )
+        await self.log(updated, ticket_type, "deescalated", actor_id, f"Back to {back['name']}: {note}")  # type: ignore[arg-type]
+        await self._ping_tier(
+            updated, back, f"⬇️ <@{actor_id}> handed this ticket back to **{back['name']}**.", note  # type: ignore[arg-type]
+        )
+        return updated  # type: ignore[return-value]
+
+    def can_reassign(self, member: hikari.Member, ticket: dict, ticket_type: dict) -> bool:
+        """Admins, and the tier a ticket was escalated to (higher tiers may reassign)."""
+        if member_permissions(member) & (hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR):
+            return True
+        tier = current_tier(ticket, ticket_type)
+        return (
+            tier is not None
+            and tier is not ticket_type["tiers"][0]
+            and any(r in tier["role_ids"] for r in member.role_ids)
+        )
+
+    async def reping_tiers(self, now: int) -> None:
+        """Ping escalated tiers again when nobody from them has replied in their re-ping time."""
+        for ticket in await self.repo.due_for_reping(now):
+            try:
+                await self.repo.update_ticket(ticket["id"], tier_pinged_at=now)
+                await self._ping_tier(
+                    ticket,
+                    {"role_ids": ticket["tier_role_ids"]},
+                    f"⏰ Nobody from **{ticket['tier_name']}** has picked this ticket up yet.",
+                )
+            except Exception:  # one deleted or locked channel can't hold up the rest
+                logger.exception(f"Tier re-ping failed for ticket {ticket['id']}")
+
     async def auto_close(self, now: int) -> None:
         """Warn openers who went quiet past their type's timeout; close AUTO_CLOSE_GRACE later.
 
@@ -715,7 +1334,7 @@ class TicketService:
                 if stage is not None and not stage.get("auto_close", True):
                     continue
                 if ticket["guild_id"] not in settings:
-                    settings[ticket["guild_id"]] = await self._settings(ticket["guild_id"])
+                    settings[ticket["guild_id"]] = await self.settings(ticket["guild_id"])
                 guild = settings[ticket["guild_id"]]
                 schedule = effective_schedule(ticket_type["schedule"], guild)  # type: ignore[index]
 
@@ -791,6 +1410,9 @@ class TicketService:
                 # with whatever was read, rather than leave it open forever.
                 logger.warning(f"Transcript of ticket {ticket['id']} is incomplete: {exc}")
         labels = {f["key"]: f["label"] for f in ticket_type["fields"]}
+        # Only answers to fields the opener is asked go in their copy; staff-only ones, and those
+        # of fields removed since (which may have been staff-only), are kept for staff.
+        opener_keys = {f["key"] for f in asked_fields(ticket_type)}
         return {
             "ticket": {
                 "number": ticket["number"],
@@ -801,7 +1423,8 @@ class TicketService:
                 "closed_by": ticket.get("closed_by"),
                 "reason": ticket.get("close_reason"),
             },
-            "fields": {labels.get(k, k): v for k, v in ticket["fields"].items()},
+            "fields": {labels[k]: v for k, v in ticket["fields"].items() if k in opener_keys},
+            "staff_fields": {labels.get(k, k): v for k, v in ticket["fields"].items() if k not in opener_keys and v},
             "messages": messages,
             "events": [
                 {"kind": e["kind"], "actor_id": e["actor_id"], "data": e["data"], "created_at": e["created_at"]}
@@ -877,18 +1500,33 @@ class TicketService:
         embed.add_field("Closed by", f"<@{closed_by}>", inline=True)
         embed.add_field("Reason", (reason or "No reason given")[:1024], inline=True)
         kwargs: dict = {}
+        rows: list[hikari.api.MessageActionRowBuilder] = []
+        # Not asked again after a reopen if they already rated it.
+        try:
+            ask = ticket_type["ratings"] and await self.repo.get_rating(ticket["id"]) is None
+        except Exception:  # the close already happened; send the DM without the buttons
+            logger.exception(f"Couldn't check the rating of closed ticket {ticket['id']}")
+            ask = False
+        if ask:
+            embed.add_field("How did we do?", "Rate your experience from 1 (poor) to 5 (great).")
+            rows.append(self.rest.build_message_action_row())
+            for n in range(1, 6):
+                rows[-1].add_interactive_button(
+                    hikari.ButtonStyle.SECONDARY, f"ticket:rate:{ticket['id']}:{n}", label=str(n), emoji="⭐"
+                )
         if document is not None:
             embed.set_footer("The transcript is attached. Staff can reopen this ticket for 7 days.")
             kwargs["attachment"] = hikari.Bytes(
                 render_transcript(document, staff=False).encode(), f"ticket-{ticket['number']}.txt"
             )
-            kwargs["component"] = self.rest.build_message_action_row().add_interactive_button(
+            rows.append(self.rest.build_message_action_row().add_interactive_button(
                 hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
                 label="Ask to delete this transcript",
-            )
+            ))
         try:
             dm = await self.rest.create_dm_channel(ticket["opener_id"])
-            await self.rest.create_message(dm, embed=embed, **kwargs)
+            # ponytail: DMs closed means no rating; the dashboard's transcript page can offer it later.
+            await self.rest.create_message(dm, embed=embed, components=rows, **kwargs)
         except (hikari.ForbiddenError, hikari.NotFoundError, hikari.BadRequestError):
             pass  # DMs closed, or the opener left: they still have nothing to lose
         except hikari.HTTPError as exc:  # the close already happened; don't report it as failed
@@ -970,6 +1608,50 @@ class TicketService:
         )
         return True
 
+    # Ratings
+
+    async def check_can_rate(self, ticket_id: int, user_id: int) -> tuple[dict, dict]:
+        """The closed ticket `user_id` may rate now, and its type; raises if they can't."""
+        ticket = await self.repo.get_ticket_by_id(ticket_id)
+        if ticket is None or ticket["opener_id"] != user_id:
+            raise TicketError("Only the person who opened this ticket can rate it.")
+        guild_id = ticket["guild_id"]
+        # The buttons are in a DM, so the guild checks other ticket buttons get happen here.
+        if not module_available(guild_id, ModuleType.TICKETS) or not await self.modules.is_enabled(
+            guild_id, ModuleType.TICKETS
+        ):
+            raise TicketError("Tickets are turned off in that server.")
+        ticket_type: dict = await self.repo.get_type(guild_id, ticket["type_id"])  # type: ignore[assignment]
+        if ticket["status"] != "closed":
+            raise TicketError("This ticket was reopened. You can rate it once it closes again.")
+        if not ticket_type["ratings"]:
+            raise TicketError(f"**{ticket_type['name']}** tickets aren't rated.")
+        if await self.repo.get_rating(ticket_id):
+            raise TicketError("You've already rated this ticket. Thanks!")
+        config = await self.modules.get_module_config(guild_id, ModuleType.TICKETS)
+        days = int(config.settings.get("rating_window_days", DEFAULT_RATING_WINDOW_DAYS))
+        if ticket["closed_at"] < time.time() - days * 86400:
+            raise TicketError(f"Tickets can only be rated for {days} days after they close.")
+        return ticket, ticket_type
+
+    async def rate(self, ticket_id: int, user_id: int, rating: int, comment: Optional[str]) -> dict:
+        """Store the opener's rating, credited to the ticket's handlers; low ones alert staff."""
+        if not 1 <= rating <= 5:
+            raise TicketError("Ratings are from 1 to 5.")
+        ticket, ticket_type = await self.check_can_rate(ticket_id, user_id)
+        stored = await self.repo.add_rating(ticket_id, user_id, rating, comment)
+        if stored is None:  # a second submit that raced the first
+            raise TicketError("You've already rated this ticket. Thanks!")
+        await self.repo.add_event(ticket_id, "rated", user_id, {"rating": rating})
+        if rating <= LOW_RATING:
+            handlers = " ".join(f"<@{h}>" for h in stored["handler_ids"]) or "nobody"
+            detail = f"{'⭐' * rating} {rating}/5 · Handled by {handlers}"
+            await self.log(
+                ticket, ticket_type, "low_rating", user_id,
+                f"{detail}\n> {comment}" if comment else detail,
+            )
+        return stored
+
     # Staff controls
 
     def channel_name(self, ticket: dict, ticket_type: dict, opener_name: str) -> str:
@@ -1046,9 +1728,12 @@ class TicketService:
 
         async with self._open_locks[ticket["guild_id"]]:  # _category may create an overflow
             category = await self._category(ticket["guild_id"], new_type["category_id"])
-            # Stages are per type, so the ticket starts the new type's workflow.
+            # Tiers and stages belong to a type: the ticket starts the new type's ladder at the
+            # bottom and its workflow at the first stage.
             first = new_type["stages"][0]["name"] if new_type["stages"] else None
-            updated = await self.repo.update_ticket(ticket["id"], type_id=new_type["id"], stage=first)
+            updated = await self.repo.update_ticket(
+                ticket["id"], type_id=new_type["id"], tier_id=None, tier_pinged_at=None, stage=first
+            )
             await self.rest.edit_channel(
                 ticket["channel_id"],
                 parent_category=category if category is not None else hikari.UNDEFINED,

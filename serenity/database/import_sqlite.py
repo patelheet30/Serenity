@@ -78,11 +78,16 @@ async def _copy_all(src: sqlite3.Connection, conn: asyncpg.Connection) -> Option
 
     copied: Dict[str, int] = {}
     for table in TABLES:
+        # Columns added after the cutover (mod_cases.source_ticket_id) aren't in SQLite; they
+        # keep their Postgres defaults.
+        in_sqlite = [row[1] for row in src.execute(f"PRAGMA table_info({table})")]
         columns = await conn.fetch(
             """SELECT column_name, data_type FROM information_schema.columns
             WHERE table_schema = current_schema() AND table_name = $1
+            AND column_name = ANY($2::text[])
             ORDER BY ordinal_position""",
             table,
+            in_sqlite,
         )
         names = [c["column_name"] for c in columns]
         coerce = [COERCE[c["data_type"]] for c in columns]

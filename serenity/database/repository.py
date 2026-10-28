@@ -708,3 +708,22 @@ class Repository:
             guild_id,
             module_type.value,
         )
+
+    async def merge_module_settings(
+        self, guild_id: int, module_type: ModuleType, changes: Dict[str, Any]
+    ) -> None:
+        """Set some of a module's settings in one statement, so concurrent writers don't clobber each other."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        await self.pool.execute(
+            """INSERT INTO module_config (guild_id, module_type, is_enabled, settings, updated_at)
+            VALUES ($1, $2, FALSE, $3, $4)
+            ON CONFLICT (guild_id, module_type) DO UPDATE
+            SET settings = (COALESCE(NULLIF(module_config.settings, ''), '{}')::jsonb || $3::jsonb)::text,
+                updated_at = $4""",
+            guild_id,
+            module_type.value,
+            json.dumps(changes),
+            int(time.time()),
+        )
