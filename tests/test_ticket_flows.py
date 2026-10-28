@@ -295,3 +295,24 @@ async def test_reopen_restores_and_keeps_earlier_messages(service: TicketService
     await service.repo.pool.execute("UPDATE tickets SET closed_at = closed_at - 8 * 86400")
     with pytest.raises(TicketError, match="more than 7 days"):
         await service.reopen(GUILD, 1, staff(BOB, "bob"))
+
+
+@pytest.mark.asyncio
+async def test_auto_unclaim_spares_a_ticket_reassigned_meanwhile(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support", auto_unclaim_hours=1)
+    first = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    second = await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    for t in (first, second):
+        await service.claim(t, CAROL, announce=False)
+    later = int(__import__("time").time()) + 7200
+    due = await service.repo.due_for_unclaim(later)
+    assert {t["id"] for t in due} == {first["id"], second["id"]}
+
+    # first is reassigned between the sweep's SELECT and its UPDATE; second's channel is gone.
+    await service.repo.claim(first["id"], ALICE, force=True)
+    service.repo.due_for_unclaim = AsyncMock(return_value=due)
+    service.rest.create_message.side_effect = hikari.NotFoundError("", {}, b"")
+    await service.auto_unclaim(later)
+
+    assert (await service.repo.get_ticket_by_id(first["id"]))["assignee_id"] == ALICE  # type: ignore[index]
+    assert (await service.repo.get_ticket_by_id(second["id"]))["assignee_id"] is None  # type: ignore[index]

@@ -342,11 +342,16 @@ class TicketRepository:
             )
         return _decode(row)
 
-    async def unclaim(self, ticket_id: int) -> Optional[dict]:
-        """Clear the assignee. They stay in the credit chain for what they already did."""
+    async def unclaim(self, ticket_id: int, expected: Optional[int] = None) -> Optional[dict]:
+        """Clear the assignee, if it's still `expected` when given (a claim or reassign that
+        landed in between wins). They stay in the credit chain for what they already did.
+        Returns None if nothing changed."""
         pool = self._require_pool()
         row = await pool.fetchrow(
-            "UPDATE tickets SET assignee_id = NULL WHERE id = $1 RETURNING *", ticket_id
+            """UPDATE tickets SET assignee_id = NULL
+            WHERE id = $1 AND ($2::bigint IS NULL OR assignee_id = $2) RETURNING *""",
+            ticket_id,
+            expected,
         )
         return _decode(row)
 
