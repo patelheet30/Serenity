@@ -226,7 +226,14 @@ async def test_dropdown_questions_follow_the_form(monkeypatch):
     press = MagicMock(spec=hikari.ComponentInteraction, guild_id=1, user=MagicMock(id=2))
     with pytest.raises(TicketError, match="Region"):
         await tickets.submit_picks(press, service, 7)
-    service.drafts[(1, 2, 7)]["region"] = "NA"  # what the pick handler stores
+    service.get_draft((1, 2, 7))["region"] = "NA"  # what the pick handler stores
+
+    created.side_effect = TicketError("You already have an open **Appeal** ticket.")
+    with pytest.raises(TicketError, match="already have"):
+        await tickets.submit_picks(press, service, 7)
+    assert service.get_draft((1, 2, 7))["ign"] == "Notch"  # refused: the answers are kept for a retry
+
+    created.side_effect = None
     await tickets.submit_picks(press, service, 7)
     assert created.call_args.args[3] == {"ign": "Notch", "region": "NA"}
     assert service.drafts == {}
@@ -239,6 +246,65 @@ def test_parse_duration():
     for bad in ("soon", "0m", "29d", "1h30m"):
         with pytest.raises(TicketError):
             parse_duration(bad)
+
+
+@pytest.mark.parametrize(
+    "pattern, slow",
+    [
+        (IGN, False),
+        (r"^\d{4}-\d{2}$", False),
+        (r"(ab)+", False),
+        (r"([A-Za-z]+)*[0-9]$", True),  # repeat inside a repeat: exponential
+        (r"(\w+\s?)+", True),
+        (r"(foo|bar)+", True),  # | inside a repeat
+        (r"(\w)\1", True),  # backreference
+        (r".*.*.*.*x", True),  # too many open-ended repeats
+    ],
+)
+def test_slow_patterns_are_refused(pattern, slow):
+    from serenity.services.ticket_service import set_field
+
+    if slow:
+        with pytest.raises(TicketError, match="too long to check"):
+            set_field([], "IGN", "pattern", options=pattern)
+    else:
+        assert set_field([], "IGN", "pattern", options=pattern)[0]["pattern"] == pattern
+
+
+def test_type_field_option_choices_and_defaults():
+    import inspect
+
+    from serenity.extensions import tickets
+    from serenity.services.ticket_service import FIELD_TYPES
+
+    assert tickets.type_field.options["kind"].choices == tickets.FIELD_KINDS
+    assert sorted(tickets.FIELD_KINDS.values()) == sorted(FIELD_TYPES)  # every stored kind, once
+    assert tickets.FIELD_KINDS["Dropdown"] == "select" and tickets.FIELD_KINDS["Member"] == "user"
+    params = inspect.signature(tickets.type_field.callback).parameters
+    defaults = {n: params[n].default for n in ("kind", "required", "identity", "staff_only", "remove")}
+    assert defaults == {"kind": "short", "required": True, "identity": False, "staff_only": False, "remove": False}
+
+
+def test_drafts_expire_and_are_capped(monkeypatch):
+    from serenity.services import ticket_service
+
+    clock = [1000.0]
+    monkeypatch.setattr(ticket_service.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ticket_service, "MAX_DRAFTS", 3)
+    service = _service()
+
+    service.save_draft((1, 1, 1), {"a": "1"})
+    clock[0] += ticket_service.DRAFT_TTL
+    with pytest.raises(TicketError, match="expired"):
+        service.get_draft((1, 1, 1))
+    for user in (2, 3, 4):
+        service.save_draft((1, user, 1), {})
+    assert list(service.drafts) == [(1, 2, 1), (1, 3, 1), (1, 4, 1)]  # the expired one was dropped
+    service.save_draft((1, 5, 1), {})
+    assert list(service.drafts) == [(1, 3, 1), (1, 4, 1), (1, 5, 1)]  # past the cap, oldest goes
+    service.save_draft((1, 3, 1), {"b": "2"})  # a new form replaces the member's old one
+    assert list(service.drafts) == [(1, 4, 1), (1, 5, 1), (1, 3, 1)]
+    assert service.get_draft((1, 3, 1)) == {"b": "2"}
 
 
 def test_staff_only_answers_stay_out_of_the_openers_copy():
