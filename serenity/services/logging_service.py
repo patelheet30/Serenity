@@ -759,6 +759,7 @@ class LoggingService:
             "reopened": ("↩️ Ticket reopened", _GREEN),
             "transferred": ("🔀 Ticket transferred", _BLUE),
             "deletion_requested": ("🗑️ Transcript deletion requested", _ORANGE),
+            "low_rating": ("⚠️ Low ticket rating", _RED),
         }.get(kind, (f"🎫 Ticket {kind.replace('_', ' ')}", _GREY))
         embed = hikari.Embed(title=f"{title} | #{number}", color=color, timestamp=_now())
         embed.add_field("Type", _truncate(type_name, 256), inline=True)

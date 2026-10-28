@@ -27,6 +27,7 @@ TYPE_COLUMNS = (
     "transcripts",
     "retention_days",
     "auto_unclaim_hours",
+    "ratings",
 )
 
 
@@ -584,6 +585,33 @@ class TicketRepository:
             SELECT COUNT(*) FROM gone""",
             now,
         )
+
+    # Ratings
+
+    async def add_rating(
+        self, ticket_id: int, user_id: int, rating: int, comment: Optional[str], /
+    ) -> Optional[dict]:
+        """Rate a closed ticket, crediting its credited handlers; None if it's already rated."""
+        pool = self._require_pool()
+        row = await pool.fetchrow(
+            """INSERT INTO ticket_ratings (ticket_id, guild_id, user_id, rating, comment, handler_ids, created_at)
+            SELECT t.id, t.guild_id, $2, $3, $4,
+                ARRAY(SELECT user_id FROM ticket_handlers WHERE ticket_id = t.id AND credited ORDER BY joined_at, user_id),
+                $5
+            FROM tickets t WHERE t.id = $1
+            ON CONFLICT (ticket_id) DO NOTHING RETURNING *""",
+            ticket_id,
+            user_id,
+            rating,
+            comment,
+            int(time.time()),
+        )
+        return dict(row) if row else None
+
+    async def get_rating(self, ticket_id: int, /) -> Optional[dict]:
+        pool = self._require_pool()
+        row = await pool.fetchrow("SELECT * FROM ticket_ratings WHERE ticket_id = $1", ticket_id)
+        return dict(row) if row else None
 
     # Blacklist
 
