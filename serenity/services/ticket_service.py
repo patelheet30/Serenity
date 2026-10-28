@@ -86,6 +86,7 @@ def _field_key(label: str, fields: list[dict]) -> str:
 
 
 MAX_OPEN_REPEATS = 3  # on a 100-character answer, at most ~100^3 steps
+MAX_VARIABLE_REPEATS = 6  # `?` and `{0,n}` too: each one can double the paths
 
 
 def _slow_pattern(parsed: Any) -> bool:
@@ -99,10 +100,10 @@ def _slow_pattern(parsed: Any) -> bool:
     """
     from re import _constants as c  # type: ignore[attr-defined]
 
-    open_repeats = 0
+    open_repeats = variable_repeats = 0
 
     def walk(items: Any, in_repeat: bool) -> bool:
-        nonlocal open_repeats
+        nonlocal open_repeats, variable_repeats
         for op, av in items:
             if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
                 low, high, sub = av
@@ -110,6 +111,7 @@ def _slow_pattern(parsed: Any) -> bool:
                     return True
                 open_ended = high == c.MAXREPEAT
                 open_repeats += open_ended
+                variable_repeats += low != high
                 if walk(sub, in_repeat or high > 1):
                     return True
             elif op == c.BRANCH:
@@ -125,7 +127,11 @@ def _slow_pattern(parsed: Any) -> bool:
                     return True
         return False
 
-    return walk(parsed, False) or open_repeats > MAX_OPEN_REPEATS
+    return (
+        walk(parsed, False)
+        or open_repeats > MAX_OPEN_REPEATS
+        or variable_repeats > MAX_VARIABLE_REPEATS
+    )
 
 
 def parse_questions(text: str) -> list[dict]:
@@ -197,7 +203,8 @@ def set_field(
             raise TicketError(
                 "That pattern could take too long to check. Keep it simple: no repeats inside "
                 "repeats (like `(a+)*`), no `|` inside a repeat, no backreferences, and at most "
-                f"{MAX_OPEN_REPEATS} open-ended repeats (`*`, `+`, `{{2,}}`)."
+                f"{MAX_OPEN_REPEATS} open-ended repeats (`*`, `+`, `{{2,}}`) and {MAX_VARIABLE_REPEATS} "
+                "repeats in all (counting `?`)."
             )
         field["pattern"] = options
     if identity:
