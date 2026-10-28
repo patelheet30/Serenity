@@ -429,7 +429,7 @@ async def test_modules_follow_the_dependency_rules(settings):
     await settings("PUT", "/modules/logging", {"enabled": True})
     status, body = await settings("PUT", "/modules/moderation", {"enabled": True})
     assert status == 200
-    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False}
+    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True}
     assert body["requires"]["moderation"] == ["logging"]
 
     status, body = await settings("PUT", "/modules/logging", {"enabled": False})
@@ -439,6 +439,15 @@ async def test_modules_follow_the_dependency_rules(settings):
         ("Logging module", "off", "on"),
         ("Moderation module", "off", "on"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tickets_module_only_exists_for_allowlisted_servers(settings, monkeypatch):
+    assert (await settings("PUT", "/modules/tickets", {"enabled": True}))[0] == 404
+
+    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+    status, body = await settings("PUT", "/modules/tickets", {"enabled": True})
+    assert status == 200 and body["enabled"]["tickets"] is True
 
 
 @pytest.mark.asyncio
