@@ -101,3 +101,18 @@ async def test_full_category_overflows_into_a_new_one(service: TicketService):
     await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
     assert service.rest.create_guild_category.call_args.args[1] == "Support 2"
     assert service.rest.create_guild_text_channel.call_args.kwargs["category"] == 11
+
+
+@pytest.mark.asyncio
+async def test_failed_welcome_still_opens_and_failed_link_rolls_back(service: TicketService):
+    support = await service.repo.create_type(GUILD, "Support")
+    service.rest.create_message.side_effect = hikari.ForbiddenError("", {}, b"")
+    ticket = await service.open_ticket(GUILD, member(ALICE, "alice"), support, {})
+    assert ticket["channel_id"] in service.open_channels
+
+    service.rest.create_message.side_effect = None
+    service.repo.set_ticket_channel = AsyncMock(side_effect=RuntimeError("db down"))
+    with pytest.raises(RuntimeError):
+        await service.open_ticket(GUILD, member(BOB, "bob"), support, {})
+    service.rest.delete_channel.assert_awaited_once()
+    assert await service.repo.count_open(GUILD, BOB, support["id"]) == 0
