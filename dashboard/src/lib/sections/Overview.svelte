@@ -20,7 +20,7 @@
 		analytics: { changes: Record<'6h' | '24h', number> };
 		stats: { active: { timeouts: number; warnings: number } };
 		/** The ticket stats' counts; shown while the Tickets module is on. */
-		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number };
+		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number } | null;
 	};
 
 	let {
@@ -47,15 +47,18 @@
 		const g = `/guilds/${id}`;
 		Promise.all([
 			api<Slowmode>(`${g}/slowmode`),
-			api<Modules>(`${g}/modules`),
+			api<Modules>(`${g}/modules`).then(async (modules) => ({
+				modules,
+				// Only while Tickets is on, so other servers skip the stats query.
+				tickets: modules.enabled.tickets ? await api<Data['tickets']>(`${g}/tickets/stats?days=7`) : null
+			})),
 			api<Data['logging']>(`${g}/logging`),
 			api<Change[]>(`${g}/slowmode/history`),
 			api<Data['cases']>(`${g}/cases`),
 			api<Data['stats']>(`${g}/modstats?days=7`),
-			api<Data['analytics']>(`${g}/slowmode/analytics`),
-			api<Data['tickets']>(`${g}/tickets/stats?days=7`)
+			api<Data['analytics']>(`${g}/slowmode/analytics`)
 		]).then(
-			([slowmode, modules, logging, history, cases, stats, analytics, tickets]) =>
+			([slowmode, { modules, tickets }, logging, history, cases, stats, analytics]) =>
 				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics, tickets }),
 			(e) => !stale && onerror(e)
 		);
@@ -174,7 +177,7 @@
 			{/if}
 		</section>
 
-		{#if d.modules.enabled.tickets}
+		{#if d.tickets}
 			{@const q = `/dashboard/${guildId}/tickets/queue`}
 			<section class="pane s12" aria-labelledby="tkT">
 				<div class="ph"><h2 id="tkT">Tickets</h2><span class="sp"></span><a class="btn sm ghost" href={q}>Open queue <Icon name="arrow" /></a></div>

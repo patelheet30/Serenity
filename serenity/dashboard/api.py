@@ -4,6 +4,7 @@ Every /api/guilds/{guild_id}/... route goes through auth_middleware's guild chec
 never check access themselves. Ticket staff who can't manage the guild only get STAFF_HANDLERS.
 """
 
+import asyncio
 import os
 import re
 import secrets
@@ -274,11 +275,15 @@ async def guilds(request: web.Request) -> web.Response:
     # a member lookup.
     others = [int(g["id"]) for g in result if g["installed"] and not g["manageable"]]
     with_types = set(await request.app[TICKET_SVC].repo.guilds_with_types(others)) if others else set()
+    async def is_staff(gid: int) -> bool:
+        member = await request.app[ACCESS].member(session.user_id, gid)
+        return (await ticket_access(request.app, gid, member)).staff
+
+    # Concurrent, so a member of many ticket servers isn't held up one lookup at a time.
+    ids = list(with_types)
+    staff = dict(zip(ids, await asyncio.gather(*map(is_staff, ids))))
     for g in result:
-        gid = int(g["id"])
-        if gid in with_types:
-            member = await request.app[ACCESS].member(session.user_id, gid)
-            g["staff"] = (await ticket_access(request.app, gid, member)).staff
+        g["staff"] = staff.get(int(g["id"]), False)
     return web.json_response(sorted(result, key=lambda g: g["name"].lower()))
 
 

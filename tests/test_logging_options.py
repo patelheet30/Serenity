@@ -83,3 +83,4 @@ def test_logging_choices_include_the_ticket_log():
     for command in (logging_ext.enable_log, logging_ext.disable_log, logging_ext.ignore_channel):
         option = command.options["log_type"].to_command_option()
         assert "ticket" in {c.value for c in option.choices or []}
+    assert logging_ext.ticket_log.name == "ticket-log"  # what /logging enable ticket points to

@@ -347,6 +347,19 @@ async def mod_log(
 
 @logging_group.include
 @arc.with_hook(require_module(ModuleType.LOGGING))
+@arc.slash_subcommand("ticket-log", "Set the channel for ticket event logs.")
+async def ticket_log(
+    ctx: arc.GatewayContext,
+    channel: arc.Option[
+        hikari.TextableGuildChannel,
+        arc.ChannelParams("The channel to send ticket events to"),
+    ],
+    repo: LoggingRepository = arc.inject(),
+) -> None:
+    await _set_channel(ctx, repo, "ticket", channel)
+
+@logging_group.include
+@arc.with_hook(require_module(ModuleType.LOGGING))
 @arc.slash_subcommand("enable", "Enable a log type.")
 async def enable_log(
     ctx: arc.GatewayContext,
