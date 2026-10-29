@@ -23,7 +23,9 @@
 	let sheet = $state(false);
 	let dragging = $state<number | null>(null);
 	let over = $state<string | null>(null);
-	let closing = $state<{ ticket: Ticket; reason: string } | null>(null);
+	let closing = $state<{ ticket: Ticket; stage: string; reason: string } | null>(null);
+	// Tickets with a stage move in flight: a second move waits for the first, so they can't land out of order.
+	const moving = new Set<number>();
 	let reloadDetail = $state(0); // bumped when the board moves the open ticket
 
 	const boards = $derived((data?.types ?? []).filter((t) => t.stages.length));
@@ -57,17 +59,19 @@
 	});
 
 	async function move(t: Ticket, to: string) {
-		if (t.stage === to || !current) return;
+		if (t.stage === to || !current || moving.has(t.number)) return;
 		const stage = current.stages.find((s) => s.name === to);
 		const from = t.stage;
 		t.stage = to; // optimistic; the bot posts the move in the channel
+		moving.add(t.number);
 		const r = await save(() => send<Detail>('POST', `/guilds/${guildId}/tickets/${t.number}/stage`, { stage: to }));
+		moving.delete(t.number);
 		if (!r) {
 			t.stage = from;
 			return;
 		}
 		toast(`#${t.number} moved to ${to}`);
-		if (stage?.terminal) closing = { ticket: t, reason: to };
+		if (stage?.terminal) closing = { ticket: t, stage: to, reason: to }; // closes "as" the stage, like the Discord button
 		if (selected === t.number) reloadDetail++;
 	}
 
@@ -183,7 +187,7 @@
 
 <Modal bind:open={() => closing !== null, (v) => !v && (closing = null)} title="Close #{closing?.ticket.number ?? ''}?">
 	<form id="boardClose" class="stack" style="gap:12px" onsubmit={closeTicket}>
-		<p>{closing?.reason} is a final stage. Close the ticket as well? The channel is deleted and the opener gets the transcript by DM.</p>
+		<p>{closing?.stage} is a final stage. Close the ticket as well? The channel is deleted and the opener gets the transcript by DM.</p>
 		{#if closing}
 			<label class="field"><span>Reason</span><input class="inp" maxlength="500" bind:value={closing.reason} /></label>
 		{/if}
