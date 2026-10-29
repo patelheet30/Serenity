@@ -26,7 +26,14 @@ def type_json(ticket_type: dict) -> dict[str, Any]:
         "name": ticket_type["name"],
         "emoji": ticket_type["emoji"],
         "fields": [
-            {"key": f["key"], "label": f["label"], "type": field_type(f), "staff_only": bool(f.get("staff_only"))}
+            {
+                "key": f["key"],
+                "label": f["label"],
+                "type": field_type(f),
+                "required": f["required"],
+                "staff_only": bool(f.get("staff_only")),
+                "options": f.get("options", []),
+            }
             for f in ticket_type["fields"]
         ],
         "stages": [
