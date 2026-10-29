@@ -200,3 +200,4 @@ async def test_login_comes_back_to_the_transcript(client_for):
     assert NEXT_COOKIE not in client.session.cookie_jar.filter_cookies(client.make_url("/"))
     assert (await login("//evil.example")).endswith("/servers")
     assert (await login("https://evil.example")).endswith("/servers")
+    assert (await login("/servers/../x")).endswith("/servers")  # only transcript pages come back
