@@ -237,7 +237,10 @@ main.dash{max-width:1440px;margin:0 auto;padding:22px 20px 80px}
 .stepper input:focus{box-shadow:inset 0 0 0 1px var(--acc)}
 .seg{display:inline-flex;border:1px solid var(--line2);border-radius:var(--r);padding:2px;gap:2px;background:var(--ink)}
 .seg button{height:26px;min-width:38px;border:0;border-radius:4px;background:none;color:var(--fg3);font-family:var(--mono);font-size:12px;transition:background .15s var(--ease),color .15s var(--ease)}
-.seg button[aria-pressed="true"]{background:var(--ink4);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line3)}
+.seg button[aria-pressed="true"],.seg a[aria-current="page"]{background:var(--ink4);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line3)}
+.seg a{display:inline-flex;align-items:center;height:26px;padding:0 10px;border-radius:4px;color:var(--fg3);font-family:var(--mono);font-size:12px;text-decoration:none;transition:background .15s var(--ease),color .15s var(--ease)}
+.seg a:hover{color:var(--fg)}
+nav.seg{max-width:100%;overflow-x:auto;scrollbar-width:none}
 .rowline{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .hint{font-size:12px;color:var(--fg3);margin:0}
 .popover{position:absolute;right:12px;top:44px;width:280px;border:1px solid var(--line2);border-radius:var(--R);background:var(--ink2);box-shadow:0 24px 60px -12px rgba(0,0,0,.8);z-index:30;animation:pop .16s var(--spring);overflow:hidden}

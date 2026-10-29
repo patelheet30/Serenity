@@ -101,7 +101,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(TicketRepository, ticket_repo)
     client.set_type_dependency(TicketService, ticket_svc)
 
-    await metrics_server.start(api=build_api(bot, repo))
+    await metrics_server.start(api=build_api(bot, repo, ticket_svc))
 
     BOT_INFO.info({"version": "1.0.0", "environment": os.getenv("ENVIRONMENT", "local")})
 
