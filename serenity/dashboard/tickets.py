@@ -120,6 +120,7 @@ from serenity.dashboard import (  # noqa: E402, F401  # registers their routes
     tickets_panels,
     tickets_queue,
     tickets_settings,
+    tickets_stats,
     tickets_tiers_hours,
     tickets_types,
 )

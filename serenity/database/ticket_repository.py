@@ -999,6 +999,94 @@ class TicketRepository:
         row = await pool.fetchrow("SELECT * FROM ticket_ratings WHERE ticket_id = $1", ticket_id)
         return dict(row) if row else None
 
+    # Stats
+
+    async def stats(
+        self, guild_id: int, type_ids: Optional[list[int]], since: int, now: int, /
+    ) -> dict[str, list[dict]]:
+        """What the dashboard's ticket stats are built from, for tickets of `type_ids` (None: all).
+
+        tickets: every open ticket and every one opened or closed since `since`, with its rating
+            and whether it was ever escalated or auto-closed.
+        stages:  per type and stage, how many tickets opened since `since` reached it and their
+            average time in it (summed per ticket; an open ticket's current stage counts until now).
+        staff:   per user and kind, distinct tickets since `since`: claimed (claims and assigns),
+            handled (credited on tickets closed since), assisted (credited without claiming) and
+            escalated_from (escalations they made).
+        csat:    per credited handler, their ratings on tickets closed since `since`.
+        """
+        pool = self._require_pool()
+        scope = "t.guild_id = $1 AND ($2::bigint[] IS NULL OR t.type_id = ANY($2))"
+        args = (guild_id, type_ids, since)
+        tickets = await pool.fetch(
+            f"""SELECT t.id, t.type_id, t.tier_id, t.status, t.assignee_id, t.waiting_on, t.opened_at,
+                t.first_response_at, t.closed_at, r.rating,
+                EXISTS (SELECT 1 FROM ticket_events e WHERE e.ticket_id = t.id AND e.kind = 'escalated') AS escalated,
+                EXISTS (SELECT 1 FROM ticket_events e WHERE e.ticket_id = t.id AND e.kind = 'auto_closed') AS auto_closed
+            FROM tickets t LEFT JOIN ticket_ratings r ON r.ticket_id = t.id
+            WHERE {scope} AND (t.status = 'open' OR t.opened_at >= $3 OR t.closed_at >= $3)""",
+            *args,
+        )
+        # A stage event says where a ticket went and where it was, so the first one also dates the
+        # stage it opened at; a ticket never moved spent its whole life at its stage.
+        # ponytail: a transfer resets the stage without an event, so its old type's stages count here.
+        stages = await pool.fetch(
+            f"""WITH scoped AS (
+                SELECT t.id, t.type_id, t.stage, t.opened_at, COALESCE(t.closed_at, $4) AS ended
+                FROM tickets t WHERE {scope} AND t.opened_at >= $3
+            ), moves AS (
+                SELECT s.id, s.type_id, s.opened_at, s.ended, e.data->>'from' AS from_stage,
+                    e.data->>'to' AS to_stage, e.created_at,
+                    ROW_NUMBER() OVER w AS n, LEAD(e.created_at) OVER w AS next_at
+                FROM scoped s JOIN ticket_events e ON e.ticket_id = s.id AND e.kind = 'stage'
+                WINDOW w AS (PARTITION BY s.id ORDER BY e.created_at, e.id)
+            ), spans AS (
+                SELECT type_id, id, from_stage AS stage, created_at - opened_at AS seconds
+                FROM moves WHERE n = 1 AND from_stage IS NOT NULL
+                UNION ALL
+                SELECT type_id, id, to_stage, COALESCE(next_at, ended) - created_at FROM moves
+                UNION ALL
+                SELECT type_id, id, stage, ended - opened_at FROM scoped s
+                WHERE stage IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM ticket_events e WHERE e.ticket_id = s.id AND e.kind = 'stage')
+            )
+            SELECT type_id, stage, COUNT(*) AS reached, AVG(seconds)::float AS avg_seconds
+            FROM (SELECT type_id, id, stage, SUM(seconds) AS seconds FROM spans GROUP BY type_id, id, stage) x
+            GROUP BY type_id, stage""",
+            *args,
+            now,
+        )
+        staff = await pool.fetch(
+            f"""SELECT user_id, kind, COUNT(DISTINCT ticket_id) AS n FROM (
+                SELECT (e.data->>'assignee')::bigint AS user_id, 'claimed' AS kind, t.id AS ticket_id
+                FROM ticket_events e JOIN tickets t ON t.id = e.ticket_id
+                WHERE {scope} AND e.kind IN ('claimed', 'assigned') AND e.created_at >= $3
+                UNION ALL
+                SELECT e.actor_id, 'escalated_from', t.id
+                FROM ticket_events e JOIN tickets t ON t.id = e.ticket_id
+                WHERE {scope} AND e.kind = 'escalated' AND e.created_at >= $3
+                UNION ALL
+                SELECT h.user_id, k.kind, t.id
+                FROM ticket_handlers h JOIN tickets t ON t.id = h.ticket_id,
+                    LATERAL (VALUES ('handled'), ('assisted')) k (kind)
+                WHERE {scope} AND h.credited AND t.status = 'closed' AND t.closed_at >= $3
+                    AND (k.kind = 'handled' OR h.role = 'assisted')
+            ) x WHERE user_id IS NOT NULL GROUP BY user_id, kind""",
+            *args,
+        )
+        csat = await pool.fetch(
+            f"""SELECT u.user_id, AVG(r.rating)::float AS avg, COUNT(*) AS n
+            FROM ticket_ratings r JOIN tickets t ON t.id = r.ticket_id, unnest(r.handler_ids) u (user_id)
+            WHERE {scope} AND t.status = 'closed' AND t.closed_at >= $3 GROUP BY u.user_id""",
+            *args,
+        )
+        return {
+            "tickets": [dict(r) for r in tickets],
+            "stages": [dict(r) for r in stages],
+            "staff": [dict(r) for r in staff],
+            "csat": [dict(r) for r in csat],
+        }
+
     # Blacklist
 
     async def blacklist_add(

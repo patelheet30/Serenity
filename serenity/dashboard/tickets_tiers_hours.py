@@ -165,7 +165,11 @@ async def order_tiers(request: web.Request) -> web.Response:
     repo = request.app[TICKET_SVC].repo
     tiers = await repo.list_tiers(ticket_type["id"])
     ids = data.get("tier_ids")
-    if not isinstance(ids, list) or sorted(ids) != sorted(t["id"] for t in tiers):
+    if (
+        not isinstance(ids, list)
+        or not all(type(i) is int for i in ids)
+        or sorted(ids) != sorted(t["id"] for t in tiers)
+    ):
         raise ApiError(422, "invalid", "tier_ids must list each of the type's tiers once.")
     await repo.reorder_tiers(ticket_type["id"], ids)
     names = {t["id"]: t["name"] for t in tiers}
@@ -199,7 +203,7 @@ def _hours_changes(data: dict, settings: dict) -> dict[str, Any]:
     if "schedule" in data:
         changes["schedule"] = _schedule(data["schedule"])
     if "timezone" in data:
-        if data["timezone"] not in available_timezones():
+        if not isinstance(data["timezone"], str) or data["timezone"] not in available_timezones():
             raise ApiError(422, "invalid", f"“{data['timezone']}” isn't a timezone I know. Pick one from the list.")
         changes["timezone"] = data["timezone"]
     if "off_hours_message" in data:
