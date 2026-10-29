@@ -230,8 +230,6 @@ PLACEHOLDERS = {
     "{number}": "1",
     "{user_id}": str(USER),
     "{type_id}": "1",
-
-
     "{panel_id}": "1",
     "{pack}": "game",
 }
