@@ -201,6 +201,9 @@ async def client_for():
         pool = repo.pool if repo else None
         modules = ModuleManager(repo) if repo else MagicMock()
         tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, modules)
+
+
+        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, MagicMock())
         api = build_api(bot, repo or MagicMock(pool=None), tickets)
         api[SESSIONS] = FakeSessions()
         api[CHANGES] = MagicMock()  # ChangeLog has its own tests

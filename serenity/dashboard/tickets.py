@@ -116,3 +116,4 @@ async def list_types(request: web.Request) -> web.Response:
 
 
 from serenity.dashboard import tickets_settings  # noqa: E402,F401  (registers its routes)
+from serenity.dashboard import tickets_queue  # noqa: E402, F401  # registers its routes here
