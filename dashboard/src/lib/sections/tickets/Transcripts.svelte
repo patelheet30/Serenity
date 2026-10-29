@@ -44,7 +44,7 @@
 	$effect(() => {
 		const id = guildId;
 		let stale = false;
-		// A new server: drop the last one's rows and type picks (its ids mean nothing here).
+		// A new server: drop the last one's rows, type picks and name filters (its ids mean nothing here).
 		types = [];
 		picked = [];
 		opener = null;
