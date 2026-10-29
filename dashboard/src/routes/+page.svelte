@@ -3,12 +3,13 @@
 	import { api, inviteUrl, LOGIN_URL, type Me } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import Mark from '#lib/components/Mark.svelte';
+	import SiteFooter from '#lib/components/SiteFooter.svelte';
 	import { MOD } from '#lib/util.ts';
 
 	const SITE = import.meta.env.VITE_SITE_URL ?? '';
 	const TITLE = 'Serenity: slowmode that breathes with your chat';
 	const DESCRIPTION =
-		'A Discord bot that eases slowmode up and down on its own as each channel gets busy or calms down. Audit logging and moderation cases included.';
+		'A Discord bot that eases slowmode up and down on its own as each channel gets busy or calms down. Support tickets, audit logging and moderation cases included.';
 
 	// Logged-in visitors get "Open dashboard" instead of the login button.
 	let me: Me | null = $state(null);
@@ -119,8 +120,8 @@
 		<div>
 			<h1>Slowmode that <em>breathes</em> with your chat.</h1>
 			<p>
-				Serenity watches each channel’s pace and eases slowmode up and down on its own. Logging
-				and moderation cases included.
+				Serenity watches each channel’s pace and eases slowmode up and down on its own. Support
+				tickets, logging and moderation cases included.
 			</p>
 			<div class="ctas">
 				<a class="btn pri lg" href={inviteUrl()} data-sveltekit-reload>Add to Discord <Icon name="arrow" /></a>
@@ -201,6 +202,13 @@
 		<h2>The rest of the toolkit is just as quiet.</h2>
 		<div class="feat">
 			<article>
+				<span class="k">tickets</span>
+				<div>
+					<h3>Support tickets, start to finish</h3>
+					<p>Panels with forms, stages, escalation tiers and support hours. Transcripts, ratings and webhooks when a ticket closes. Run it from Discord or the dashboard.</p>
+				</div>
+			</article>
+			<article>
 				<span class="k">logging</span>
 				<div>
 					<h3>Audit logs, routed</h3>
@@ -218,7 +226,7 @@
 				<span class="k">{MOD} K</span>
 				<div>
 					<h3>Every setting is one keystroke away</h3>
-					<p>Type “ignore #bots for message” or “case 1042”. The dashboard does the rest.</p>
+					<p>Type “claim 142”, “ignore #bots for message” or “case 1042”. The dashboard does the rest.</p>
 				</div>
 			</article>
 		</div>
@@ -230,7 +238,4 @@
 	</section>
 </main>
 
-<footer class="lfoot">
-	<span>Serenity</span>
-	<a href="https://github.com/patelheet30/Serenity/blob/main/privacy.md" class="linkish">Privacy</a>
-</footer>
+<SiteFooter />

@@ -2,6 +2,7 @@
 	import '#lib/styles.css';
 	import { goto } from '$app/navigation';
 	import { LOGIN_URL } from '#lib/api.ts';
+	import CookieNotice from '#lib/components/CookieNotice.svelte';
 	import Palette from '#lib/components/Palette.svelte';
 	import ShortcutSheet from '#lib/components/ShortcutSheet.svelte';
 	import Toasts from '#lib/components/Toasts.svelte';
@@ -62,3 +63,4 @@
 <Palette />
 <ShortcutSheet />
 <Toasts />
+<CookieNotice />
