@@ -131,6 +131,7 @@ async def stats(request: web.Request) -> web.Response:
                     "avg_seconds": stages[ty["id"]].get(s["name"], {}).get("avg_seconds"),
                 }
                 for s in ty["stages"]
+                if access.manager or ty["id"] in access.staff_types  # tier-only staff: none, so it's hidden
             ],
         }
 

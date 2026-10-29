@@ -119,10 +119,15 @@ async def test_staff_see_their_types_and_their_own_row(client_for, pg_repo, tick
     manager = await stats(await client_for(make_bot(), pg_repo))
     assert manager["open"] == 3 and len(manager["staff"]) == 2
 
-    # A tier role alone: just the tickets with that tier (#2), and only its tier's ratings.
+    # A tier role alone: just the tickets with that tier (#2), only its tier's ratings, and no stage
+    # figures (they're counted over every tier).
+    stage = {"name": "New", "color": None, "terminal": False, "auto_close": True}
+    await ticket_guild.repo.update_type(GUILD, ticket_guild.tickets[0]["type_id"], stages=[stage])
+    assert [s["name"] for s in (await stats(await client_for(make_bot(), pg_repo)))["types"][0]["stages"]] == ["New"]
     senior = await stats(await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[SENIOR_ROLE]), pg_repo))
     assert senior["open"] == senior["opened"] == 1 and senior["types"][0]["open"] == 1
     assert [t["name"] for t in senior["tiers"]] == ["Seniors"]
+    assert senior["types"][0]["stages"] == []
 
     resp = await staff.get(f"/api/guilds/{GUILD}/tickets/stats?days=12", cookies=COOKIES)
     assert resp.status == 422
