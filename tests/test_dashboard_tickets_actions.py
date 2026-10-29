@@ -190,3 +190,56 @@ async def test_conversation_preview_reads_discord(client_for, pg_repo, ticket_gu
     status, body = await call(client, "GET", "1/messages")
     assert status == 200 and [m["content"] for m in body] == ["msg 1", "msg 2"]
     assert body[0]["id"] == str(2**60 + 1) and body[0]["author"]["id"] == str(USER + 1)
+
+
+@pytest.mark.asyncio
+async def test_slow_renames_go_to_the_background_only_up_to_a_cap(client_for, pg_repo, ticket_guild, monkeypatch):
+    import asyncio
+
+    from serenity.dashboard import tickets_actions
+
+    bot = make_bot()
+    client = await setup(client_for, pg_repo, ticket_guild, bot)
+
+    async def slow_rename(*_, **__):
+        await asyncio.sleep(0.05)
+
+    bot.rest.edit_channel = AsyncMock(side_effect=slow_rename)
+    monkeypatch.setattr(tickets_actions, "RENAME_WAIT", 0.01)
+    status, body = await call(client, "POST", "1/priority", {"priority": "high"})
+    assert status == 200 and body["renaming"] is True  # finishes in the background
+    monkeypatch.setattr(tickets_actions, "MAX_RENAMES", len(tickets_actions._renames))
+    status, body = await call(client, "POST", "3/priority", {"priority": "urgent"})
+    assert status == 200 and not body.get("renaming")  # at the cap: waited for in the request
+    await asyncio.gather(*tickets_actions._renames)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_request_still_tracks_its_rename(client_for, pg_repo, ticket_guild, monkeypatch):
+    import asyncio
+
+    import aiohttp
+
+    from serenity.dashboard import tickets_actions
+
+    bot = make_bot()
+    client = await setup(client_for, pg_repo, ticket_guild, bot)
+    renamed = asyncio.Event()
+    async def slow_rename(*_, **__):
+        await renamed.wait()
+
+    bot.rest.edit_channel = AsyncMock(side_effect=slow_rename)
+
+    async def client_left(*_, **__):  # the request is cancelled while it waits on Discord
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tickets_actions.asyncio, "wait", client_left)
+    with pytest.raises(aiohttp.ServerDisconnectedError):  # the handler was cancelled
+        await client.post(
+            f"/api/guilds/{GUILD}/tickets/1/priority", json={"priority": "high"}, headers=HEADERS, cookies=COOKIES
+        )
+    [task] = tickets_actions._renames  # but the change carries on, tracked
+    assert not task.done()
+    renamed.set()
+    await task
+    assert not tickets_actions._renames  # and is dropped once it finishes

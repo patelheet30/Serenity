@@ -157,16 +157,6 @@ class TicketWebhooks:
         await check_url(url)
         return await self.repo.add_webhook(guild_id, url, secrets.token_hex(32), events, type_id)
 
-    async def edit(self, guild_id: int, webhook_id: int, **values) -> Optional[dict]:
-        """Change url, events or type_id, checking a new URL as `add` does; None if it's gone."""
-        if "url" in values:
-            await check_url(values["url"])
-        return await self.repo.update_webhook(guild_id, webhook_id, **values)
-
-    async def rotate(self, guild_id: int, webhook_id: int) -> Optional[dict]:
-        """Give a webhook a new secret; the old one stops working at once. None if it's gone."""
-        return await self.repo.update_webhook(guild_id, webhook_id, secret=secrets.token_hex(32))
-
     def dispatch(
         self, ticket: dict, ticket_type: dict, kind: str, actor_id: Optional[int], detail: Optional[str]
     ) -> None:
@@ -196,13 +186,9 @@ class TicketWebhooks:
         error: Optional[str] = None
         for attempt, delay in enumerate(delays, 1):
             await asyncio.sleep(delay)
-            # Removing a webhook stops its pending retries too; editing or rotating it moves them
-            # to the new URL and secret.
-            if attempt > 1:
-                current = await self.repo.get_webhook(hook["guild_id"], hook["id"])
-                if current is None:
-                    return "Webhook was removed."
-                hook = current
+            # Removing a webhook stops its pending retries too.
+            if attempt > 1 and await self.repo.get_webhook(hook["guild_id"], hook["id"]) is None:
+                return "Webhook was removed."
             status, latency, error = await self.post(hook, event, delivery_id, body)
             await self.repo.update_delivery(delivery_id, attempt, status, latency, error)
             if error is None:

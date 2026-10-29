@@ -36,24 +36,11 @@ def _csat(ratings: list[int], asked: int) -> dict[str, Any]:
     }
 
 
-def _summary(rows: list[dict], since: int, settings: dict, types: dict[int, dict]) -> dict[str, Any]:
+def _summary(rows: list[dict], since: int, types: dict[int, dict]) -> dict[str, Any]:
     """Counts, times and ratings for a set of the repository's stats ticket rows."""
     opened = [t for t in rows if t["opened_at"] >= since]
     closed = [t for t in rows if t["closed_at"] and t["closed_at"] >= since and t["status"] == "closed"]
-    tz = settings.get("timezone", "UTC")
-    raw, business = [], []
-    for t in opened:
-        if t["first_response_at"]:
-            raw.append(t["first_response_at"] - t["opened_at"])
-            schedule = effective_schedule(types[t["type_id"]]["schedule"], settings)
-            business.append(
-                business_seconds_between(
-                    schedule,
-                    tz,
-                    datetime.fromtimestamp(t["opened_at"], timezone.utc),
-                    datetime.fromtimestamp(t["first_response_at"], timezone.utc),
-                )
-            )
+    answered = [t for t in opened if t["first_response_at"]]
     open_now = [t for t in rows if t["status"] == "open"]
     return {
         "open": len(open_now),
@@ -63,7 +50,10 @@ def _summary(rows: list[dict], since: int, settings: dict, types: dict[int, dict
         "closed": len(closed),
         "auto_closed": sum(t["auto_closed"] for t in closed),
         "escalated": sum(t["escalated"] for t in opened),
-        "first_response": {"raw": _times(raw), "business": _times(business)},
+        "first_response": {
+            "raw": _times([t["first_response_at"] - t["opened_at"] for t in answered]),
+            "business": _times([t["business_response"] for t in answered]),
+        },
         "time_to_close": _times([t["closed_at"] - t["opened_at"] for t in closed]),
         "csat": _csat(
             [t["rating"] for t in closed if t["rating"] is not None],
@@ -86,8 +76,18 @@ async def stats(request: web.Request) -> web.Response:
     data = await request.app[TICKET_SVC].repo.stats(
         guild_id(request), None if access.manager else sorted(types), since, now
     )
-    rows = [t for t in data["tickets"] if t["type_id"] in types]  # types deleted since don't show
+    # Types deleted since don't show; tier-only staff count just the tickets with their tier.
+    rows = [t for t in data["tickets"] if t["type_id"] in types and access.can_see(t, types[t["type_id"]])]
     settings = await ticket_settings(request)
+    tz = settings.get("timezone", "UTC")
+    for t in rows:  # once per ticket: both the totals and the per-type summary read it
+        if t["first_response_at"] and t["opened_at"] >= since:
+            t["business_response"] = business_seconds_between(
+                effective_schedule(types[t["type_id"]]["schedule"], settings),
+                tz,
+                datetime.fromtimestamp(t["opened_at"], timezone.utc),
+                datetime.fromtimestamp(t["first_response_at"], timezone.utc),
+            )
 
     daily: dict[int, Counter] = defaultdict(Counter)
     for t in rows:
@@ -97,8 +97,9 @@ async def stats(request: web.Request) -> web.Response:
             daily[t["closed_at"] // 86400]["closed"] += 1
 
     stages: dict[int, dict[str, dict]] = defaultdict(dict)
-    for s in data["stages"]:
-        stages[s["type_id"]][s["stage"]] = s
+    for s in data["stages"]:  # counted in SQL over every tier, so only for the type's own staff
+        if access.manager or s["type_id"] in access.staff_types:
+            stages[s["type_id"]][s["stage"]] = s
 
     by_tier: dict[Optional[int], list[dict]] = defaultdict(list)
     for t in rows:
@@ -113,9 +114,12 @@ async def stats(request: web.Request) -> web.Response:
     for row in data["csat"]:
         people[row["user_id"]]["csat"] = {"avg": row["avg"], "count": row["n"]}
 
+    by_type: dict[int, list[dict]] = defaultdict(list)
+    for t in rows:
+        by_type[t["type_id"]].append(t)
+
     def type_stats(ty: dict) -> dict[str, Any]:
-        mine = [t for t in rows if t["type_id"] == ty["id"]]
-        summary = _summary(mine, since, settings, types)
+        summary = _summary(by_type[ty["id"]], since, types)
         return {
             **_type_json(ty),
             **summary,
@@ -127,13 +131,14 @@ async def stats(request: web.Request) -> web.Response:
                     "avg_seconds": stages[ty["id"]].get(s["name"], {}).get("avg_seconds"),
                 }
                 for s in ty["stages"]
+                if access.manager or ty["id"] in access.staff_types  # tier-only staff: none, so it's hidden
             ],
         }
 
     return web.json_response(
         {
             "days": days,
-            **_summary(rows, since, settings, types),
+            **_summary(rows, since, types),
             # One entry per UTC day, oldest first.
             "daily": [
                 {"day": (today - i) * 86400, **{k: daily[today - i][k] for k in ("opened", "closed")}}
@@ -152,6 +157,7 @@ async def stats(request: web.Request) -> web.Response:
                 }
                 for ty in types.values()
                 for tier in ty["tiers"]
+                if access.manager or ty["id"] in access.staff_types or tier["id"] in access.tiers
             ],
             "staff": sorted(
                 (

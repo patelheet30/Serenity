@@ -50,7 +50,8 @@
 			api<Modules>(`${g}/modules`).then(async (modules) => ({
 				modules,
 				// Only while Tickets is on, so other servers skip the stats query.
-				tickets: modules.enabled.tickets ? await api<Data['tickets']>(`${g}/tickets/stats?days=7`) : null
+				// Optional: a failing tickets pane mustn't take the rest of the page with it.
+				tickets: modules.enabled.tickets ? await api<Data['tickets']>(`${g}/tickets/stats?days=7`).catch(() => null) : null
 			})),
 			api<Data['logging']>(`${g}/logging`),
 			api<Change[]>(`${g}/slowmode/history`),

@@ -176,16 +176,18 @@ async def login(request: web.Request) -> web.Response:
         response.set_cookie(CONSENT_COOKIE, "1", max_age=600, **_cookie_args(request))
     else:  # a fresh login the user started gets its own consent retry, and its own next page
         response.del_cookie(CONSENT_COOKIE, path="/")
-        if _local_path(next_path := request.query.get("next", "")):
-            response.set_cookie(NEXT_COOKIE, next_path, max_age=600, **_cookie_args(request))
+        if (ticket_id := _transcript_id(request.query.get("next", ""))) is not None:
+            response.set_cookie(NEXT_COOKIE, str(ticket_id), max_age=600, **_cookie_args(request))
         else:
             response.del_cookie(NEXT_COOKIE, path="/")
     raise response
 
 
-def _local_path(path: str) -> bool:
-    """A page of the dashboard itself, like /transcripts/12, so ?next= can't lead off-site."""
-    return re.fullmatch(r"/(?!/)[\w/-]*", path) is not None
+def _transcript_id(path: str) -> Optional[int]:
+    """The ticket id in a transcript page's path (/transcripts/12), the one page login comes back
+    to; only the number is kept, so ?next= can't lead anywhere else."""
+    match = re.fullmatch(r"/transcripts/(\d{1,19})", path)
+    return int(match[1]) if match else None
 
 
 async def callback(request: web.Request) -> web.Response:
@@ -212,8 +214,9 @@ async def callback(request: web.Request) -> web.Response:
         raise web.HTTPFound(f"{base}/?login=failed") from None
 
     token = await request.app[SESSIONS].create(user, tokens)
-    next_path = request.cookies.get(NEXT_COOKIE, "")
-    response = web.HTTPFound(f"{base}{next_path if _local_path(next_path) else '/servers'}")
+    ticket_id = request.cookies.get(NEXT_COOKIE, "")
+    next_path = f"/transcripts/{int(ticket_id)}" if ticket_id.isdecimal() else "/servers"
+    response = web.HTTPFound(f"{base}{next_path}")
     response.set_cookie(SESSION_COOKIE, token, max_age=7 * 24 * 3600, **_cookie_args(request))
     response.del_cookie(STATE_COOKIE, path="/")
     response.del_cookie(CONSENT_COOKIE, path="/")

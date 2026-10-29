@@ -44,6 +44,13 @@
 	$effect(() => {
 		const id = guildId;
 		let stale = false;
+		// A new server: drop the last one's rows, type picks and name filters (its ids mean nothing here).
+		types = [];
+		picked = [];
+		opener = null;
+		staff = null;
+		rows = null;
+		next = null;
 		api<Type[]>(`/guilds/${id}/tickets/types`).then((t) => !stale && (types = t), (e) => !stale && onerror(e));
 		return () => (stale = true);
 	});

@@ -141,8 +141,33 @@ async def test_a_panel_that_cant_be_posted_isnt_kept(manager):
     assert await manager.svc.repo.list_panels(GUILD) == []
 
 
+@pytest.mark.asyncio
+async def test_an_edit_discord_refuses_keeps_the_old_panel(manager):
+    t = await manager.svc.repo.create_type(GUILD, "Support")
+    body = {"channel_id": str(TEXT_CHANNEL), "title": "Help", "style": "buttons", "type_ids": [t["id"]]}
+    status, panel = await manager("POST", "/panels", body)
+    assert status == 201
+    manager.bot.rest.edit_message.side_effect = hikari.ForbiddenError("", {}, b"")
+    status, _ = await manager("PATCH", f"/panels/{panel['id']}", {"title": "New", "style": "menu"})
+    assert status == 422
+    kept = await manager.svc.repo.get_panel(GUILD, panel["id"])
+    assert (kept["title"], kept["style"], kept["message_id"]) == ("Help", "buttons", int(panel["message_id"]))
+
+
 def test_panel_limits_match_the_command():
     from serenity.extensions import tickets
 
-    assert tickets_panels.STYLES == tuple(tickets.PANEL_STYLES.values())
-    assert tickets_panels.MAX_PANEL_TYPES == tickets.MAX_PANEL_TYPES
+    assert tickets_panels.PANEL_STYLES is tickets.PANEL_STYLES  # one list for both
+    assert tickets_panels.MAX_PANEL_TYPES == tickets.MAX_PANEL_TYPES == 25
+
+
+def test_every_pack_passes_the_type_and_panel_rules():
+    from serenity.services.ticket_service import MAX_FIELDS, asked_fields
+
+    assert set(tickets_panels.PACKS) == {"game", "freelance", "community", "blank"}
+    for key, pack in tickets_panels.PACKS.items():
+        assert pack["panel"]["style"] in tickets_panels.PANEL_STYLES.values(), key
+        assert len(pack["types"]) <= tickets_panels.MAX_PANEL_TYPES, key
+        for spec in pack["types"]:
+            values = tickets_panels._pack_values(spec)  # set_field / with_stage raise on a bad pack
+            assert len(asked_fields(values)) <= MAX_FIELDS, (key, spec["name"])

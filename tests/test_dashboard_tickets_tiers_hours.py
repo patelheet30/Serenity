@@ -74,6 +74,7 @@ async def test_tier_ladder(tickets):
 
     order = f"/types/{support['id']}/tiers/order"
     assert (await tickets("PUT", order, {"tier_ids": [leads["id"], helpers["id"]]}))[0] == 422
+    assert (await tickets("PUT", order, {"tier_ids": [leads["id"], str(helpers["id"]), seniors["id"]]}))[0] == 422
     status, body = await tickets("PUT", order, {"tier_ids": [leads["id"], helpers["id"], seniors["id"]]})
     assert [(t["name"], t["position"]) for t in ladder(body)] == [("Leads", 1), ("Helpers", 2), ("Seniors", 3)]
     # The bot sees the new ladder: tickets start on the lowest tier, now Leads.
@@ -82,8 +83,30 @@ async def test_tier_ladder(tickets):
 
     status, body = await tickets("DELETE", f"/tiers/{leads['id']}")
     assert [t["name"] for t in ladder(body)] == ["Helpers", "Seniors"]
+    assert ladder(body)[0]["can_summon"] == []  # Helpers could summon Leads; still editable
+    assert (await tickets("PATCH", f"/tiers/{helpers['id']}", {"can_summon": [seniors["id"]]}))[0] == 200
     assert (await tickets("DELETE", f"/tiers/{leads['id']}"))[0] == 404
     assert (await tickets("POST", "/types/999999/tiers", {"name": "X", "role_ids": []}))[0] == 404
+
+
+@pytest.mark.asyncio
+async def test_add_tier_takes_the_next_rung_in_the_insert(tickets, monkeypatch):
+    repo, support = tickets.svc.repo, tickets.support
+    list_tiers = repo.list_tiers
+
+    async def raced(type_id, name):  # another manager adds a tier between the read and the insert
+        tiers = await list_tiers(type_id)
+        await repo.create_tier(type_id, name=name, role_ids=[OTHER_ROLE])
+        return tiers
+
+    path = f"/types/{support['id']}/tiers"
+    monkeypatch.setattr(repo, "list_tiers", lambda t: raced(t, "Leads"))
+    status, body = await tickets("POST", path, {"name": "Admins", "role_ids": [str(OTHER_ROLE)]})
+    assert status == 200
+    assert [(t["name"], t["position"]) for t in ladder(body)][2:] == [("Leads", 3), ("Admins", 4)]
+    monkeypatch.setattr(repo, "list_tiers", lambda t: raced(t, "Owners"))
+    status, body = await tickets("POST", path, {"name": "Owners", "role_ids": [str(OTHER_ROLE)]})
+    assert status == 409 and "a moment ago" in body["error"]["message"]
 
 
 def closed_today() -> str:
@@ -96,6 +119,7 @@ async def test_hours_validation(tickets):
     status, body = await tickets("PATCH", "/hours", {"schedule": "mon-fri 9-5"})
     assert status == 422 and "couldn't read" in body["error"]["message"]
     assert (await tickets("PATCH", "/hours", {"timezone": "Mars/Base"}))[0] == 422
+    assert (await tickets("PATCH", "/hours", {"timezone": []}))[0] == 422
     assert (await tickets("PATCH", "/hours", {"away": {"until": "2001-01-01 09:00"}}))[1]["error"][
         "message"
     ] == "That's in the past."

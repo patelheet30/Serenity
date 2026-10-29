@@ -110,6 +110,17 @@ async def test_list_filters_and_shows_only_visible_types(client, closed):
     assert await listed(await client(**NOBODY, roles=[SUPPORT_ROLE])) == [2, 1]
 
 
+@pytest.mark.asyncio
+async def test_list_skips_pages_a_tier_cannot_see(client, closed, monkeypatch):
+    monkeypatch.setattr("serenity.dashboard.tickets_transcripts.PAGE_SIZE", 1)
+    senior = await client(**NOBODY, roles=[SENIOR_ROLE])  # sees only #2
+    url = f"/api/guilds/{GUILD}/tickets/transcripts"
+    page = await (await senior.get(url, cookies=COOKIES)).json()
+    assert [t["number"] for t in page["transcripts"]] == [2] and page["next"] == 2
+    page = await (await senior.get(url, params={"before": "2"}, cookies=COOKIES)).json()
+    assert page == {"transcripts": [], "next": None}
+
+
 async def view(client, ticket, **kwargs):
     resp = await client.get(f"/api/transcripts/{ticket['id']}", **kwargs)
     return resp.status, await resp.json()
@@ -197,3 +208,4 @@ async def test_login_comes_back_to_the_transcript(client_for):
     assert NEXT_COOKIE not in client.session.cookie_jar.filter_cookies(client.make_url("/"))
     assert (await login("//evil.example")).endswith("/servers")
     assert (await login("https://evil.example")).endswith("/servers")
+    assert (await login("/servers/../x")).endswith("/servers")  # only transcript pages come back

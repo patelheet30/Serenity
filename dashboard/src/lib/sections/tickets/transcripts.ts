@@ -9,7 +9,7 @@ export type TranscriptRow = Retention & {
 	type: { id: number; name: string; emoji: string | null };
 	opener: TicketUser;
 	staff: TicketUser[];
-	outcome: 'staff' | 'opener' | 'auto';
+	outcome: keyof typeof OUTCOMES;
 	closed_at: number;
 	reason: string | null;
 	rating: number | null;

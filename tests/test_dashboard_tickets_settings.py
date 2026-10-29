@@ -64,7 +64,7 @@ async def test_defaults_on_an_empty_server(tickets):
     assert body["retention_days"] == 30 and body["rating_window_days"] == 7
     assert body["raid_limit"] == 0 and body["raid_window_minutes"] == 5
     assert body["required_role_id"] is None and body["log_channel_id"] is None
-    assert body["blacklist"] == []
+    assert body["blacklist"] == [] and body["blacklist_more"] is False
 
 
 @pytest.mark.asyncio
@@ -78,6 +78,8 @@ async def test_limits_match_the_slash_commands(tickets):
         assert status == 422, (key, bad)
     assert (await tickets("PATCH", "/settings", {}))[0] == 400
     assert (await tickets("PATCH", "/settings", {"raid_paused": True}))[0] == 422
+    limits = (await tickets("GET", "/settings"))[1]["limits"]  # what the page's inputs use
+    assert limits["retention_days"] == [7, 365] and limits["open_cooldown_minutes"] == [0, 1440]
 
 
 @pytest.mark.asyncio
@@ -158,6 +160,18 @@ async def test_blacklist(tickets):
     assert status == 200 and body["blacklist"] == []
     await svc.check_can_open(GUILD, member(), support)
     assert (await tickets("DELETE", f"/blacklist/{MEMBER}"))[0] == 404
+
+
+@pytest.mark.asyncio
+async def test_blacklist_shows_the_newest_and_says_there_are_more(tickets, monkeypatch):
+    from serenity.dashboard import tickets_settings
+
+    monkeypatch.setattr(tickets_settings, "BLACKLIST_SHOWN", 1)
+    await tickets("POST", "/blacklist", {"user_id": "5"})  # heap order says 5, only the tiebreaker says 6
+    await tickets("POST", "/blacklist", {"user_id": "6"})
+    await tickets.svc.repo.pool.execute("UPDATE ticket_blacklist SET created_at = 1")  # a sure tie
+    status, body = await tickets("GET", "/settings")
+    assert [b["user_id"] for b in body["blacklist"]] == ["6"] and body["blacklist_more"] is True  # ties: higher id
 
 
 @pytest.mark.asyncio

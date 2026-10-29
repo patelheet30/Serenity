@@ -64,11 +64,23 @@
 
 	async function patch(body: Record<string, unknown>) {
 		const r = await save(() => send<Hours>('PATCH', `/guilds/${guildId}/tickets/hours`, body));
-		if (r) load(r);
+		if (!r) return r;
+		if ('schedule' in body) load(r);
+		else {
+			// A timezone change keeps the unsaved drafts; an untouched away end is re-shown in the new zone.
+			if (data?.away && awayUntil === data.away.until_local) awayUntil = r.away?.until_local ?? '';
+			data = r;
+		}
 		return r;
 	}
 
-	const saveAll = () => patch({ schedule: gridText || null, off_hours_message: message.trim() || null, away: awayBody });
+	// What away mode to send, for Save and the preview: a saved end that has passed since loading has
+	// ended away mode, as the bot sees it (sending it would be refused as in the past).
+	function sentAway() {
+		const ended = !!data?.away?.until && data.away.until * 1000 <= Date.now() && awayUntil === data.away.until_local;
+		return ended ? null : awayBody;
+	}
+	const saveAll = () => patch({ schedule: gridText || null, off_hours_message: message.trim() || null, away: sentAway() });
 
 
 	// The preview is rendered by the bot from these drafts, 300 ms after the last edit.
@@ -77,7 +89,7 @@
 		const body = {
 			schedule: gridText || null,
 			off_hours_message: message.trim() || null,
-			away: awayOn ? { until: awayUntil || null, note: awayNote.trim() || null } : null,
+			away: sentAway(),
 			...(previewType ? { type_id: Number(previewType) } : {})
 		};
 		let stale = false;
