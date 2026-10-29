@@ -20,9 +20,8 @@ STAFF_ROLE = 801
 
 
 @pytest_asyncio.fixture
-async def manager(client_for, pg_repo, monkeypatch):
+async def manager(client_for, pg_repo):
     """call(method, path, body) as a manager; .bot and .svc are the Discord mock and service."""
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     bot = make_bot()
     bot.cache.get_roles_view_for_guild.return_value = {STAFF_ROLE: MagicMock()}
     bot.cache.get_me.return_value = None

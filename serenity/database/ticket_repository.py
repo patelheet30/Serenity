@@ -603,6 +603,14 @@ class TicketRepository:
                 tier_ids,
             )
 
+    async def guilds_with_types(self, guild_ids: list[int]) -> list[int]:
+        """Which of these servers have any ticket type, so can have ticket staff."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT DISTINCT guild_id FROM ticket_types WHERE guild_id = ANY($1::BIGINT[])", guild_ids
+        )
+        return [r["guild_id"] for r in rows]
+
     async def staff_roles(self, guild_id: int) -> list[dict]:
         """Every type's staff roles, one row per tier (tier_id NULL for a type without tiers)."""
         pool = self._require_pool()

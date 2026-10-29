@@ -8,7 +8,6 @@ from typing import Any, Optional
 
 from aiohttp import web
 
-from serenity.core.modules import ModuleType, module_available
 from serenity.dashboard.auth import NotInstalledError, access_level
 from serenity.dashboard.common import (
     ACCESS,
@@ -137,7 +136,7 @@ async def _viewable(request: web.Request) -> tuple[dict, dict, str]:
     svc = request.app[TICKET_SVC]
     ticket_id = parse_int(request.match_info["ticket_id"], BIGINT_MAX)
     ticket = await svc.repo.get_ticket_by_id(ticket_id) if ticket_id else None
-    if ticket and module_available(ticket["guild_id"], ModuleType.TICKETS):
+    if ticket:
         transcript = await svc.repo.get_transcript(ticket["id"])
         viewer = await transcript_viewer(request, ticket) if transcript else None
         if viewer:

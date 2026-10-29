@@ -14,8 +14,6 @@ from aiohttp import web
 from serenity.core.modules import (
     MODULE_DEPENDENCIES,
     ModuleType,
-    available_modules,
-    module_available,
 )
 from serenity.dashboard.common import (
     BOT,
@@ -54,11 +52,10 @@ async def _modules_json(request: web.Request) -> dict[str, Any]:
     gid = guild_id(request)
     enabled = set(await request.app[MODULES].get_enabled_modules(gid))
     return {
-        "enabled": {m.value: m in enabled for m in available_modules(gid)},
+        "enabled": {m.value: m in enabled for m in ModuleType},
         "requires": {
             m.value: [d.value for d in deps]
             for m, deps in MODULE_DEPENDENCIES.items()
-            if module_available(gid, m)
         },
     }
 
@@ -75,8 +72,6 @@ async def put_module(request: web.Request) -> web.Response:
         module = ModuleType(request.match_info["module"])
     except ValueError:
         raise ApiError(404, "not_found", "No such module.") from None
-    if not module_available(guild_id(request), module):
-        raise ApiError(404, "not_found", "No such module.")
     enabled = bool_field(await read_json(request), "enabled")
     manager = request.app[MODULES]
     gid = guild_id(request)
@@ -323,7 +318,6 @@ async def _logging_json(request: web.Request) -> dict[str, Any]:
                 "enabled": bool(c and c["is_enabled"] and c["channel_id"]),
             }
             for t in LOG_TYPES
-            if t != "ticket" or module_available(gid, ModuleType.TICKETS)
         ],
         "ignores": [
             {
@@ -346,9 +340,7 @@ async def get_logging(request: web.Request) -> web.Response:
 async def put_log_type(request: web.Request) -> web.Response:
     """Set a log type's channel and/or turn it on or off (/logging <type>-log, enable, disable)."""
     log_type = request.match_info["log_type"]
-    if log_type not in LOG_TYPES or (
-        log_type == "ticket" and not module_available(guild_id(request), ModuleType.TICKETS)
-    ):
+    if log_type not in LOG_TYPES:
         raise ApiError(404, "not_found", "No such log type.")
     data = await read_json(request)
     gid = guild_id(request)

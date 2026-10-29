@@ -5,7 +5,6 @@ from serenity.core.modules import (
     ModuleManager,
     ModuleNotEnabledError,
     ModuleType,
-    available_modules,
 )
 from serenity.utils.errors import ConfigurationError
 from serenity.utils.errors import PermissionError as SerenityPermissionError
@@ -46,7 +45,7 @@ async def module_names(data: arc.AutocompleteData[arc.GatewayClient, str]) -> di
         return {}
     typed = (data.focused_value or "").lower()
     return {
-        m.value.title(): m.value for m in available_modules(data.guild_id) if typed in m.value
+        m.value.title(): m.value for m in ModuleType if typed in m.value
     }
 
 
@@ -74,10 +73,9 @@ async def list_modules(
             color=hikari.Color(0x5865F2),
         )
 
-        core_modules = available_modules(ctx.guild_id)
         core_status = []
 
-        for mod in core_modules:
+        for mod in ModuleType:
             status = "✅ Enabled" if mod in enabled_set else "❌ Disabled"
             deps = manager.get_dependencies(mod)
             dep_text = f" (Require: {', '.join(dep.value for dep in deps)})" if deps else ""
@@ -134,7 +132,7 @@ async def enable_module(
         return
 
     try:
-        if module not in {m.value for m in available_modules(ctx.guild_id)}:
+        if module not in {m.value for m in ModuleType}:
             raise ConfigurationError(f"There's no module called '{module}'. See `/module list`.")
         module_type = ModuleType(module)
 
@@ -226,7 +224,7 @@ async def disable_module(
         return
 
     try:
-        if module not in {m.value for m in available_modules(ctx.guild_id)}:
+        if module not in {m.value for m in ModuleType}:
             raise ConfigurationError(f"There's no module called '{module}'. See `/module list`.")
         module_type = ModuleType(module)
 

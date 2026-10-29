@@ -19,7 +19,7 @@
 		cases: { cases: Case[] };
 		analytics: { changes: Record<'6h' | '24h', number> };
 		stats: { active: { timeouts: number; warnings: number } };
-		/** Where Tickets is available: the ticket stats' counts. */
+		/** The ticket stats' counts; shown while the Tickets module is on. */
 		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number } | null;
 	};
 
@@ -27,9 +27,8 @@
 		guildId,
 		guildName,
 		channels,
-		tickets,
 		onerror
-	}: { guildId: string; guildName: string; channels: Channel[]; tickets: boolean; onerror: (e: unknown) => void } = $props();
+	}: { guildId: string; guildName: string; channels: Channel[]; onerror: (e: unknown) => void } = $props();
 
 	const MODULES: [string, IconName][] = [
 		['slowmode', 'slowmode'],
@@ -48,16 +47,19 @@
 		const g = `/guilds/${id}`;
 		Promise.all([
 			api<Slowmode>(`${g}/slowmode`),
-			api<Modules>(`${g}/modules`),
+			api<Modules>(`${g}/modules`).then(async (modules) => ({
+				modules,
+				// Only while Tickets is on, so other servers skip the stats query.
+				// Optional: a failing tickets pane mustn't take the rest of the page with it.
+				tickets: modules.enabled.tickets ? await api<Data['tickets']>(`${g}/tickets/stats?days=7`).catch(() => null) : null
+			})),
 			api<Data['logging']>(`${g}/logging`),
 			api<Change[]>(`${g}/slowmode/history`),
 			api<Data['cases']>(`${g}/cases`),
 			api<Data['stats']>(`${g}/modstats?days=7`),
-			api<Data['analytics']>(`${g}/slowmode/analytics`),
-			// Optional: a failing tickets pane mustn't take the rest of the page with it.
-			tickets ? api<Data['tickets']>(`${g}/tickets/stats?days=7`).catch(() => null) : null
+			api<Data['analytics']>(`${g}/slowmode/analytics`)
 		]).then(
-			([slowmode, modules, logging, history, cases, stats, analytics, tickets]) =>
+			([slowmode, { modules, tickets }, logging, history, cases, stats, analytics]) =>
 				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics, tickets }),
 			(e) => !stale && onerror(e)
 		);

@@ -15,10 +15,10 @@ export const SECTIONS: Section[] = [
 	{ k: 'modules', name: 'Modules', key: 'm' }
 ];
 
-/** The sections a user can open: ticket staff get only Tickets, and Tickets is allowlisted. */
+/** The sections a user can open: ticket staff get only Tickets. */
 export function visibleSections(access: Access | null): Section[] {
 	if (access?.level === 'staff') return SECTIONS.filter((s) => s.k === 'tickets');
-	return SECTIONS.filter((s) => s.k !== 'tickets' || access?.tickets);
+	return SECTIONS;
 }
 
 export function sectionCommands(guildId: string, sections = SECTIONS): Command[] {
