@@ -74,18 +74,22 @@
 		return r;
 	}
 
-	const saveAll = () => patch({ schedule: gridText || null, off_hours_message: message.trim() || null, away: awayBody });
+	// What away mode to send, for Save and the preview: a saved end that has passed since loading has
+	// ended away mode, as the bot sees it (sending it would be refused as in the past).
+	function sentAway() {
+		const ended = !!data?.away?.until && data.away.until * 1000 <= Date.now() && awayUntil === data.away.until_local;
+		return ended ? null : awayBody;
+	}
+	const saveAll = () => patch({ schedule: gridText || null, off_hours_message: message.trim() || null, away: sentAway() });
 
 
 	// The preview is rendered by the bot from these drafts, 300 ms after the last edit.
 	$effect(() => {
 		if (!data) return;
-		// A saved away end that has passed since loading has ended away mode, as the bot sees it.
-		const ended = !!data.away?.until && data.away.until * 1000 <= Date.now() && awayUntil === data.away.until_local;
 		const body = {
 			schedule: gridText || null,
 			off_hours_message: message.trim() || null,
-			away: ended ? null : awayBody,
+			away: sentAway(),
 			...(previewType ? { type_id: Number(previewType) } : {})
 		};
 		let stale = false;
