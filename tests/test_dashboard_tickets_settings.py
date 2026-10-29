@@ -64,7 +64,7 @@ async def test_defaults_on_an_empty_server(tickets):
     assert body["retention_days"] == 30 and body["rating_window_days"] == 7
     assert body["raid_limit"] == 0 and body["raid_window_minutes"] == 5
     assert body["required_role_id"] is None and body["log_channel_id"] is None
-    assert body["blacklist"] == []
+    assert body["blacklist"] == [] and body["blacklist_more"] is False
 
 
 @pytest.mark.asyncio
@@ -160,6 +160,16 @@ async def test_blacklist(tickets):
     assert status == 200 and body["blacklist"] == []
     await svc.check_can_open(GUILD, member(), support)
     assert (await tickets("DELETE", f"/blacklist/{MEMBER}"))[0] == 404
+
+
+@pytest.mark.asyncio
+async def test_blacklist_shows_the_newest_and_says_there_are_more(tickets, monkeypatch):
+    from serenity.dashboard import tickets_settings
+
+    monkeypatch.setattr(tickets_settings, "BLACKLIST_SHOWN", 1)
+    await tickets("POST", "/blacklist", {"user_id": "5"})
+    status, body = await tickets("POST", "/blacklist", {"user_id": "6"})
+    assert len(body["blacklist"]) == 1 and body["blacklist_more"] is True  # same second: either
 
 
 @pytest.mark.asyncio
