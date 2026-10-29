@@ -115,6 +115,7 @@ async def list_types(request: web.Request) -> web.Response:
     return web.json_response([_type_json(t) for t in await visible_types(request)])
 
 
-# Route modules that add to the tables above.
-from serenity.dashboard import tickets_panels  # noqa: E402,F401
-from serenity.dashboard import tickets_queue  # noqa: E402, F401  # registers its routes here
+from serenity.dashboard import (  # noqa: E402, F401  # registers their routes
+    tickets_panels,
+    tickets_queue,
+)
