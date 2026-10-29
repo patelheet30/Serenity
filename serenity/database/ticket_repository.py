@@ -766,7 +766,7 @@ class TicketRepository:
                 JOIN tickets t ON t.id = tr.ticket_id
                 JOIN ticket_types ty ON ty.id = t.type_id
                 LEFT JOIN ticket_ratings r ON r.ticket_id = t.id
-                WHERE tr.guild_id = $1 AND t.status = 'closed'
+                WHERE t.guild_id = $1 AND t.status = 'closed'  -- tickets (guild_id, number) drives it
                     AND ($2::bigint[] IS NULL OR t.type_id = ANY($2))
                     AND ($3::bigint IS NULL OR t.opener_id = $3)
                     AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM ticket_handlers h

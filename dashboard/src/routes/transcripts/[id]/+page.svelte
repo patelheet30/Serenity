@@ -79,6 +79,7 @@
 		let stale = false;
 		t = null;
 		error = null;
+		broken = {};
 		(async () => {
 			try {
 				me = session.me ?? (session.me = await api<Me>('/me'));
@@ -141,12 +142,12 @@
 		if (!t) return;
 		const path = `/transcripts/${t.id}`;
 		if (what === 'delete') {
-			if ((await save(() => send('DELETE', path))) === undefined) return;
+			if ((await save(() => send('DELETE', path).then(() => true))) === undefined) return; // a 204: no body
 			t = null;
 			error = new ApiError(404, 'deleted', 'This transcript was deleted.');
 			return;
 		}
-		if ((await save(() => send('POST', `${path}/deletion-request`))) === undefined) return;
+		if ((await save(() => send('POST', `${path}/deletion-request`).then(() => true))) === undefined) return;
 		t.deletion_requested_at = Math.floor(Date.now() / 1000);
 		toast('Your request was sent to the server’s admins.');
 	}
