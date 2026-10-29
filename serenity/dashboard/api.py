@@ -18,7 +18,6 @@ from yarl import URL
 
 from serenity.core.modules import ModuleManager, ModuleType, module_available
 from serenity.dashboard import moderation, settings, tickets, tickets_transcripts
-from serenity.dashboard import moderation, settings, tickets
 from serenity.dashboard.auth import (
     DiscordOAuth,
     GuildAccess,
