@@ -936,7 +936,7 @@ class TicketRepository:
         """Who can't open tickets, newest first."""
         pool = self._require_pool()
         rows = await pool.fetch(
-            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2",
+            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC, user_id DESC LIMIT $2",
             guild_id,
             limit,
         )
