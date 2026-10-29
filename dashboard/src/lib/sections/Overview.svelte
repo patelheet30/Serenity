@@ -54,7 +54,8 @@
 			api<Data['cases']>(`${g}/cases`),
 			api<Data['stats']>(`${g}/modstats?days=7`),
 			api<Data['analytics']>(`${g}/slowmode/analytics`),
-			tickets ? api<Data['tickets']>(`${g}/tickets/stats?days=7`) : null
+			// Optional: a failing tickets pane mustn't take the rest of the page with it.
+			tickets ? api<Data['tickets']>(`${g}/tickets/stats?days=7`).catch(() => null) : null
 		]).then(
 			([slowmode, modules, logging, history, cases, stats, analytics, tickets]) =>
 				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics, tickets }),
