@@ -531,7 +531,6 @@ async def type_tier(
         if existing is None:
             if role is None:
                 raise TicketError("A new tier needs a role.")
-            values.setdefault("position", max((t["position"] for t in tiers), default=0) + 1)
             await repo.create_tier(ticket_type["id"], name=name, **values)
         elif values:
             await repo.update_tier(existing["id"], **values)
