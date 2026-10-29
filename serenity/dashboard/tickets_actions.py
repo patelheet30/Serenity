@@ -332,14 +332,22 @@ async def priority(request: web.Request) -> web.Response:
         request.app[TICKET_SVC].set_priority(ticket, ticket_type, level, request[SESSION].user_id)
     )
     # Bounded: never cancel a pending change to make room, wait for this one instead.
-    done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT if len(_renames) < MAX_RENAMES else None)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT if len(_renames) < MAX_RENAMES else None)
+    except asyncio.CancelledError:  # the client left: the change carries on, tracked and logged
+        _track(task)
+        raise
     if done:
         with bot_errors(request):
             task.result()
         return await respond(request, ticket)
+    _track(task)
+    return await respond(request, ticket, renaming=True)
+
+
+def _track(task: asyncio.Task) -> None:
     _renames.add(task)
     task.add_done_callback(_renamed)
-    return await respond(request, ticket, renaming=True)
 
 
 def _renamed(task: asyncio.Task) -> None:
