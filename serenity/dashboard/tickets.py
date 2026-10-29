@@ -117,3 +117,4 @@ async def list_types(request: web.Request) -> web.Response:
 
 # Route modules that add to the tables above.
 from serenity.dashboard import tickets_panels  # noqa: E402,F401
+from serenity.dashboard import tickets_queue  # noqa: E402, F401  # registers its routes here
