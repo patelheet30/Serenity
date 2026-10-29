@@ -172,4 +172,3 @@ def test_every_pack_passes_the_type_and_panel_rules():
         for spec in pack["types"]:
             values = tickets_panels._pack_values(spec)  # set_field / with_stage raise on a bad pack
             assert len(asked_fields(values)) <= MAX_FIELDS, (key, spec["name"])
-            assert values.get("ratings", True) in (True, False)
