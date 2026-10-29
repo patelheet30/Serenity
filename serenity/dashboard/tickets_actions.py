@@ -320,7 +320,8 @@ async def stage(request: web.Request) -> web.Response:
 @staff_routes.post(TICKET + "/priority")
 async def priority(request: web.Request) -> web.Response:
     """The priority is saved at once; the channel rename can wait up to 10 minutes on Discord, so
-    past RENAME_WAIT it finishes in the background (rolled back there if Discord refuses)."""
+    past RENAME_WAIT it finishes in the background (rolled back there if Discord refuses). Once
+    MAX_RENAMES are waiting in the background, a new one waits for its rename here instead."""
     ticket, ticket_type = await open_ticket(request)
     level = (await read_json(request)).get("priority")
     if level not in PRIORITIES:
