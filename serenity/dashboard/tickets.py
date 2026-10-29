@@ -115,4 +115,8 @@ async def list_types(request: web.Request) -> web.Response:
     return web.json_response([_type_json(t) for t in await visible_types(request)])
 
 
-from serenity.dashboard import tickets_settings, tickets_tiers_hours  # noqa: E402,F401
+from serenity.dashboard import (  # noqa: E402, F401  # registers their routes
+    tickets_queue,
+    tickets_settings,
+    tickets_tiers_hours,
+)
