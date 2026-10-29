@@ -320,7 +320,8 @@ async def stage(request: web.Request) -> web.Response:
 @staff_routes.post(TICKET + "/priority")
 async def priority(request: web.Request) -> web.Response:
     """The priority is saved at once; the channel rename can wait up to 10 minutes on Discord, so
-    past RENAME_WAIT it finishes in the background (rolled back there if Discord refuses)."""
+    past RENAME_WAIT it finishes in the background (rolled back there if Discord refuses). Once
+    MAX_RENAMES are waiting in the background, a new one waits for its rename here instead."""
     ticket, ticket_type = await open_ticket(request)
     level = (await read_json(request)).get("priority")
     if level not in PRIORITIES:
@@ -331,14 +332,22 @@ async def priority(request: web.Request) -> web.Response:
         request.app[TICKET_SVC].set_priority(ticket, ticket_type, level, request[SESSION].user_id)
     )
     # Bounded: never cancel a pending change to make room, wait for this one instead.
-    done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT if len(_renames) < MAX_RENAMES else None)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT if len(_renames) < MAX_RENAMES else None)
+    except asyncio.CancelledError:  # the client left: the change carries on, tracked and logged
+        _track(task)
+        raise
     if done:
         with bot_errors(request):
             task.result()
         return await respond(request, ticket)
+    _track(task)
+    return await respond(request, ticket, renaming=True)
+
+
+def _track(task: asyncio.Task) -> None:
     _renames.add(task)
     task.add_done_callback(_renamed)
-    return await respond(request, ticket, renaming=True)
 
 
 def _renamed(task: asyncio.Task) -> None:

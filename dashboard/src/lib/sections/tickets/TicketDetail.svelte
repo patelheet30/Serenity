@@ -162,9 +162,10 @@
 	}
 
 	async function setPriority(p: Priority, previous: Priority) {
+		const n = detail?.number;
 		const r = await act('priority', { priority: p });
 		if (!r) {
-			if (detail) detail.priority = previous;
+			if (n !== undefined && detail?.number === n) detail!.priority = previous; // not another ticket opened meanwhile
 		} else if (r.renaming) toast('Priority saved; Discord renames the channel within 10 minutes.');
 	}
 
