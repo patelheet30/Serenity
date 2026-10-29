@@ -971,11 +971,13 @@ class TicketRepository:
         )
         return status != "DELETE 0"
 
-    async def list_blacklist(self, guild_id: int) -> list[dict]:
+    async def list_blacklist(self, guild_id: int, limit: int) -> list[dict]:
         """Who can't open tickets, newest first."""
         pool = self._require_pool()
         rows = await pool.fetch(
-            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC", guild_id
+            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2",
+            guild_id,
+            limit,
         )
         return [dict(r) for r in rows]
 

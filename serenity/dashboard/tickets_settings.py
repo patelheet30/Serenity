@@ -52,7 +52,10 @@ def _user_name(request: web.Request, user_id: int) -> Optional[str]:
     return user.username if user else None
 
 
-async def _settings_json(request: web.Request) -> dict[str, Any]:
+BLACKLIST_SHOWN = 200  # ponytail: newest only; a paged list if servers block more than this
+
+
+async def _settings_json(request: web.Request, *, blacklist: bool = True) -> dict[str, Any]:
     gid = guild_id(request)
     svc = request.app[TICKET_SVC]
     settings = await svc.settings(gid)
@@ -60,6 +63,7 @@ async def _settings_json(request: web.Request) -> dict[str, Any]:
     role = settings.get("required_role_id")
     return {
         **{key: int(settings.get(key, default)) for key, (_, _, _, default) in SETTINGS.items()},
+        "limits": {key: [lo, hi] for key, (_, lo, hi, _) in SETTINGS.items()},  # the SPA's input bounds
         "raid_paused": bool(settings.get("raid_paused")),
         "required_role_id": str(role) if role else None,
         "log_channel_id": str(log["channel_id"]) if log and log["channel_id"] else None,
@@ -72,7 +76,7 @@ async def _settings_json(request: web.Request) -> dict[str, Any]:
                 "reason": b["reason"],
                 "created_at": b["created_at"],
             }
-            for b in await svc.repo.list_blacklist(gid)
+            for b in (await svc.repo.list_blacklist(gid, BLACKLIST_SHOWN) if blacklist else [])
         ],
     }
 
@@ -88,7 +92,7 @@ async def patch_settings(request: web.Request) -> web.Response:
     data = await read_json(request)
     gid = guild_id(request)
     svc = request.app[TICKET_SVC]
-    old = await _settings_json(request)
+    old = await _settings_json(request, blacklist=False)  # only for the change log
     changes: dict[str, Any] = {
         key: int_field(data, key, lo, hi) for key, (_, lo, hi, _) in SETTINGS.items() if key in data
     }

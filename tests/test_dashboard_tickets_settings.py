@@ -78,6 +78,8 @@ async def test_limits_match_the_slash_commands(tickets):
         assert status == 422, (key, bad)
     assert (await tickets("PATCH", "/settings", {}))[0] == 400
     assert (await tickets("PATCH", "/settings", {"raid_paused": True}))[0] == 422
+    limits = (await tickets("GET", "/settings"))[1]["limits"]  # what the page's inputs use
+    assert limits["retention_days"] == [7, 365] and limits["open_cooldown_minutes"] == [0, 1440]
 
 
 @pytest.mark.asyncio
