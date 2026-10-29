@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import hikari
 import toolbox
 
-from serenity.core.modules import ModuleManager, ModuleType, module_available
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.ticket_repository import TicketRepository
 from serenity.services.logging_service import LoggingService
@@ -1650,9 +1650,7 @@ class TicketService:
             raise TicketError("Only the person who opened this ticket can rate it.")
         guild_id = ticket["guild_id"]
         # The buttons are in a DM, so the guild checks other ticket buttons get happen here.
-        if not module_available(guild_id, ModuleType.TICKETS) or not await self.modules.is_enabled(
-            guild_id, ModuleType.TICKETS
-        ):
+        if not await self.modules.is_enabled(guild_id, ModuleType.TICKETS):
             raise TicketError("Tickets are turned off in that server.")
         ticket_type: dict = await self.repo.get_type(guild_id, ticket["type_id"])  # type: ignore[assignment]
         if ticket["status"] != "closed":

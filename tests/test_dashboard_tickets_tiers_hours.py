@@ -74,6 +74,7 @@ async def test_tier_ladder(tickets):
 
     order = f"/types/{support['id']}/tiers/order"
     assert (await tickets("PUT", order, {"tier_ids": [leads["id"], helpers["id"]]}))[0] == 422
+    assert (await tickets("PUT", order, {"tier_ids": [leads["id"], str(helpers["id"]), seniors["id"]]}))[0] == 422
     status, body = await tickets("PUT", order, {"tier_ids": [leads["id"], helpers["id"], seniors["id"]]})
     assert [(t["name"], t["position"]) for t in ladder(body)] == [("Leads", 1), ("Helpers", 2), ("Seniors", 3)]
     # The bot sees the new ladder: tickets start on the lowest tier, now Leads.
@@ -118,6 +119,7 @@ async def test_hours_validation(tickets):
     status, body = await tickets("PATCH", "/hours", {"schedule": "mon-fri 9-5"})
     assert status == 422 and "couldn't read" in body["error"]["message"]
     assert (await tickets("PATCH", "/hours", {"timezone": "Mars/Base"}))[0] == 422
+    assert (await tickets("PATCH", "/hours", {"timezone": []}))[0] == 422
     assert (await tickets("PATCH", "/hours", {"away": {"until": "2001-01-01 09:00"}}))[1]["error"][
         "message"
     ] == "That's in the past."

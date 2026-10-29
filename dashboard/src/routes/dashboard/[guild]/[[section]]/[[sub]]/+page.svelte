@@ -15,6 +15,8 @@
 	import Overview from '#lib/sections/Overview.svelte';
 	import Slowmode from '#lib/sections/Slowmode.svelte';
 	import Tickets from '#lib/sections/Tickets.svelte';
+	import { ticketCommands } from '#lib/sections/tickets/commands.ts';
+	import { registerCommands } from '#lib/palette.svelte.ts';
 	import { handleUnauthorized, loadGuilds, requireMe, session } from '#lib/session.svelte.ts';
 
 	const guildId = $derived(page.params.guild!);
@@ -56,6 +58,11 @@
 				(e) => !stale && fail(e)
 			);
 		return () => (stale = true);
+	});
+
+	// Ticket commands work from any section, for everyone who can open Tickets here.
+	$effect(() => {
+		if (access) return registerCommands(ticketCommands(guildId, access.level === 'manage'));
 	});
 
 	/** After the bot creates channels (logging setup), so pickers show them by name. */

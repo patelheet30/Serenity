@@ -609,7 +609,6 @@ async def test_ticket_events_reach_subscribed_webhooks(service: TicketService, m
 async def test_opener_rates_once_from_the_close_dm(service: TicketService, monkeypatch):
     from serenity.core.modules import ModuleType
 
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     await service.modules.enable_module(GUILD, ModuleType.TICKETS)
     service.logging = AsyncMock()
     service.cache.get_member.return_value = None

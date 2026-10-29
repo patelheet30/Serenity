@@ -19,10 +19,16 @@
 		cases: { cases: Case[] };
 		analytics: { changes: Record<'6h' | '24h', number> };
 		stats: { active: { timeouts: number; warnings: number } };
+		/** The ticket stats' counts; shown while the Tickets module is on. */
+		tickets: { open: number; unclaimed: number; waiting_on_staff: number; opened: number } | null;
 	};
 
-	let { guildId, guildName, channels, onerror }: { guildId: string; guildName: string; channels: Channel[]; onerror: (e: unknown) => void } =
-		$props();
+	let {
+		guildId,
+		guildName,
+		channels,
+		onerror
+	}: { guildId: string; guildName: string; channels: Channel[]; onerror: (e: unknown) => void } = $props();
 
 	const MODULES: [string, IconName][] = [
 		['slowmode', 'slowmode'],
@@ -41,15 +47,20 @@
 		const g = `/guilds/${id}`;
 		Promise.all([
 			api<Slowmode>(`${g}/slowmode`),
-			api<Modules>(`${g}/modules`),
+			api<Modules>(`${g}/modules`).then(async (modules) => ({
+				modules,
+				// Only while Tickets is on, so other servers skip the stats query.
+				// Optional: a failing tickets pane mustn't take the rest of the page with it.
+				tickets: modules.enabled.tickets ? await api<Data['tickets']>(`${g}/tickets/stats?days=7`).catch(() => null) : null
+			})),
 			api<Data['logging']>(`${g}/logging`),
 			api<Change[]>(`${g}/slowmode/history`),
 			api<Data['cases']>(`${g}/cases`),
 			api<Data['stats']>(`${g}/modstats?days=7`),
 			api<Data['analytics']>(`${g}/slowmode/analytics`)
 		]).then(
-			([slowmode, modules, logging, history, cases, stats, analytics]) =>
-				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics }),
+			([slowmode, { modules, tickets }, logging, history, cases, stats, analytics]) =>
+				!stale && (data = { slowmode, modules, logging, history, cases, stats, analytics, tickets }),
 			(e) => !stale && onerror(e)
 		);
 		// The pulse keeps moving; a failed refresh keeps the last numbers (the page loaded fine).
@@ -166,5 +177,27 @@
 				<EmptyState icon="cases">No cases yet.</EmptyState>
 			{/if}
 		</section>
+
+		{#if d.tickets}
+			{@const q = `/dashboard/${guildId}/tickets/queue`}
+			<section class="pane s12" aria-labelledby="tkT">
+				<div class="ph"><h2 id="tkT">Tickets</h2><span class="sp"></span><a class="btn sm ghost" href={q}>Open queue <Icon name="arrow" /></a></div>
+				<div class="tiles" style="border:0;border-radius:0">
+					<a class="tile" href={q}><b>{d.tickets.open}</b><span>Open now</span></a>
+					<a class="tile" href={q}><b class:acc={d.tickets.unclaimed}>{d.tickets.unclaimed}</b><span>Unclaimed</span></a>
+					<a class="tile" href={q}><b>{d.tickets.waiting_on_staff}</b><span>Waiting on staff</span></a>
+					<a class="tile" href="/dashboard/{guildId}/tickets/stats"><b>{d.tickets.opened}</b><span>Opened in 7 days</span></a>
+				</div>
+			</section>
+		{/if}
 	</div>
 {/if}
+
+<style>
+	.tiles a {
+		text-decoration: none;
+	}
+	.tiles a:hover {
+		background: var(--ink3);
+	}
+</style>

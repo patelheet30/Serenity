@@ -19,8 +19,7 @@ def default(command, option: str):
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setenv("TICKETS_GUILDS", "1")
+def client():
     client = arc.GatewayClient(hikari.GatewayBot("MTAzMDMwMjk0MDcyMTM4MzQ2OQ.Gx.x"))
     client.load_extension("serenity.extensions.tickets")
     yield client
@@ -39,26 +38,20 @@ def test_claim_modes_map_to_stored_values():
 
 
 @pytest.mark.asyncio
-async def test_module_names_hide_tickets_outside_the_allowlist(monkeypatch):
+async def test_module_names_list_every_module():
     from unittest.mock import MagicMock
 
     from serenity.core.modules import ModuleType
 
-    monkeypatch.setenv("TICKETS_GUILDS", "1, 2")
-    allowed = await modules_ext.module_names(MagicMock(guild_id=2, focused_value=""))
-    other = await modules_ext.module_names(MagicMock(guild_id=3, focused_value=""))
-    assert set(allowed.values()) == {m.value for m in ModuleType}
-    assert set(other.values()) == {m.value for m in ModuleType} - {"tickets"}
+    names = await modules_ext.module_names(MagicMock(guild_id=3, focused_value=""))
+    assert set(names.values()) == {m.value for m in ModuleType}
     for command in (modules_ext.enable_module, modules_ext.disable_module):
         assert command.options["module"].autocomplete_with is modules_ext.module_names
 
 
-def test_tickets_arent_loaded_without_an_allowlist(monkeypatch):
-    monkeypatch.delenv("TICKETS_GUILDS", raising=False)
-    client = arc.GatewayClient(hikari.GatewayBot("MTAzMDMwMjk0MDcyMTM4MzQ2OQ.Gx.x"))
-    client.load_extension("serenity.extensions.tickets")
-    assert "tickets" not in client.plugins
-    client.unload_extension("serenity.extensions.tickets")
+def test_ticket_commands_register_globally(client):
+    assert "tickets" in client.plugins
+    assert tickets.ticket.guilds is hikari.UNDEFINED and tickets.ticket_mod_action.guilds is hikari.UNDEFINED
 
 
 def test_panel_styles_map_to_stored_values():

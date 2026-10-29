@@ -4,6 +4,7 @@ Every /api/guilds/{guild_id}/... route goes through auth_middleware's guild chec
 never check access themselves. Ticket staff who can't manage the guild only get STAFF_HANDLERS.
 """
 
+import asyncio
 import os
 import re
 import secrets
@@ -16,7 +17,7 @@ import hikari
 from aiohttp import web
 from yarl import URL
 
-from serenity.core.modules import ModuleManager, ModuleType, module_available
+from serenity.core.modules import ModuleManager
 from serenity.dashboard import moderation, settings, tickets, tickets_transcripts
 from serenity.dashboard.auth import (
     DiscordOAuth,
@@ -132,8 +133,6 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
             raise ApiError(403, "forbidden", "You need Manage Server in this server.")
         if not access.manager and handler not in STAFF_HANDLERS:
             raise ApiError(403, "forbidden", "Ticket staff can only use Tickets in this server.")
-        if handler in TICKET_HANDLERS and not module_available(gid, ModuleType.TICKETS):
-            raise ApiError(404, "not_found", "Tickets aren't available in this server yet.")
         request[ACCESS_LEVEL] = "manage" if access.manager else "staff"
         request[PERMISSIONS] = member.permissions  # type: ignore[union-attr]  # set when access is
         request[TICKET_ACCESS] = access
@@ -275,22 +274,25 @@ async def guilds(request: web.Request) -> web.Response:
         }
         for g in user_guilds
     ]
-    for g in result:  # ticket staff: few guilds while Tickets is allowlisted, and cached
-        gid = int(g["id"])
-        if g["installed"] and not g["manageable"] and module_available(gid, ModuleType.TICKETS):
-            member = await request.app[ACCESS].member(session.user_id, gid)
-            g["staff"] = (await ticket_access(request.app, gid, member)).staff
+    # Ticket staff: only servers with ticket types can make someone staff, so only those cost
+    # a member lookup.
+    others = [int(g["id"]) for g in result if g["installed"] and not g["manageable"]]
+    with_types = set(await request.app[TICKET_SVC].repo.guilds_with_types(others)) if others else set()
+    async def is_staff(gid: int) -> bool:
+        member = await request.app[ACCESS].member(session.user_id, gid)
+        return (await ticket_access(request.app, gid, member)).staff
+
+    # Concurrent, so a member of many ticket servers isn't held up one lookup at a time.
+    ids = list(with_types)
+    staff = dict(zip(ids, await asyncio.gather(*map(is_staff, ids))))
+    for g in result:
+        g["staff"] = staff.get(int(g["id"]), False)
     return web.json_response(sorted(result, key=lambda g: g["name"].lower()))
 
 
 async def guild_access(request: web.Request) -> web.Response:
     """What the user can open here: "manage" (everything) or "staff" (Tickets only)."""
-    return web.json_response(
-        {
-            "level": request[ACCESS_LEVEL],
-            "tickets": module_available(guild_id(request), ModuleType.TICKETS),
-        }
-    )
+    return web.json_response({"level": request[ACCESS_LEVEL]})
 
 
 CHANNEL_TYPES = {
@@ -368,9 +370,8 @@ def _handlers(*tables: web.RouteTableDef) -> frozenset[Any]:
     return frozenset(r.handler for t in tables for r in t if isinstance(r, web.RouteDef))
 
 
-# Routes ticket staff may use, and those that 404 outside TICKETS_GUILDS.
+# Routes ticket staff may use.
 STAFF_HANDLERS = _handlers(tickets.staff_routes) | {guild_access}
-TICKET_HANDLERS = _handlers(tickets.routes, tickets.staff_routes)
 
 
 def build_api(

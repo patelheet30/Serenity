@@ -266,8 +266,7 @@ async def test_health_is_public(client_for):
 
 
 @pytest.mark.asyncio
-async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_repo, monkeypatch):
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_repo):
     origin = {"Origin": ORIGIN}  # so writes reach the auth check instead of the CSRF one
     denied = await client_for(make_bot(perms=hikari.Permissions.NONE), pg_repo)
     for method, path in guild_routes(denied):
@@ -458,7 +457,7 @@ async def test_modules_follow_the_dependency_rules(settings):
     await settings("PUT", "/modules/logging", {"enabled": True})
     status, body = await settings("PUT", "/modules/moderation", {"enabled": True})
     assert status == 200
-    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True}
+    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False}
     assert body["requires"]["moderation"] == ["logging"]
 
     status, body = await settings("PUT", "/modules/logging", {"enabled": False})
@@ -471,13 +470,7 @@ async def test_modules_follow_the_dependency_rules(settings):
 
 
 @pytest.mark.asyncio
-async def test_tickets_module_only_exists_for_allowlisted_servers(settings, monkeypatch):
-    assert (await settings("PUT", "/modules/tickets", {"enabled": True}))[0] == 404
-    status, body = await settings("GET", "/logging")
-    assert "ticket" not in {t["type"] for t in body["types"]}
-    assert (await settings("PUT", "/logging/ticket", {"enabled": False}))[0] == 404
-
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
+async def test_tickets_module_and_log_are_available_everywhere(settings):
     status, body = await settings("PUT", "/modules/tickets", {"enabled": True})
     assert status == 200 and body["enabled"]["tickets"] is True
     status, body = await settings("GET", "/logging")
@@ -590,7 +583,7 @@ async def test_log_types(settings):
 
 
 @pytest.mark.asyncio
-async def test_logging_setup_is_idempotent(settings, pg_repo, monkeypatch):
+async def test_logging_setup_is_idempotent(settings, pg_repo):
     rest = settings.bot.rest
     status, body = await settings("POST", "/logging/setup")
     assert status == 200 and body["failed"] == []
@@ -611,7 +604,6 @@ async def test_logging_setup_is_idempotent(settings, pg_repo, monkeypatch):
     assert rest.create_guild_category.await_count == 1
     assert rest.create_guild_text_channel.await_count == 5
 
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     await pg_repo.set_module_enabled(GUILD, ModuleType.TICKETS, True)
     status, body = await settings("POST", "/logging/setup")
     assert next(t for t in body["types"] if t["type"] == "ticket")["channel_id"]
@@ -844,10 +836,9 @@ SUPPORT_ROLE, BILLING_ROLE, SENIOR_ROLE, OTHER_ROLE = 801, 802, 803, 804
 
 
 @pytest_asyncio.fixture
-async def ticket_guild(pg_repo, monkeypatch):
+async def ticket_guild(pg_repo):
     """Support (staff SUPPORT_ROLE; tiers Helpers, Seniors) and Billing (BILLING_ROLE), with
     ticket #1 on Support's first tier, #2 escalated to Seniors, #3 in Billing."""
-    monkeypatch.setenv("TICKETS_GUILDS", str(GUILD))
     repo = TicketRepository(pg_repo.pool)
     support = await repo.create_type(GUILD, "Support", staff_role_ids=[SUPPORT_ROLE])
     billing = await repo.create_type(GUILD, "Billing", staff_role_ids=[BILLING_ROLE])
@@ -870,7 +861,7 @@ async def test_ticket_staff_only_reach_ticket_routes(client_for, pg_repo, ticket
         return resp.status, await resp.json()
 
     staff = await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[SUPPORT_ROLE]), pg_repo)
-    assert await get(staff, "/access") == (200, {"level": "staff", "tickets": True})
+    assert await get(staff, "/access") == (200, {"level": "staff"})
     assert [t["name"] for t in (await get(staff, "/tickets/types"))[1]] == ["Support"]
     for method, path in guild_routes(staff, staff=False):  # settings, modules and the rest
         resp = await staff.request(method, path, headers=HEADERS, cookies=COOKIES)
@@ -885,16 +876,6 @@ async def test_ticket_staff_only_reach_ticket_routes(client_for, pg_repo, ticket
     for method, path in guild_routes(nobody, staff=True):
         resp = await nobody.request(method, path, headers=HEADERS, cookies=COOKIES)
         assert resp.status == 403, (method, path)
-
-
-@pytest.mark.asyncio
-async def test_tickets_need_the_allowlist(client_for, pg_repo, ticket_guild, monkeypatch):
-    monkeypatch.setenv("TICKETS_GUILDS", "")
-    manager = await client_for(make_bot(), pg_repo)
-    resp = await manager.get(f"/api/guilds/{GUILD}/tickets/types", cookies=COOKIES)
-    assert resp.status == 404
-    staff = await client_for(make_bot(perms=hikari.Permissions.NONE, roles=[SUPPORT_ROLE]), pg_repo)
-    assert (await staff.get(f"/api/guilds/{GUILD}/access", cookies=COOKIES)).status == 403
 
 
 @pytest.mark.asyncio
