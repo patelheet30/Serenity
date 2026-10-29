@@ -402,6 +402,15 @@ class TicketRepository:
             "SELECT COUNT(*) FROM tickets WHERE guild_id = $1 AND opened_at >= $2", guild_id, since
         )
 
+    async def list_open(self, guild_id: int) -> list[dict]:
+        """A guild's open tickets, oldest first (the dashboard queue filters them)."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM tickets WHERE guild_id = $1 AND status = 'open' ORDER BY opened_at, id",
+            guild_id,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
+
     async def open_ticket_channels(self) -> list[int]:
         """Every open ticket's channel, across guilds (the bot's in-memory lookup set)."""
         pool = self._require_pool()
