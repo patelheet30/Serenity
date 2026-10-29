@@ -1,14 +1,12 @@
 <script lang="ts">
 	import Mark from './Mark.svelte';
+	import SiteMeta from './SiteMeta.svelte';
 	import SiteFooter from './SiteFooter.svelte';
 
-	let { title, html }: { title: string; html: string } = $props();
+	let { title, description, html, path }: { title: string; description: string; html: string; path: string } = $props();
 </script>
 
-<svelte:head>
-	<title>{title} · Serenity</title>
-	<meta name="description" content="Serenity's {title.toLowerCase()}." />
-</svelte:head>
+<SiteMeta title="{title} · Serenity" {description} {path} />
 
 <header class="lnav">
 	<a class="brand" href="/" aria-label="Serenity home"><Mark /><span class="wm">Serenity</span></a>

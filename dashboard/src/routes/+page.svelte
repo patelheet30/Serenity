@@ -4,9 +4,9 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import Mark from '#lib/components/Mark.svelte';
 	import SiteFooter from '#lib/components/SiteFooter.svelte';
+	import SiteMeta from '#lib/components/SiteMeta.svelte';
 	import { MOD } from '#lib/util.ts';
 
-	const SITE = import.meta.env.VITE_SITE_URL ?? '';
 	const TITLE = 'Serenity: slowmode that breathes with your chat';
 	const DESCRIPTION =
 		'A Discord bot that eases slowmode up and down on its own as each channel gets busy or calms down. Support tickets, audit logging and moderation cases included.';
@@ -94,15 +94,7 @@
 	});
 </script>
 
-<svelte:head>
-	<title>{TITLE}</title>
-	<meta name="description" content={DESCRIPTION} />
-	<meta property="og:type" content="website" />
-	<meta property="og:title" content={TITLE} />
-	<meta property="og:description" content={DESCRIPTION} />
-	<meta property="og:image" content="{SITE}/og.png" />
-	<meta name="twitter:card" content="summary_large_image" />
-</svelte:head>
+<SiteMeta title={TITLE} description={DESCRIPTION} path="/" />
 
 <header class="lnav">
 	<a class="brand" href="/" aria-label="Serenity home"><Mark /><span class="wm">Serenity</span></a>
