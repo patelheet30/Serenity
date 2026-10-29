@@ -21,6 +21,8 @@
 		log_channel_id: string | null;
 		log_enabled: boolean;
 		blacklist: Blocked[];
+		/** Each number's [min, max], as the API checks them. */
+		limits: Record<NumKey, [number, number]>;
 	};
 	type NumKey = 'retention_days' | 'rating_window_days' | 'open_cooldown_minutes' | 'raid_limit' | 'raid_window_minutes' | 'min_account_age_days';
 	type Member = { id: string; username: string; display_name: string };
@@ -100,7 +102,8 @@
 	}
 </script>
 
-{#snippet num(key: NumKey, label: string, min: number, max: number, unit: string, hint: string)}
+{#snippet num(key: NumKey, label: string, unit: string, hint: string)}
+	{@const [min, max] = data!.limits[key]}
 	<label class="field">
 		<span>{label}</span>
 		<div class="rowline" style="justify-content:flex-start">
@@ -118,8 +121,8 @@
 		<section class="pane s6" aria-labelledby="opT">
 			<div class="ph"><h2 id="opT">Opening tickets</h2></div>
 			<div class="pb stack">
-				{@render num('open_cooldown_minutes', 'Cooldown', 0, 1440, 'minutes', 'How long a member waits between opening tickets. 0 turns it off.')}
-				{@render num('min_account_age_days', 'Minimum account age', 0, 365, 'days', 'Discord account age needed to open a ticket. 0: none.')}
+				{@render num('open_cooldown_minutes', 'Cooldown', 'minutes', 'How long a member waits between opening tickets. 0 turns it off.')}
+				{@render num('min_account_age_days', 'Minimum account age', 'days', 'Discord account age needed to open a ticket. 0: none.')}
 				<div class="field">
 					<span>Required role</span>
 					<Select
@@ -141,16 +144,16 @@
 						<button class="linkish" onclick={() => patch({ raid_paused: false })}>Resume opening tickets</button>
 					</p>
 				{/if}
-				{@render num('raid_limit', 'Pause once this many open', 0, 100, 'tickets', '0 turns the brake off.')}
-				{@render num('raid_window_minutes', 'Within', 1, 60, 'minutes', 'Staff are pinged in the ticket log with a button to resume. Changing either resumes opening.')}
+				{@render num('raid_limit', 'Pause once this many open', 'tickets', '0 turns the brake off.')}
+				{@render num('raid_window_minutes', 'Within', 'minutes', 'Staff are pinged in the ticket log with a button to resume. Changing either resumes opening.')}
 			</div>
 		</section>
 
 		<section class="pane s6" aria-labelledby="trT">
 			<div class="ph"><h2 id="trT">Transcripts and ratings</h2></div>
 			<div class="pb stack">
-				{@render num('retention_days', 'Keep transcripts for', 7, 365, 'days', 'After a ticket closes. Types can override it; already-closed tickets keep their expiry.')}
-				{@render num('rating_window_days', 'Rating window', 1, 30, 'days', 'How long openers can rate a closed ticket. Turn ratings off per type.')}
+				{@render num('retention_days', 'Keep transcripts for', 'days', 'After a ticket closes. Types can override it; already-closed tickets keep their expiry.')}
+				{@render num('rating_window_days', 'Rating window', 'days', 'How long openers can rate a closed ticket. Turn ratings off per type.')}
 			</div>
 		</section>
 
