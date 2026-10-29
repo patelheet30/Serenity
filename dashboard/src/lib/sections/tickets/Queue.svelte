@@ -6,7 +6,8 @@
 	import Icon from '../../components/Icon.svelte';
 	import { ago } from '../../util';
 	import type { TicketPageProps } from '../Tickets.svelte';
-	import { channelUrl, stageColor, typeLabel, who, type Queue, type Ticket } from './queue';
+	import { stageColor, typeLabel, who, type Queue } from './queue';
+	import TicketDetail from './TicketDetail.svelte';
 
 	let { guildId, onerror }: TicketPageProps = $props();
 
@@ -22,6 +23,7 @@
 
 	let data = $state<Queue | null>(null);
 	let selected = $state<number | null>(null);
+	let sheet = $state(false); // the detail's bottom sheet on phones
 	let version = $state(0); // bump to reload
 
 	const types = $derived(new Map((data?.types ?? []).map((t) => [String(t.id), t])));
@@ -48,7 +50,11 @@
 		version;
 		let stale = false;
 		api<Queue>(`/guilds/${id}/tickets/queue?${p}`).then(
-			(r) => !stale && (data = r),
+			(r) => {
+				if (stale) return;
+				data = r;
+				if (selected === null && r.tickets.length && innerWidth > 980) open(r.tickets[0].number, false);
+			},
 			(e) => !stale && onerror(e)
 		);
 		return () => (stale = true);
@@ -59,10 +65,14 @@
 		return () => clearInterval(t);
 	});
 
-	function open(t: Ticket) {
-		selected = t.number;
-		const url = channelUrl(guildId, t);
-		if (url) window.open(url, '_blank', 'noopener');
+	function open(n: number, asSheet = true) {
+		selected = n;
+		sheet = asSheet;
+	}
+
+	function close() {
+		selected = null;
+		sheet = false;
 	}
 
 	function clearFilters() {
@@ -93,7 +103,7 @@
 	<kbd class="hide-s">/</kbd>
 	{#if data}<span class="cnt">{data.tickets.length} of {data.total} open</span>{/if}
 	<span style="flex:1"></span>
-	<span class="dim hide-s" style="font-size:12px"><kbd>j</kbd><kbd>k</kbd> move · <kbd>↵</kbd> open</span>
+	<span class="dim hide-s" style="font-size:12px"><kbd>j</kbd><kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>c</kbd> claim · <kbd>n</kbd> next stage · <kbd>e</kbd> escalate · <kbd>a</kbd> mod action</span>
 </div>
 
 {#snippet facet(label: string, value: string | null, set: (v: string | null) => void, options: [string, string, number][])}
@@ -124,54 +134,58 @@
 	</div>
 {/if}
 
-<section class="pane" aria-label="Ticket queue">
-	{#if !data}
-		<EmptyState>Loading…</EmptyState>
-	{:else if !data.tickets.length}
-		<EmptyState icon="tickets">
-			{#if filtered}No open tickets match these filters. <button class="linkish" onclick={clearFilters}>Clear filters</button>
-			{:else}No open tickets. New ones appear here as members open them.{/if}
-		</EmptyState>
-	{:else}
-		<DataTable
-			label="Open tickets"
-			rows={data.tickets}
-			key={(t) => String(t.number)}
-			selected={selected === null ? null : String(selected)}
-			onopen={open}
-			maxHeight="calc(100dvh - 330px)"
-			{columns}
-		>
-			{#snippet cell(t, col)}
-				{@const ty = types.get(String(t.type_id))}
-				{#if col.key === 'number'}
-					<span class="mono">#{t.number}</span>
-					{#if t.off_hours}<span class="tag" title="Opened outside support hours">off-hours</span>{/if}
-				{:else if col.key === 'type'}
-					{ty ? typeLabel(ty) : ''}
-				{:else if col.key === 'opener'}
-					<span class="chname" style="font-weight:400"><Avatar name={who(t.opener)} src={t.opener.avatar_url} size="xs" />{who(t.opener)}</span>
-				{:else if col.key === 'stage'}
-					{#if t.stage}<span class="stage" style:color={stageColor(ty?.stages.find((s) => s.name === t.stage))}>{t.stage}</span>{:else}<span class="dim">-</span>{/if}
-				{:else if col.key === 'tier'}
-					{t.tier_id ? tierNames.get(String(t.tier_id)) : '-'}
-				{:else if col.key === 'status'}
-					{#if t.waiting_on === 'staff'}<span class="pill acc">waiting on staff</span>{:else}<span class="dim mono" style="font-size:11.5px">waiting on member</span>{/if}
-				{:else if col.key === 'priority'}
-					<span class="prio" data-p={t.priority}>{t.priority}</span>
-				{:else if col.key === 'assignee'}
-					{#if t.assignee}{who(t.assignee)}{:else}<span class="dim">unclaimed</span>{/if}
-				{:else if col.key === 'age'}
-					<span class="mono dim" title={new Date(t.opened_at * 1000).toLocaleString()}>{ago(t.opened_at * 1000)}</span>
-				{:else if col.key === 'activity'}
-					<span class="mono dim" title={new Date(t.last_activity_at * 1000).toLocaleString()}>{ago(t.last_activity_at * 1000)}</span>
-				{:else}
-					<span class="fg2" style="display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis">{t.fields[col.key.slice(2)] || '-'}</span>
-				{/if}
-			{/snippet}
-		</DataTable>
-	{/if}
-</section>
+<div class="split">
+	<section class="pane" aria-label="Ticket queue">
+		{#if !data}
+			<EmptyState>Loading…</EmptyState>
+		{:else if !data.tickets.length}
+			<EmptyState icon="tickets">
+				{#if filtered}No open tickets match these filters. <button class="linkish" onclick={clearFilters}>Clear filters</button>
+				{:else}No open tickets. New ones appear here as members open them.{/if}
+			</EmptyState>
+		{:else}
+			<DataTable
+				label="Open tickets"
+				rows={data.tickets}
+				key={(t) => String(t.number)}
+				selected={selected === null ? null : String(selected)}
+				onopen={(t) => open(t.number)}
+				maxHeight="calc(100dvh - 330px)"
+				{columns}
+			>
+				{#snippet cell(t, col)}
+					{@const ty = types.get(String(t.type_id))}
+					{#if col.key === 'number'}
+						<span class="mono">#{t.number}</span>
+						{#if t.off_hours}<span class="tag" title="Opened outside support hours">off-hours</span>{/if}
+					{:else if col.key === 'type'}
+						{ty ? typeLabel(ty) : ''}
+					{:else if col.key === 'opener'}
+						<span class="chname" style="font-weight:400"><Avatar name={who(t.opener)} src={t.opener.avatar_url} size="xs" />{who(t.opener)}</span>
+					{:else if col.key === 'stage'}
+						{#if t.stage}<span class="stage" style:color={stageColor(ty?.stages.find((s) => s.name === t.stage))}>{t.stage}</span>{:else}<span class="dim">-</span>{/if}
+					{:else if col.key === 'tier'}
+						{t.tier_id ? tierNames.get(String(t.tier_id)) : '-'}
+					{:else if col.key === 'status'}
+						{#if t.waiting_on === 'staff'}<span class="pill acc">waiting on staff</span>{:else}<span class="dim mono" style="font-size:11.5px">waiting on member</span>{/if}
+					{:else if col.key === 'priority'}
+						<span class="prio" data-p={t.priority}>{t.priority}</span>
+					{:else if col.key === 'assignee'}
+						{#if t.assignee}{who(t.assignee)}{:else}<span class="dim">unclaimed</span>{/if}
+					{:else if col.key === 'age'}
+						<span class="mono dim" title={new Date(t.opened_at * 1000).toLocaleString()}>{ago(t.opened_at * 1000)}</span>
+					{:else if col.key === 'activity'}
+						<span class="mono dim" title={new Date(t.last_activity_at * 1000).toLocaleString()}>{ago(t.last_activity_at * 1000)}</span>
+					{:else}
+						<span class="fg2" style="display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis">{t.fields[col.key.slice(2)] || '-'}</span>
+					{/if}
+				{/snippet}
+			</DataTable>
+		{/if}
+	</section>
+
+	<TicketDetail {guildId} number={selected} types={data?.types ?? []} {sheet} onclose={close} onchange={() => version++} onopen={(n) => open(n, sheet)} />
+</div>
 
 <style>
 	.tag {
