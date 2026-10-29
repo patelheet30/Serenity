@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import re
 import time
 from collections import defaultdict
@@ -67,11 +68,14 @@ MOD_ACTIONS = {
     "ban": hikari.Permissions.BAN_MEMBERS,
 }
 MAX_TIMEOUT = 28 * 86400  # Discord's limit
+# How a panel offers its types (/ticket panel's choices and the dashboard's), and how many it can.
+PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
+MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
 
 
 def parse_duration(text: str) -> int:
     """"30m", "2h" or "7d" in seconds, up to Discord's 28-day timeout limit."""
-    match = re.fullmatch(r"\s*(\d{1,4})\s*([mhd])\s*", text.lower())
+    match = re.fullmatch(r"(\d{1,4}) ?([mhd])", text.strip().lower())  # no overlapping repeats
     if not match:
         raise TicketError("Give the duration as minutes, hours or days, like 30m, 2h or 7d.")
     seconds = int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400}[match.group(2)]
@@ -977,6 +981,21 @@ class TicketService:
         await self.repo.add_event(ticket["id"], "fields_edited", actor_id, {"keys": changed})
         return updated
 
+    async def refresh_welcome(self, ticket: dict, ticket_type: dict) -> None:
+        """Show a ticket's answers, edited elsewhere than its Edit fields button (the dashboard),
+        on its welcome message: the bot's first message with an embed."""
+        me = self.cache.get_me()
+        try:
+            async for message in self.rest.fetch_messages(
+                ticket["channel_id"], after=hikari.Snowflake.min()
+            ).limit(5):
+                if me and message.author.id == me.id and message.embeds:
+                    embed = self.show_answers(message.embeds[0], ticket, ticket_type)
+                    await self.rest.edit_message(ticket["channel_id"], message, embed=embed)
+                    return
+        except hikari.HTTPError as exc:  # the answers are saved either way
+            logger.warning(f"Couldn't update the welcome message of ticket {ticket['id']}: {exc}")
+
     # Staff context
 
     async def staff_context(
@@ -1533,6 +1552,10 @@ class TicketService:
                 hikari.ButtonStyle.SECONDARY, f"ticket:delreq:{ticket['id']}",
                 label="Ask to delete this transcript",
             ))
+            if dashboard := os.getenv("DASHBOARD_URL"):  # the viewer asks them to log in first
+                rows[-1].add_link_button(
+                    f"{dashboard.rstrip('/')}/transcripts/{ticket['id']}", label="View transcript"
+                )
         try:
             dm = await self.rest.create_dm_channel(ticket["opener_id"])
             # ponytail: DMs closed means no rating; the dashboard's transcript page can offer it later.

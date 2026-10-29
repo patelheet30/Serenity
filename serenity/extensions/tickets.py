@@ -17,6 +17,8 @@ from serenity.database.ticket_repository import TicketRepository
 from serenity.services.moderation_service import ModerationService
 from serenity.services.ticket_hours import format_schedule, parse_schedule
 from serenity.services.ticket_service import (
+    MAX_PANEL_TYPES,
+    PANEL_STYLES,
     PICKED,
     PRIORITIES,
     TicketError,
@@ -71,8 +73,6 @@ transcript_group = ticket.include_subgroup("transcript", "Closed tickets' transc
 settings_group = ticket.include_subgroup("settings", "Server-wide ticket settings.")
 webhook_group = ticket.include_subgroup("webhook", "Send ticket events to your own systems.")
 
-PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
-MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
 
 
 @plugin.set_error_handler

@@ -167,9 +167,11 @@ async def test_blacklist_shows_the_newest_and_says_there_are_more(tickets, monke
     from serenity.dashboard import tickets_settings
 
     monkeypatch.setattr(tickets_settings, "BLACKLIST_SHOWN", 1)
+    await tickets("POST", "/blacklist", {"user_id": "6"})
     await tickets("POST", "/blacklist", {"user_id": "5"})
-    status, body = await tickets("POST", "/blacklist", {"user_id": "6"})
-    assert len(body["blacklist"]) == 1 and body["blacklist_more"] is True  # same second: either
+    await tickets.svc.repo.pool.execute("UPDATE ticket_blacklist SET created_at = 1")  # a sure tie
+    status, body = await tickets("GET", "/settings")
+    assert [b["user_id"] for b in body["blacklist"]] == ["6"] and body["blacklist_more"] is True  # ties: higher id
 
 
 @pytest.mark.asyncio
