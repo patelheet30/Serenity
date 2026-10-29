@@ -658,9 +658,12 @@ async def test_opener_rates_once_from_the_close_dm(service: TicketService, monke
     # A failed rating lookup costs the buttons, not the close.
     monkeypatch.setattr(service.repo, "get_rating", AsyncMock(side_effect=asyncpg.PostgresError()))
     last = await service.open_ticket(GUILD, member(CAROL, "carol"), support, {})
+    monkeypatch.setenv("DASHBOARD_URL", "https://dash.example/")  # links the transcript viewer
     await service.close(last, support, CAROL, None)
     rows = service.rest.create_message.call_args.kwargs["components"]
-    assert [c.custom_id for r in rows for c in r.components] == [f"ticket:delreq:{last['id']}"]
+    delreq, view = rows[0].components
+    assert delreq.custom_id == f"ticket:delreq:{last['id']}" and len(rows) == 1
+    assert view.url == f"https://dash.example/transcripts/{last['id']}"
     assert service.logging.log_ticket_event.call_args.kwargs["kind"] == "closed"
 
 

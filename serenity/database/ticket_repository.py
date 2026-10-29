@@ -531,7 +531,19 @@ class TicketRepository:
         )
         return [dict(r) for r in rows]
 
+    async def guild_tiers(self, guild_id: int) -> list[dict]:
+        """Every ladder in the guild in one query: by type, lowest tier first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT tr.* FROM ticket_tiers tr JOIN ticket_types ty ON ty.id = tr.type_id
+            WHERE ty.guild_id = $1 ORDER BY tr.type_id, tr.position""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
     async def create_tier(self, type_id: int, /, **values: Any) -> dict:
+        """Without a position, the new top rung, read in the INSERT itself (the unique
+        (type_id, position) catches two at once)."""
         pool = self._require_pool()
         columns = ["type_id", "created_at"]
         params: list[Any] = [type_id, int(time.time())]
@@ -540,9 +552,14 @@ class TicketRepository:
                 raise ValueError(f"Unknown ticket tier column: {key}")
             columns.append(key)
             params.append(value)
-        placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+        placeholders = [f"${i}" for i in range(1, len(params) + 1)]
+        if "position" not in values:
+            columns.append("position")
+            placeholders.append(
+                "(SELECT COALESCE(MAX(position), 0) + 1 FROM ticket_tiers WHERE type_id = $1)"
+            )
         row = await pool.fetchrow(
-            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({placeholders}) RETURNING *",
+            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) RETURNING *",
             *params,
         )
         return dict(row)
@@ -561,8 +578,30 @@ class TicketRepository:
         return dict(row) if row else None
 
     async def delete_tier(self, tier_id: int) -> None:
+        """Delete a tier and take it out of the other tiers' can_summon."""
         pool = self._require_pool()
-        await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
+        await pool.execute(
+            """WITH gone AS (DELETE FROM ticket_tiers WHERE id = $1 RETURNING type_id)
+            UPDATE ticket_tiers SET can_summon = array_remove(can_summon, $1)
+            WHERE type_id IN (SELECT type_id FROM gone) AND id <> $1 AND $1 = ANY(can_summon)""",
+            tier_id,
+        )
+
+    async def reorder_tiers(self, type_id: int, tier_ids: list[int]) -> None:
+        """Renumber a type's tiers 1, 2, ... in this order (all of them, lowest first)."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            # Off the ladder first, since (type_id, position) is unique at every step.
+            await conn.execute(
+                "UPDATE ticket_tiers SET position = -position WHERE type_id = $1", type_id
+            )
+            await conn.execute(
+                """UPDATE ticket_tiers t SET position = o.n
+                FROM unnest($2::bigint[]) WITH ORDINALITY AS o(id, n)
+                WHERE t.id = o.id AND t.type_id = $1""",
+                type_id,
+                tier_ids,
+            )
 
     async def staff_roles(self, guild_id: int) -> list[dict]:
         """Every type's staff roles, one row per tier (tier_id NULL for a type without tiers)."""
@@ -735,6 +774,58 @@ class TicketRepository:
             "SELECT * FROM ticket_transcripts WHERE ticket_id = $1", ticket_id
         )
         return _decode(row)
+
+    async def list_transcripts(
+        self,
+        guild_id: int,
+        *,
+        type_ids: Optional[list[int]],
+        opener_id: Optional[int] = None,
+        handler_id: Optional[int] = None,
+        outcome: Optional[str] = None,
+        since: Optional[int] = None,
+        until: Optional[int] = None,
+        before: Optional[int] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Closed tickets with a transcript, newest number first, each with its retention, rating,
+        handler ids and outcome (staff, opener or auto). type_ids None is every type; `before`
+        is a ticket number, for paging."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT * FROM (
+                SELECT t.*, ty.name AS type_name, ty.emoji AS type_emoji, tr.expires_at,
+                    tr.held_by_case_number, tr.deletion_requested_at, r.rating,
+                    ARRAY(SELECT user_id FROM ticket_handlers h WHERE h.ticket_id = t.id
+                        ORDER BY h.joined_at, h.user_id) AS handler_ids,
+                    CASE WHEN EXISTS (SELECT 1 FROM ticket_events e
+                            WHERE e.ticket_id = t.id AND e.kind = 'auto_closed') THEN 'auto'
+                        WHEN t.closed_by = t.opener_id THEN 'opener' ELSE 'staff' END AS outcome
+                FROM ticket_transcripts tr
+                JOIN tickets t ON t.id = tr.ticket_id
+                JOIN ticket_types ty ON ty.id = t.type_id
+                LEFT JOIN ticket_ratings r ON r.ticket_id = t.id
+                WHERE t.guild_id = $1 AND t.status = 'closed'  -- tickets (guild_id, number) drives it
+                    AND ($2::bigint[] IS NULL OR t.type_id = ANY($2))
+                    AND ($3::bigint IS NULL OR t.opener_id = $3)
+                    AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM ticket_handlers h
+                        WHERE h.ticket_id = t.id AND h.user_id = $4))
+                    AND ($5::bigint IS NULL OR t.closed_at >= $5)
+                    AND ($6::bigint IS NULL OR t.closed_at < $6)
+                    AND ($7::int IS NULL OR t.number < $7)
+            ) x WHERE ($8::text IS NULL OR outcome = $8)
+            ORDER BY number DESC LIMIT $9""",
+            guild_id,
+            type_ids,
+            opener_id,
+            handler_id,
+            since,
+            until,
+            before,
+            outcome,
+            limit,
+        )
+        return [_decode(r) for r in rows]  # type: ignore[misc]
 
     async def hold_transcript(self, ticket_id: int, case_number: Optional[int]) -> bool:
         """Keep a transcript as evidence for a mod case (None releases it)."""
@@ -961,6 +1052,16 @@ class TicketRepository:
             "DELETE FROM ticket_blacklist WHERE guild_id = $1 AND user_id = $2", guild_id, user_id
         )
         return status != "DELETE 0"
+
+    async def list_blacklist(self, guild_id: int, limit: int) -> list[dict]:
+        """Who can't open tickets, newest first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC, user_id DESC LIMIT $2",
+            guild_id,
+            limit,
+        )
+        return [dict(r) for r in rows]
 
     async def get_blacklist_entry(self, guild_id: int, user_id: int) -> Optional[dict]:
         pool = self._require_pool()

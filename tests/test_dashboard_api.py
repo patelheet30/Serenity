@@ -14,7 +14,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from cryptography.fernet import Fernet
 
-from serenity.core.modules import ModuleType
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.dashboard import auth
 from serenity.dashboard.api import (
     CHANGES,
@@ -199,7 +199,8 @@ async def client_for():
     async def make(bot, repo=None):
         """The API with fake sessions and Discord. Routes that touch Postgres need `repo`."""
         pool = repo.pool if repo else None
-        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, MagicMock())
+        modules = ModuleManager(repo) if repo else MagicMock()
+        tickets = TicketService(TicketRepository(pool), bot.rest, bot.cache, modules)
         api = build_api(bot, repo or MagicMock(pool=None), tickets)
         api[SESSIONS] = FakeSessions()
         api[CHANGES] = MagicMock()  # ChangeLog has its own tests
@@ -230,6 +231,12 @@ PLACEHOLDERS = {
     "{number}": "1",
     "{user_id}": str(USER),
     "{webhook_id}": "1",
+
+
+    "{type_id}": "1",
+    "{panel_id}": "1",
+    "{pack}": "game",
+    "{tier_id}": "1",
 }
 
 
@@ -274,6 +281,8 @@ async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_r
         assert resp.status == 403, (method, path)
 
     await ModerationRepository(pg_repo.pool).create_case(GUILD, USER, 999, "warn")  # case #1
+    tickets = TicketRepository(pg_repo.pool)
+    await tickets.create_ticket(GUILD, (await tickets.create_type(GUILD, "Support"))["id"], USER, {})  # #1
     allowed = await client_for(
         make_bot(perms=hikari.Permissions.MANAGE_GUILD | hikari.Permissions.MODERATE_MEMBERS),
         pg_repo,
