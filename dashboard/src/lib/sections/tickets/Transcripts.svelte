@@ -47,6 +47,8 @@
 		// A new server: drop the last one's rows and type picks (its ids mean nothing here).
 		types = [];
 		picked = [];
+		opener = null;
+		staff = null;
 		rows = null;
 		next = null;
 		api<Type[]>(`/guilds/${id}/tickets/types`).then((t) => !stale && (types = t), (e) => !stale && onerror(e));
