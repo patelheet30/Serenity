@@ -61,6 +61,7 @@ async def _settings_json(request: web.Request, *, blacklist: bool = True) -> dic
     settings = await svc.settings(gid)
     log = await request.app[LOG_REPO].get_log_channel(gid, "ticket")
     role = settings.get("required_role_id")
+    blocked = await svc.repo.list_blacklist(gid, BLACKLIST_SHOWN + 1) if blacklist else []  # one extra: are there more?
     return {
         **{key: int(settings.get(key, default)) for key, (_, _, _, default) in SETTINGS.items()},
         "limits": {key: [lo, hi] for key, (_, lo, hi, _) in SETTINGS.items()},  # the SPA's input bounds
@@ -76,8 +77,9 @@ async def _settings_json(request: web.Request, *, blacklist: bool = True) -> dic
                 "reason": b["reason"],
                 "created_at": b["created_at"],
             }
-            for b in (await svc.repo.list_blacklist(gid, BLACKLIST_SHOWN) if blacklist else [])
+            for b in blocked[:BLACKLIST_SHOWN]
         ],
+        "blacklist_more": len(blocked) > BLACKLIST_SHOWN,
     }
 
 

@@ -21,6 +21,8 @@
 		log_channel_id: string | null;
 		log_enabled: boolean;
 		blacklist: Blocked[];
+		/** More are blocked than the newest ones listed. */
+		blacklist_more: boolean;
 		/** Each number's [min, max], as the API checks them. */
 		limits: Record<NumKey, [number, number]>;
 	};
@@ -178,7 +180,7 @@
 		</section>
 
 		<section class="pane s12" aria-labelledby="blT">
-			<div class="ph"><h2 id="blT">Blacklist</h2><span class="cnt">{data.blacklist.length}</span></div>
+			<div class="ph"><h2 id="blT">Blacklist</h2><span class="cnt">{data.blacklist.length}{data.blacklist_more ? '+' : ''}</span></div>
 			<div class="scroll">
 				<table class="tbl">
 					<thead><tr><th>Member</th><th>Reason</th><th>Blocked</th><th><span class="sr">Unblock</span></th></tr></thead>
