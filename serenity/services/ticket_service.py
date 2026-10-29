@@ -472,6 +472,28 @@ def current_tier(ticket: dict, ticket_type: dict) -> Optional[dict]:
     return next((t for t in tiers if t["id"] == ticket["tier_id"]), tiers[0] if tiers else None)
 
 
+def off_hours_text(
+    settings: dict, type_schedule: Optional[list], user_id: int, now: datetime
+) -> Optional[str]:
+    """The auto-reply for a ticket opened at `now`, or None while support is open.
+
+    `settings` are the Tickets module's; the dashboard previews drafts of them with this too.
+    """
+    status = offline_status(settings, type_schedule, now)
+    if status is None:
+        return None
+    schedule = effective_schedule(type_schedule, settings)
+    hours = f"{format_schedule(schedule)} ({settings.get('timezone', 'UTC')})" if schedule else "not set"
+    back = int(status["back"].timestamp()) if status["back"] else None
+    text = (
+        (settings.get("off_hours_message") or DEFAULT_OFF_HOURS)
+        .replace("{user}", f"<@{user_id}>")
+        .replace("{hours}", hours)
+        .replace("{next_open}", f"<t:{back}:F> (<t:{back}:R>)" if back else "soon")
+    )
+    return f"{text}\n> {status['note']}" if status["note"] else text
+
+
 def member_permissions(member: hikari.Member) -> hikari.Permissions:
     if isinstance(member, hikari.InteractionMember):
         return member.permissions
@@ -686,19 +708,7 @@ class TicketService:
     async def off_hours_notice(self, guild_id: int, ticket_type: dict, user_id: int) -> Optional[str]:
         """The auto-reply for a ticket opened now, or None while support is open."""
         settings = await self.settings(guild_id)
-        status = offline_status(settings, ticket_type["schedule"], datetime.now(timezone.utc))
-        if status is None:
-            return None
-        schedule = effective_schedule(ticket_type["schedule"], settings)
-        hours = f"{format_schedule(schedule)} ({settings.get('timezone', 'UTC')})" if schedule else "not set"
-        back = int(status["back"].timestamp()) if status["back"] else None
-        text = (
-            (settings.get("off_hours_message") or DEFAULT_OFF_HOURS)
-            .replace("{user}", f"<@{user_id}>")
-            .replace("{hours}", hours)
-            .replace("{next_open}", f"<t:{back}:F> (<t:{back}:R>)" if back else "soon")
-        )
-        return f"{text}\n> {status['note']}" if status["note"] else text
+        return off_hours_text(settings, ticket_type["schedule"], user_id, datetime.now(timezone.utc))
 
     # Opening
 

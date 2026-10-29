@@ -531,7 +531,19 @@ class TicketRepository:
         )
         return [dict(r) for r in rows]
 
+    async def guild_tiers(self, guild_id: int) -> list[dict]:
+        """Every ladder in the guild in one query: by type, lowest tier first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT tr.* FROM ticket_tiers tr JOIN ticket_types ty ON ty.id = tr.type_id
+            WHERE ty.guild_id = $1 ORDER BY tr.type_id, tr.position""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
     async def create_tier(self, type_id: int, /, **values: Any) -> dict:
+        """Without a position, the new top rung, read in the INSERT itself (the unique
+        (type_id, position) catches two at once)."""
         pool = self._require_pool()
         columns = ["type_id", "created_at"]
         params: list[Any] = [type_id, int(time.time())]
@@ -540,9 +552,14 @@ class TicketRepository:
                 raise ValueError(f"Unknown ticket tier column: {key}")
             columns.append(key)
             params.append(value)
-        placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+        placeholders = [f"${i}" for i in range(1, len(params) + 1)]
+        if "position" not in values:
+            columns.append("position")
+            placeholders.append(
+                "(SELECT COALESCE(MAX(position), 0) + 1 FROM ticket_tiers WHERE type_id = $1)"
+            )
         row = await pool.fetchrow(
-            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({placeholders}) RETURNING *",
+            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) RETURNING *",
             *params,
         )
         return dict(row)
@@ -561,8 +578,30 @@ class TicketRepository:
         return dict(row) if row else None
 
     async def delete_tier(self, tier_id: int) -> None:
+        """Delete a tier and take it out of the other tiers' can_summon."""
         pool = self._require_pool()
-        await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
+        await pool.execute(
+            """WITH gone AS (DELETE FROM ticket_tiers WHERE id = $1 RETURNING type_id)
+            UPDATE ticket_tiers SET can_summon = array_remove(can_summon, $1)
+            WHERE type_id IN (SELECT type_id FROM gone) AND id <> $1 AND $1 = ANY(can_summon)""",
+            tier_id,
+        )
+
+    async def reorder_tiers(self, type_id: int, tier_ids: list[int]) -> None:
+        """Renumber a type's tiers 1, 2, ... in this order (all of them, lowest first)."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            # Off the ladder first, since (type_id, position) is unique at every step.
+            await conn.execute(
+                "UPDATE ticket_tiers SET position = -position WHERE type_id = $1", type_id
+            )
+            await conn.execute(
+                """UPDATE ticket_tiers t SET position = o.n
+                FROM unnest($2::bigint[]) WITH ORDINALITY AS o(id, n)
+                WHERE t.id = o.id AND t.type_id = $1""",
+                type_id,
+                tier_ids,
+            )
 
     async def staff_roles(self, guild_id: int) -> list[dict]:
         """Every type's staff roles, one row per tier (tier_id NULL for a type without tiers)."""

@@ -233,6 +233,7 @@ PLACEHOLDERS = {
     "{type_id}": "1",
     "{panel_id}": "1",
     "{pack}": "game",
+    "{tier_id}": "1",
 }
 
 
