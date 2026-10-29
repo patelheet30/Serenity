@@ -114,6 +114,19 @@ async def test_removing_a_webhook_stops_its_retries():
     webhooks.post.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_retries_follow_an_edited_url_and_rotated_secret():
+    repo = AsyncMock()
+    edited = {"id": 3, "guild_id": 1, "url": "https://1.0.0.1/new", "secret": "new"}
+    repo.get_webhook.return_value = edited
+    webhooks = TicketWebhooks(repo)
+    webhooks.post = AsyncMock(side_effect=[(500, 30, "HTTP 500"), (200, 25, None)])
+    old = {"id": 3, "guild_id": 1, "url": "https://1.1.1.1/old", "secret": "old"}
+    with patch("asyncio.sleep", AsyncMock()):
+        await webhooks.deliver(old, "ticket.closed", b"{}", delays=(0, 10))
+    assert [c.args[0] for c in webhooks.post.call_args_list] == [old, edited]
+
+
 def test_events():
     assert event_name("stage") == "ticket.stage_changed"
     assert event_name("closed") == "ticket.closed"
