@@ -230,6 +230,10 @@ PLACEHOLDERS = {
     "{number}": "1",
     "{user_id}": str(USER),
     "{type_id}": "1",
+
+
+    "{panel_id}": "1",
+    "{pack}": "game",
 }
 
 
@@ -274,6 +278,8 @@ async def test_every_guild_route_needs_a_session_and_permission(client_for, pg_r
         assert resp.status == 403, (method, path)
 
     await ModerationRepository(pg_repo.pool).create_case(GUILD, USER, 999, "warn")  # case #1
+    tickets = TicketRepository(pg_repo.pool)
+    await tickets.create_ticket(GUILD, (await tickets.create_type(GUILD, "Support"))["id"], USER, {})  # #1
     allowed = await client_for(
         make_bot(perms=hikari.Permissions.MANAGE_GUILD | hikari.Permissions.MODERATE_MEMBERS),
         pg_repo,

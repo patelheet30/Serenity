@@ -287,7 +287,8 @@ def test_parse_duration():
     from serenity.services.ticket_service import parse_duration
 
     assert [parse_duration(t) for t in ("30m", " 2H ", "28d")] == [1800, 7200, 28 * 86400]
-    for bad in ("soon", "0m", "29d", "1h30m"):
+    assert parse_duration("90 m") == 5400
+    for bad in ("soon", "0m", "29d", "1h30m", "1" + " " * 50_000 + "x"):  # the last one stays fast
         with pytest.raises(TicketError):
             parse_duration(bad)
 
