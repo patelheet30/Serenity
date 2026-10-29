@@ -5,6 +5,7 @@ never check access themselves. Ticket staff who can't manage the guild only get 
 """
 
 import os
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -16,7 +17,7 @@ from aiohttp import web
 from yarl import URL
 
 from serenity.core.modules import ModuleManager, ModuleType, module_available
-from serenity.dashboard import moderation, settings, tickets
+from serenity.dashboard import moderation, settings, tickets, tickets_transcripts
 from serenity.dashboard.auth import (
     DiscordOAuth,
     GuildAccess,
@@ -58,6 +59,7 @@ logger = get_logger(__name__)
 SESSION_COOKIE = "serenity_session"
 STATE_COOKIE = "serenity_oauth_state"
 CONSENT_COOKIE = "serenity_oauth_consent"  # set while retrying with Discord's consent screen
+NEXT_COOKIE = "serenity_oauth_next"  # the page to come back to after logging in
 PUBLIC_PATHS = {"/api/health", "/api/auth/login", "/api/auth/callback", "/api/auth/invite"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 MEMBER_SEARCH_LIMIT = 25
@@ -173,9 +175,20 @@ async def login(request: web.Request) -> web.Response:
     response.set_cookie(STATE_COOKIE, state, max_age=600, **_cookie_args(request))
     if prompt == "consent":
         response.set_cookie(CONSENT_COOKIE, "1", max_age=600, **_cookie_args(request))
-    else:  # a fresh login the user started gets its own consent retry
+    else:  # a fresh login the user started gets its own consent retry, and its own next page
         response.del_cookie(CONSENT_COOKIE, path="/")
+        if (ticket_id := _transcript_id(request.query.get("next", ""))) is not None:
+            response.set_cookie(NEXT_COOKIE, str(ticket_id), max_age=600, **_cookie_args(request))
+        else:
+            response.del_cookie(NEXT_COOKIE, path="/")
     raise response
+
+
+def _transcript_id(path: str) -> Optional[int]:
+    """The ticket id in a transcript page's path (/transcripts/12), the one page login comes back
+    to; only the number is kept, so ?next= can't lead anywhere else."""
+    match = re.fullmatch(r"/transcripts/(\d{1,19})", path)
+    return int(match[1]) if match else None
 
 
 async def callback(request: web.Request) -> web.Response:
@@ -202,10 +215,13 @@ async def callback(request: web.Request) -> web.Response:
         raise web.HTTPFound(f"{base}/?login=failed") from None
 
     token = await request.app[SESSIONS].create(user, tokens)
-    response = web.HTTPFound(f"{base}/servers")
+    ticket_id = request.cookies.get(NEXT_COOKIE, "")
+    next_path = f"/transcripts/{int(ticket_id)}" if ticket_id.isdecimal() else "/servers"
+    response = web.HTTPFound(f"{base}{next_path}")
     response.set_cookie(SESSION_COOKIE, token, max_age=7 * 24 * 3600, **_cookie_args(request))
     response.del_cookie(STATE_COOKIE, path="/")
     response.del_cookie(CONSENT_COOKIE, path="/")
+    response.del_cookie(NEXT_COOKIE, path="/")
     raise response
 
 
@@ -416,6 +432,7 @@ def build_api(
     app.add_routes(moderation.routes)
     app.add_routes(tickets.routes)
     app.add_routes(tickets.staff_routes)
+    app.add_routes(tickets_transcripts.viewer_routes)
     return app
 
 
