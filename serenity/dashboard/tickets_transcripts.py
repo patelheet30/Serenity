@@ -74,26 +74,36 @@ async def list_transcripts(request: web.Request) -> web.Response:
     outcome = q.get("outcome") if q.get("outcome") in OUTCOMES else None
     svc = request.app[TICKET_SVC]
     gid = guild_id(request)
-    rows = await svc.repo.list_transcripts(
-        gid,
-        type_ids=type_ids,
-        opener_id=parse_int(q.get("opener", ""), BIGINT_MAX),
-        handler_id=parse_int(q.get("staff", ""), BIGINT_MAX),
-        outcome=outcome,
-        since=parse_int(q.get("since", ""), BIGINT_MAX),
-        until=parse_int(q.get("until", ""), BIGINT_MAX),
-        before=parse_int(q.get("before", ""), INT_MAX),
-        limit=PAGE_SIZE,
-    )
+    opener_id = parse_int(q.get("opener", ""), BIGINT_MAX)
+    handler_id = parse_int(q.get("staff", ""), BIGINT_MAX)
+    since = parse_int(q.get("since", ""), BIGINT_MAX)
+    until = parse_int(q.get("until", ""), BIGINT_MAX)
     # Tier-only staff see the tickets that are with their tier. ponytail: filtered after the
-    # query, so their pages can come back short; move can_see into SQL if that bothers anyone.
+    # query, so their pages can come back short; a page they can't see any of is skipped, so
+    # an empty list means there's nothing left. Move can_see into SQL if that bothers anyone.
     types: dict[int, dict] = {}
-    shown = []
-    for row in rows:
-        if row["type_id"] not in types:
-            types[row["type_id"]] = await svc.full_type(row)
-        if access.can_see(row, types[row["type_id"]]):
-            shown.append(row)
+    shown: list[dict] = []
+    cursor = parse_int(q.get("before", ""), INT_MAX)
+    while True:
+        rows = await svc.repo.list_transcripts(
+            gid,
+            type_ids=type_ids,
+            opener_id=opener_id,
+            handler_id=handler_id,
+            outcome=outcome,
+            since=since,
+            until=until,
+            before=cursor,
+            limit=PAGE_SIZE,
+        )
+        for row in rows:
+            if row["type_id"] not in types:
+                types[row["type_id"]] = await svc.full_type(row)
+            if access.can_see(row, types[row["type_id"]]):
+                shown.append(row)
+        if shown or len(rows) < PAGE_SIZE:
+            break
+        cursor = rows[-1]["number"]
     return web.json_response(
         {
             "transcripts": [

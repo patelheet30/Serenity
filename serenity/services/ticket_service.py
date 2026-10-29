@@ -68,11 +68,14 @@ MOD_ACTIONS = {
     "ban": hikari.Permissions.BAN_MEMBERS,
 }
 MAX_TIMEOUT = 28 * 86400  # Discord's limit
+# How a panel offers its types (/ticket panel's choices and the dashboard's), and how many it can.
+PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
+MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
 
 
 def parse_duration(text: str) -> int:
     """"30m", "2h" or "7d" in seconds, up to Discord's 28-day timeout limit."""
-    match = re.fullmatch(r"\s*(\d{1,4})\s*([mhd])\s*", text.lower())
+    match = re.fullmatch(r"(\d{1,4}) ?([mhd])", text.strip().lower())  # no overlapping repeats
     if not match:
         raise TicketError("Give the duration as minutes, hours or days, like 30m, 2h or 7d.")
     seconds = int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400}[match.group(2)]

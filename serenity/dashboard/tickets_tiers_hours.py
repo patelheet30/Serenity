@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo, available_timezones
 
+import asyncpg
 from aiohttp import web
 
 from serenity.dashboard.common import (
@@ -49,12 +50,15 @@ def _tier_json(tier: dict) -> dict[str, Any]:
     }
 
 
+async def _ladders(request: web.Request) -> list[tuple[dict, list[dict]]]:
+    """Each type in this guild with its ladder, lowest tier first: two queries in all."""
+    repo, gid = request.app[TICKET_SVC].repo, guild_id(request)
+    tiers = await repo.guild_tiers(gid)
+    return [(t, [x for x in tiers if x["type_id"] == t["id"]]) for t in await repo.list_types(gid)]
+
+
 async def _ladders_json(request: web.Request) -> list[dict[str, Any]]:
-    repo = request.app[TICKET_SVC].repo
-    return [
-        {**_type_json(t), "tiers": [_tier_json(x) for x in await repo.list_tiers(t["id"])]}
-        for t in await repo.list_types(guild_id(request))
-    ]
+    return [{**_type_json(t), "tiers": [_tier_json(x) for x in tiers]} for t, tiers in await _ladders(request)]
 
 
 async def _type_or_404(request: web.Request, type_id: Any = None) -> dict:
@@ -70,9 +74,8 @@ async def _type_or_404(request: web.Request, type_id: Any = None) -> dict:
 
 async def _tier_or_404(request: web.Request) -> tuple[dict, list[dict]]:
     """The tier {tier_id} and its type's whole ladder, if it's in this guild."""
-    repo, tier_id = request.app[TICKET_SVC].repo, int(request.match_info["tier_id"])
-    for ticket_type in await repo.list_types(guild_id(request)):
-        tiers = await repo.list_tiers(ticket_type["id"])
+    tier_id = int(request.match_info["tier_id"])
+    for ticket_type, tiers in await _ladders(request):
         if tier := next((t for t in tiers if t["id"] == tier_id), None):
             return {**tier, "type_name": ticket_type["name"]}, tiers
     raise ApiError(404, "not_found", "No such tier in this server.")
@@ -125,8 +128,10 @@ async def add_tier(request: web.Request) -> web.Response:
         raise ApiError(422, "invalid", "A new tier needs a role.")
     if len(tiers) >= MAX_TIERS:
         raise ApiError(422, "invalid", f"A type can have up to {MAX_TIERS} tiers.")
-    position = max((t["position"] for t in tiers), default=0) + 1
-    await repo.create_tier(ticket_type["id"], position=position, **values)
+    try:
+        await repo.create_tier(ticket_type["id"], **values)  # the next rung, taken in the INSERT
+    except asyncpg.UniqueViolationError:
+        raise ApiError(409, "exists", "Another change took that tier name or position a moment ago. Try again.") from None
     record(request, f"{ticket_type['name']} tiers", "", f"added {values['name']}")
     return web.json_response(await _ladders_json(request))
 

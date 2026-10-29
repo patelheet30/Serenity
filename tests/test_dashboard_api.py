@@ -230,10 +230,9 @@ PLACEHOLDERS = {
     "{log_type}": "message",
     "{number}": "1",
     "{user_id}": str(USER),
+    "{type_id}": "1",
     "{panel_id}": "1",
     "{pack}": "game",
-    "{type_id}": "1",
-    "{webhook_id}": "1",
     "{tier_id}": "1",
 }
 

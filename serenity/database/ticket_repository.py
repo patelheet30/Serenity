@@ -531,7 +531,19 @@ class TicketRepository:
         )
         return [dict(r) for r in rows]
 
+    async def guild_tiers(self, guild_id: int) -> list[dict]:
+        """Every ladder in the guild in one query: by type, lowest tier first."""
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """SELECT tr.* FROM ticket_tiers tr JOIN ticket_types ty ON ty.id = tr.type_id
+            WHERE ty.guild_id = $1 ORDER BY tr.type_id, tr.position""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
     async def create_tier(self, type_id: int, /, **values: Any) -> dict:
+        """Without a position, the new top rung, read in the INSERT itself (the unique
+        (type_id, position) catches two at once)."""
         pool = self._require_pool()
         columns = ["type_id", "created_at"]
         params: list[Any] = [type_id, int(time.time())]
@@ -540,9 +552,14 @@ class TicketRepository:
                 raise ValueError(f"Unknown ticket tier column: {key}")
             columns.append(key)
             params.append(value)
-        placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+        placeholders = [f"${i}" for i in range(1, len(params) + 1)]
+        if "position" not in values:
+            columns.append("position")
+            placeholders.append(
+                "(SELECT COALESCE(MAX(position), 0) + 1 FROM ticket_tiers WHERE type_id = $1)"
+            )
         row = await pool.fetchrow(
-            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({placeholders}) RETURNING *",
+            f"INSERT INTO ticket_tiers ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) RETURNING *",
             *params,
         )
         return dict(row)
@@ -561,8 +578,14 @@ class TicketRepository:
         return dict(row) if row else None
 
     async def delete_tier(self, tier_id: int) -> None:
+        """Delete a tier and take it out of the other tiers' can_summon."""
         pool = self._require_pool()
-        await pool.execute("DELETE FROM ticket_tiers WHERE id = $1", tier_id)
+        await pool.execute(
+            """WITH gone AS (DELETE FROM ticket_tiers WHERE id = $1 RETURNING type_id)
+            UPDATE ticket_tiers SET can_summon = array_remove(can_summon, $1)
+            WHERE type_id IN (SELECT type_id FROM gone) AND id <> $1 AND $1 = ANY(can_summon)""",
+            tier_id,
+        )
 
     async def reorder_tiers(self, type_id: int, tier_ids: list[int]) -> None:
         """Renumber a type's tiers 1, 2, ... in this order (all of them, lowest first)."""
@@ -782,7 +805,7 @@ class TicketRepository:
                 JOIN tickets t ON t.id = tr.ticket_id
                 JOIN ticket_types ty ON ty.id = t.type_id
                 LEFT JOIN ticket_ratings r ON r.ticket_id = t.id
-                WHERE tr.guild_id = $1 AND t.status = 'closed'
+                WHERE t.guild_id = $1 AND t.status = 'closed'  -- tickets (guild_id, number) drives it
                     AND ($2::bigint[] IS NULL OR t.type_id = ANY($2))
                     AND ($3::bigint IS NULL OR t.opener_id = $3)
                     AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM ticket_handlers h
@@ -868,23 +891,6 @@ class TicketRepository:
         )
         return dict(row)  # type: ignore[arg-type]
 
-    async def update_webhook(self, guild_id: int, webhook_id: int, /, **values: Any) -> Optional[dict]:
-        """Set any of url, secret, events and type_id; None if there's no such webhook."""
-        pool = self._require_pool()
-        sets, params = [], [guild_id, webhook_id]
-        for key, value in values.items():
-            if key not in ("url", "secret", "events", "type_id"):
-                raise ValueError(f"Unknown ticket webhook column: {key}")
-            params.append(value)
-            sets.append(f"{key} = ${len(params)}")
-        if not sets:
-            return await self.get_webhook(guild_id, webhook_id)
-        row = await pool.fetchrow(
-            f"UPDATE ticket_webhooks SET {', '.join(sets)} WHERE guild_id = $1 AND id = $2 RETURNING *",
-            *params,
-        )
-        return dict(row) if row else None
-
     async def remove_webhook(self, guild_id: int, webhook_id: int, /) -> bool:
         pool = self._require_pool()
         status = await pool.execute(
@@ -958,19 +964,6 @@ class TicketRepository:
             latency_ms,
             error,
         )
-
-    async def list_deliveries(self, guild_id: int, webhook_id: int, /, limit: int = 50) -> list[dict]:
-        """A webhook's latest deliveries, newest first; none if it isn't this server's."""
-        pool = self._require_pool()
-        rows = await pool.fetch(
-            """SELECT d.* FROM ticket_webhook_deliveries d
-            JOIN ticket_webhooks w ON w.id = d.webhook_id
-            WHERE w.guild_id = $1 AND d.webhook_id = $2 ORDER BY d.id DESC LIMIT $3""",
-            guild_id,
-            webhook_id,
-            limit,
-        )
-        return [dict(r) for r in rows]
 
     async def purge_webhook_deliveries(self, before: int, /) -> int:
         pool = self._require_pool()
@@ -1118,11 +1111,13 @@ class TicketRepository:
         )
         return status != "DELETE 0"
 
-    async def list_blacklist(self, guild_id: int) -> list[dict]:
+    async def list_blacklist(self, guild_id: int, limit: int) -> list[dict]:
         """Who can't open tickets, newest first."""
         pool = self._require_pool()
         rows = await pool.fetch(
-            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC", guild_id
+            "SELECT * FROM ticket_blacklist WHERE guild_id = $1 ORDER BY created_at DESC, user_id DESC LIMIT $2",
+            guild_id,
+            limit,
         )
         return [dict(r) for r in rows]
 

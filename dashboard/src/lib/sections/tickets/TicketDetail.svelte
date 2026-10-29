@@ -162,9 +162,10 @@
 	}
 
 	async function setPriority(p: Priority, previous: Priority) {
+		const n = detail?.number;
 		const r = await act('priority', { priority: p });
 		if (!r) {
-			if (detail) detail.priority = previous;
+			if (n !== undefined && detail?.number === n) detail!.priority = previous; // not another ticket opened meanwhile
 		} else if (r.renaming) toast('Priority saved; Discord renames the channel within 10 minutes.');
 	}
 
@@ -286,7 +287,7 @@
 			{#if isOpen}
 				<div style="grid-column:1/-1">
 					<dt>Priority</dt>
-					<dd><Segmented label="Priority" value={d.priority} options={PRIORITIES.map((p) => ({ value: p, label: p }))} onchange={setPriority} /></dd>
+					<dd><Segmented label="Priority" bind:value={detail.priority} options={PRIORITIES.map((p) => ({ value: p, label: p }))} onchange={setPriority} /></dd>
 				</div>
 			{/if}
 		</dl>

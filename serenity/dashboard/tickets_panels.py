@@ -14,10 +14,13 @@ from aiohttp import web
 
 from serenity.dashboard.common import BOT, TICKET_SVC, ApiError, guild_channel, guild_id, read_json
 from serenity.dashboard.tickets import TICKETS, routes
-from serenity.services.ticket_service import TicketError, set_field, with_stage
-
-STYLES = ("buttons", "menu")  # /ticket panel's style choices
-MAX_PANEL_TYPES = 25  # and its type limit
+from serenity.services.ticket_service import (
+    MAX_PANEL_TYPES,
+    PANEL_STYLES,
+    TicketError,
+    set_field,
+    with_stage,
+)
 
 # Template packs, as plain data. A type's fields are (label, kind, options, required, identity); its stages
 # are (name, terminal). Types the server already has (by name) are reused as they are.
@@ -222,7 +225,7 @@ async def _panel_values(request: web.Request, data: dict[str, Any], *, partial: 
             raise ApiError(422, "invalid", "The description can be at most 2000 characters.")
         values["description"] = description
     if not partial or "style" in data:
-        if data.get("style") not in STYLES:
+        if data.get("style") not in PANEL_STYLES.values():
             raise ApiError(422, "invalid", "style must be buttons or menu.")
         values["style"] = data["style"]
     if not partial or "type_ids" in data:
@@ -302,11 +305,19 @@ async def update_panel(request: web.Request) -> web.Response:
     if "channel_id" in data and str(data["channel_id"]) != str(panel["channel_id"]):
         raise ApiError(422, "invalid", "A panel stays in its channel. Delete it and publish a new one to move it.")
     values = await _panel_values(request, data, partial=True)
+    repo = request.app[TICKET_SVC].repo
+    before = {k: panel[k] for k in values}
     if values:
-        panel = await request.app[TICKET_SVC].repo.update_panel(guild_id(request), panel["id"], **values)
+        panel = await repo.update_panel(guild_id(request), panel["id"], **values)
         if panel is None:
             raise ApiError(404, "not_found", "No such panel in this server.")
-    return web.json_response(_panel_json(await _post(request, panel)))
+    try:
+        posted = await _post(request, panel)
+    except BaseException:  # Discord kept the old message, so the panel keeps its old content too
+        if values:
+            await repo.update_panel(guild_id(request), panel["id"], **before)
+        raise
+    return web.json_response(_panel_json(posted))
 
 
 @routes.delete(TICKETS + r"/panels/{panel_id:\d+}")
