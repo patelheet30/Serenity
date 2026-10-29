@@ -65,6 +65,7 @@ REASON_MAX = 500  # as the slash commands and modals allow
 NOTE_MAX = 2000
 RENAME_WAIT = 5.0  # seconds a priority change waits on Discord's channel-rename limit
 _renames: set[asyncio.Task] = set()  # priority changes still waiting on Discord
+MAX_RENAMES = 50  # past this many in the background, a priority change waits in its request
 _MENTION = re.compile(r"<@!?(\d+)>")
 MANAGE = hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
 
@@ -329,7 +330,8 @@ async def priority(request: web.Request) -> web.Response:
     task = asyncio.create_task(
         request.app[TICKET_SVC].set_priority(ticket, ticket_type, level, request[SESSION].user_id)
     )
-    done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT)
+    # Bounded: never cancel a pending change to make room, wait for this one instead.
+    done, _ = await asyncio.wait({task}, timeout=RENAME_WAIT if len(_renames) < MAX_RENAMES else None)
     if done:
         with bot_errors(request):
             task.result()

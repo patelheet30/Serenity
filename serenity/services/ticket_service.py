@@ -71,7 +71,7 @@ MAX_TIMEOUT = 28 * 86400  # Discord's limit
 
 def parse_duration(text: str) -> int:
     """"30m", "2h" or "7d" in seconds, up to Discord's 28-day timeout limit."""
-    match = re.fullmatch(r"\s*(\d{1,4})\s*([mhd])\s*", text.lower())
+    match = re.fullmatch(r"(\d{1,4}) ?([mhd])", text.strip().lower())  # no overlapping repeats
     if not match:
         raise TicketError("Give the duration as minutes, hours or days, like 30m, 2h or 7d.")
     seconds = int(match.group(1)) * {"m": 60, "h": 3600, "d": 86400}[match.group(2)]

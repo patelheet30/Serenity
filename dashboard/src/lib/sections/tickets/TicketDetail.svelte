@@ -286,7 +286,7 @@
 			{#if isOpen}
 				<div style="grid-column:1/-1">
 					<dt>Priority</dt>
-					<dd><Segmented label="Priority" value={d.priority} options={PRIORITIES.map((p) => ({ value: p, label: p }))} onchange={setPriority} /></dd>
+					<dd><Segmented label="Priority" bind:value={detail.priority} options={PRIORITIES.map((p) => ({ value: p, label: p }))} onchange={setPriority} /></dd>
 				</div>
 			{/if}
 		</dl>
