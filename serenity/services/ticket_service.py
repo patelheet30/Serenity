@@ -67,6 +67,9 @@ MOD_ACTIONS = {
     "ban": hikari.Permissions.BAN_MEMBERS,
 }
 MAX_TIMEOUT = 28 * 86400  # Discord's limit
+# How a panel offers its types (/ticket panel's choices and the dashboard's), and how many it can.
+PANEL_STYLES = {"Buttons": "buttons", "Dropdown": "menu"}
+MAX_PANEL_TYPES = 25  # five rows of five buttons, or a dropdown's 25 options
 
 
 def parse_duration(text: str) -> int:
