@@ -12,7 +12,9 @@ from typing import Callable, Iterable, Optional
 import hikari
 
 WAIT = 2.0  # seconds a log waits for its audit log entry
-KEEP = 10.0  # seconds an unclaimed entry stays matchable
+# Seconds an unclaimed entry stays matchable. Short, so an entry no log claimed isn't handed to
+# a later change of the same target.
+KEEP = 3.0
 
 Key = tuple[int, int, int]  # guild, action type, target
 
