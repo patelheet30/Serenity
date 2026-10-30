@@ -13,7 +13,11 @@ from serenity.utils.logging import get_logger
 logger = get_logger(__name__)
 
 plugin = arc.GatewayPlugin("security_commands", default_permissions=hikari.Permissions.MANAGE_GUILD)
-security = plugin.include_slash_group("security", "Anti-nuke and dangerous-change alerts.")
+security = plugin.include_slash_group(
+    "security",
+    "Anti-nuke and dangerous-change alerts.",
+    invocation_contexts=[hikari.ApplicationContextType.GUILD],
+)
 
 
 @plugin.set_error_handler

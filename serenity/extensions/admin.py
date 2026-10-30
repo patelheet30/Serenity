@@ -376,7 +376,7 @@ async def view_config(
 
     try:
         guild_config = await repo.get_guild_config(ctx.guild_id)
-        enabled_channels = await repo.get_enabled_channels(ctx.guild_id)
+        enabled_channels = await repo.get_enabled_channels(ctx.guild_id, include_paused=True)
 
         status_emoji = "✅" if guild_config.is_enabled else "❌"
         status_text = "Enabled" if guild_config.is_enabled else "Disabled"

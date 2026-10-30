@@ -78,3 +78,18 @@ async def test_kinds_are_counted_separately():
 async def test_no_alert(svc, actor):
     await burst(svc, 5, actor=actor)
     svc._logging.log_security_alert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_old_actions_drop_out_of_the_count(monkeypatch):
+    import serenity.services.security_service as sec
+
+    clock = [1000.0]
+    monkeypatch.setattr(sec.time, "monotonic", lambda: clock[0])
+    svc = service()
+    await burst(svc, 2, action=hikari.AuditLogEventType.ROLE_DELETE)
+    clock[0] += sec.WINDOW + 1
+    await burst(svc, 3)  # channel deletes cross the threshold; the old role deletes don't count
+    description = svc._logging.log_security_alert.call_args.kwargs["embed"].description
+    assert "roles deleted" not in description
+    assert set(svc._seen) == {(GUILD, MOD, "channels")}  # the stale actor/kind was forgotten

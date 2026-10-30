@@ -14,7 +14,7 @@ Change = hikari.AuditLogChangeKey
 
 def entry(action: hikari.AuditLogEventType, actor: int = MOD, changes=(), reason=None) -> hikari.AuditLogEntry:
     return hikari.AuditLogEntry(
-        app=MagicMock(),
+        app=MagicMock(**{"cache.get_user.return_value": None}),
         id=hikari.Snowflake(1 << 40),
         guild_id=hikari.Snowflake(GUILD),
         target_id=hikari.Snowflake(USER),
@@ -80,3 +80,11 @@ async def test_other_entries_are_ignored(svc):
     assert await svc.record_external(entry(hikari.AuditLogEventType.MEMBER_UPDATE, changes=[nick]), me=ME) is None
     assert await svc.record_external(entry(hikari.AuditLogEventType.CHANNEL_DELETE), me=ME) is None
     svc._mod_repo.create_case.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cached_users_skip_rest(svc):
+    e = entry(hikari.AuditLogEventType.MEMBER_KICK)
+    e.app.cache.get_user.side_effect = lambda uid: MagicMock(id=uid, username=f"user{uid}", is_bot=False)
+    await svc.record_external(e, me=ME)
+    svc._rest.fetch_user.assert_not_called()

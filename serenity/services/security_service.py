@@ -67,6 +67,16 @@ class SecurityService:
         config = await self.modules.get_module_config(guild_id, ModuleType.SECURITY)
         return settings_of(config.settings) if config.is_enabled else None
 
+    def _prune(self, now: float) -> None:
+        """Forget actions older than the window, and actors with none left."""
+        for key in list(self._seen):
+            seen = self._seen[key]
+            while seen and now - seen[0] > WINDOW:
+                seen.popleft()
+            if not seen:
+                del self._seen[key]
+        self._alerted = {k: t for k, t in self._alerted.items() if now - t < ALERT_COOLDOWN}
+
     def _trusted(self, guild_id: int, actor: int, settings: dict[str, Any]) -> bool:
         guild = self._cache.get_guild(guild_id)
         if guild is not None and guild.owner_id == actor:
@@ -89,8 +99,7 @@ class SecurityService:
         now = time.monotonic()
         seen = self._seen[(guild_id, actor, kind)]
         seen.append(now)
-        while seen and now - seen[0] > WINDOW:
-            seen.popleft()
+        self._prune(now)
         if len(seen) < settings["thresholds"][kind]:
             return
         if now - self._alerted.get((guild_id, actor), -ALERT_COOLDOWN) < ALERT_COOLDOWN:
@@ -119,9 +128,7 @@ class SecurityService:
         embed = hikari.Embed(title=title, description=description, color=hikari.Color(0xED4245))
         embed.add_field("By", f"<@{actor}>", inline=True)
         embed.set_footer(text=f"User ID: {actor}")
-        await self._logging.log_security_alert(
-            guild_id=guild_id, embed=embed, log_event=log_event, user_id=actor
-        )
+        await self._logging.log_security_alert(guild_id=guild_id, embed=embed, log_event=log_event)
 
         guild = self._cache.get_guild(guild_id)
         if not dm or guild is None or guild.owner_id == actor:
