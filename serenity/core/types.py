@@ -48,6 +48,7 @@ class ChannelConfig:
     guild_id: int
     is_enabled: bool
     threshold: Optional[int]
+    paused_until: Optional[int] = None  # a manual slowmode change paused auto-slowmode (#150)
 
 
 @dataclass

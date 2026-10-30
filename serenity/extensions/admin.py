@@ -1,3 +1,5 @@
+import time
+
 import arc
 import hikari
 
@@ -374,7 +376,7 @@ async def view_config(
 
     try:
         guild_config = await repo.get_guild_config(ctx.guild_id)
-        enabled_channels = await repo.get_enabled_channels(ctx.guild_id)
+        enabled_channels = await repo.get_enabled_channels(ctx.guild_id, include_paused=True)
 
         status_emoji = "✅" if guild_config.is_enabled else "❌"
         status_text = "Enabled" if guild_config.is_enabled else "Disabled"
@@ -460,6 +462,16 @@ async def channel_config(
             ),
             inline=False,
         )
+
+        if channel_config.paused_until and channel_config.paused_until > time.time():
+            embed.add_field(
+                name="⏸️ Paused",
+                value=(
+                    f"Slowmode was set by hand, so auto-slowmode resumes "
+                    f"<t:{channel_config.paused_until}:R>. Run `/serenity channel enable` to resume now."
+                ),
+                inline=False,
+            )
 
         embed.set_footer(text="Use /serenity channel to configure settings")
         await ctx.respond(embed=embed)

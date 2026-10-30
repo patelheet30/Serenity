@@ -127,6 +127,7 @@ async def _slowmode_json(request: web.Request) -> dict[str, Any]:
                 "enabled": c.is_enabled,
                 "threshold": c.threshold,
                 "slowmode": _current_slowmode(bot, c.channel_id),
+                "paused_until": c.paused_until if (c.paused_until or 0) > time.time() else None,
             }
             for c in await repo.get_channel_configs(gid)
             if bot.cache.get_guild_channel(c.channel_id)  # deleted channels drop out

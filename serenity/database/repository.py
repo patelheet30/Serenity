@@ -178,6 +178,7 @@ class Repository:
                 guild_id=row["guild_id"],
                 is_enabled=row["is_enabled"],
                 threshold=row["threshold"],
+                paused_until=row["paused_until"],
             )
 
         await self.pool.execute(
@@ -192,17 +193,32 @@ class Repository:
             channel_id=channel_id, guild_id=guild_id, is_enabled=True, threshold=None
         )
 
-    async def get_enabled_channels(self, guild_id: int) -> List[int]:
-        """Get all enabled channels for a guild"""
+    async def get_enabled_channels(self, guild_id: int, include_paused: bool = False) -> List[int]:
+        """Get all enabled channels for a guild (by default not the ones paused by #150)"""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         rows = await self.pool.fetch(
-            "SELECT channel_id FROM channel_config WHERE guild_id = $1 AND is_enabled",
+            "SELECT channel_id FROM channel_config WHERE guild_id = $1 AND is_enabled "
+            "AND ($2 OR paused_until IS NULL OR paused_until <= $3)",
             guild_id,
+            include_paused,
+            int(time.time()),
         )
 
         return [row["channel_id"] for row in rows]
+
+    async def pause_channel(self, channel_id: int, until: int) -> bool:
+        """Pause auto-slowmode on an enabled channel until a unix time. False if it isn't managed."""
+        if not self.pool:
+            raise DatabaseError("Database connection is not initialised.")
+
+        return await self.pool.fetchval(
+            "UPDATE channel_config SET paused_until = $2 WHERE channel_id = $1 AND is_enabled "
+            "RETURNING TRUE",
+            channel_id,
+            until,
+        ) or False
 
     async def get_channel_configs(self, guild_id: int) -> List[ChannelConfig]:
         """Every configured channel in a guild, enabled or not"""
@@ -236,7 +252,7 @@ class Repository:
 
         if is_enabled is not None:
             params.append(is_enabled)
-            updates.append(f"is_enabled = ${len(params)}")
+            updates.append(f"is_enabled = ${len(params)}, paused_until = NULL")
         if threshold is not None:
             params.append(threshold or None)
             updates.append(f"threshold = ${len(params)}")

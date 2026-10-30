@@ -818,6 +818,32 @@ class LoggingService:
             role_mentions=role_ids,
         )
 
+    async def log_slowmode_paused(
+        self, *, guild_id: int, channel_id: int, moderator_id: int, old: int, new: int, until: int
+    ) -> None:
+        """Someone set slowmode by hand on an auto-slowmode channel, so it's paused there (#150)."""
+        embed = hikari.Embed(
+            title="⏸️ Auto-slowmode paused",
+            description=(
+                f"Slowmode in <#{channel_id}> was changed by hand, so Serenity won't adjust it "
+                f"until <t:{until}:t> (<t:{until}:R>)."
+            ),
+            color=_YELLOW,
+            timestamp=_now(),
+        )
+        embed.add_field("By", f"<@{moderator_id}>", inline=True)
+        before, after = (_format_duration(s) if s else "off" for s in (old, new))
+        embed.add_field("Slowmode", f"{before} → {after}", inline=True)
+        embed.set_footer(text="Re-enable the channel to resume now")
+        await self._send(
+            log_event="slowmode_paused",
+            guild_id=guild_id,
+            log_type="server",
+            embed=embed,
+            channel_id=channel_id,
+            user_id=moderator_id,
+        )
+
     async def log_dashboard_change(
         self, *, guild_id: int, user_id: int, setting: str, old: str, new: str
     ) -> None:

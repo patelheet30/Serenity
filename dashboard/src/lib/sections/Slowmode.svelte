@@ -13,7 +13,7 @@
 	import { toast } from '../toast.svelte';
 	import { ago } from '../util';
 
-	type Row = { id: string; enabled: boolean; threshold: number | null; slowmode: number | null };
+	type Row = { id: string; enabled: boolean; threshold: number | null; slowmode: number | null; paused_until: number | null };
 	type Slowmode = { enabled: boolean; default_threshold: number; interval: number; channels: Row[] };
 	type Live = { id: string; rate: number; history: number[]; slowmode: number | null };
 	type Change = { channel_id: string; old: number; new: number; reason: string; rate: number; confidence: number; at: number };
@@ -310,6 +310,13 @@
 							/>
 						{:else if c.key === 'slowmode'}
 							<span class="sm-val" class:on={slowmodeOf(row)}>{fmt(slowmodeOf(row))}</span>
+							{#if row.paused_until}
+								<button
+									class="paused"
+									title="Set by hand, so auto-slowmode is paused until {new Date(row.paused_until * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Click to resume now."
+									onclick={() => putChannel(row.id, { enabled: true })}>paused</button
+								>
+							{/if}
 						{:else if c.key === 'enabled'}
 							<Toggle
 								label="Auto slowmode for #{name(row.id)}"
