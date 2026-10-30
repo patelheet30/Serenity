@@ -1054,7 +1054,8 @@ class TicketService:
                 warnings = await mod_repo.get_warning_count(guild_id, user_id)
                 cases = await mod_repo.get_user_cases(guild_id, user_id, limit=3)
                 record = [f"{warnings} active warning{'' if warnings == 1 else 's'}"] + [
-                    f"Case #{c['case_number']} {c['action']} <t:{c['created_at']}:R>: {(c['reason'] or '')[:80]}"
+                    f"Case #{c['case_number']} {c['action']}{' (external)' if c.get('external_source') else ''} "
+                    f"<t:{c['created_at']}:R>: {(c['reason'] or '')[:80]}"
                     for c in cases
                 ]
                 embed.add_field("Moderation record", f"<@{user_id}>\n" + "\n".join(record)[:1000])

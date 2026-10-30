@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 import hikari
@@ -17,6 +18,17 @@ def _audit_reason(moderator: hikari.User, case_number: int, reason: Optional[str
     if reason:
         return f"{base}: {reason}"
     return base
+
+# Audit log entries that become external cases. Timeouts arrive as MEMBER_UPDATE with a
+# communication_disabled_until change, which record_external checks itself.
+_EXTERNAL_ACTIONS: dict[object, str] = {
+    hikari.AuditLogEventType.MEMBER_BAN_ADD: "ban",
+    hikari.AuditLogEventType.MEMBER_BAN_REMOVE: "unban",
+    hikari.AuditLogEventType.MEMBER_KICK: "kick",
+}
+# Audit log types record_external can turn into a case (MEMBER_UPDATE only for timeouts).
+EXTERNAL_TYPES = frozenset({*_EXTERNAL_ACTIONS, hikari.AuditLogEventType.MEMBER_UPDATE})
+
 
 class ModerationService:
     """Executes moderation actions and handles the case/log pipeline."""
@@ -41,6 +53,7 @@ class ModerationService:
         reason: Optional[str],
         duration_seconds: Optional[int] = None,
         expires_at: Optional[int] = None,
+        external_source: Optional[str] = None,
     ) -> int:
         case_number = await self._mod_repo.create_case(
             guild_id=guild_id,
@@ -49,7 +62,8 @@ class ModerationService:
             moderator_id=moderator.id,
             reason = reason or "No reason provided",
             duration_seconds=duration_seconds,
-            expires_at=expires_at
+            expires_at=expires_at,
+            external_source=external_source,
         )
 
         await self._logging_svc.log_mod_action(
@@ -59,10 +73,61 @@ class ModerationService:
             moderator=moderator,
             reason=reason,
             case_number=case_number,
-            duration=duration_seconds
+            duration=duration_seconds,
+            external_source=external_source,
         )
 
         return case_number
+
+    async def record_external(self, entry: hikari.AuditLogEntry, *, me: int) -> Optional[int]:
+        """Make a case for a ban, unban, kick or timeout Serenity didn't take (#99).
+
+        Returns the case number, or None when the entry isn't one of those or Serenity made it
+        (its own commands already made the case).
+        """
+        if entry.user_id is None or entry.user_id == me or entry.target_id is None:
+            return None
+
+        action = _EXTERNAL_ACTIONS.get(entry.action_type)
+        duration = expires_at = None
+        if entry.action_type == hikari.AuditLogEventType.MEMBER_UPDATE:
+            change = next(
+                (c for c in entry.changes if c.key == hikari.AuditLogChangeKey.COMMUNICATION_DISABLED_UNTIL),
+                None,
+            )
+            if change is None:
+                return None
+            until = change.new_value
+            if not isinstance(until, datetime):  # None (or UNDEFINED) means the timeout was removed
+                action = "untimeout"
+            else:
+                action = "timeout"
+                duration = max(0, int((until - entry.id.created_at).total_seconds()))
+                expires_at = int(until.timestamp())
+        if action is None:
+            return None
+
+        async def user(user_id: hikari.Snowflake) -> hikari.User:
+            cache = getattr(entry.app, "cache", None)
+            return (cache and cache.get_user(user_id)) or await self._rest.fetch_user(user_id)
+
+        try:
+            target = await user(entry.target_id)
+            moderator = await user(entry.user_id)
+        except hikari.HTTPError:
+            logger.warning(f"Couldn't fetch users for audit log entry {entry.id}", exc_info=True)
+            return None
+
+        return await self._create_case_and_log(
+            guild_id=entry.guild_id,
+            action=action,
+            target=target,
+            moderator=moderator,
+            reason=entry.reason,
+            duration_seconds=duration,
+            expires_at=expires_at,
+            external_source=moderator.username if moderator.is_bot else "Discord",
+        )
 
     async def ban(
         self,

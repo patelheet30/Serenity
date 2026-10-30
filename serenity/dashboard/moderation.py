@@ -63,6 +63,7 @@ def _case_json(request: web.Request, case: dict[str, Any], now: int) -> dict[str
         "expires_at": case["expires_at"],
         "active": _status(case, now),
         "ticket": case.get("source_ticket_number"),  # made with a ticket's Mod action
+        "external": case.get("external_source"),  # taken outside Serenity: a bot's name or "Discord"
     }
 
 

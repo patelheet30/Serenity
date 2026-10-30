@@ -24,8 +24,12 @@ class ModerationRepository:
         reason: Optional[str] = "No reason provided.",
         duration_seconds: Optional[int] = None,
         expires_at: Optional[int] = None,
+        external_source: Optional[str] = None,
     ) -> int:
-        """Create a new moderation case and return the case number"""
+        """Create a new moderation case and return the case number.
+
+        external_source marks a case Serenity didn't take (a bot's name, or 'Discord').
+        """
         if not self.pool:
             raise DatabaseError("Database connection is not initialised")
 
@@ -35,8 +39,8 @@ class ModerationRepository:
             await conn.execute("SELECT pg_advisory_xact_lock($1)", guild_id)
             next_case_number = await conn.fetchval(
                 """INSERT INTO mod_cases
-                (guild_id, case_number, target_user_id, moderator_id, action, reason, duration_sections, created_at, expires_at, is_active)
-                SELECT $1, COALESCE(MAX(case_number), 0) + 1, $2, $3, $4, $5, $6, $7, $8, TRUE
+                (guild_id, case_number, target_user_id, moderator_id, action, reason, duration_sections, created_at, expires_at, is_active, external_source)
+                SELECT $1, COALESCE(MAX(case_number), 0) + 1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9
                 FROM mod_cases WHERE guild_id = $1
                 RETURNING case_number""",
                 guild_id,
@@ -47,6 +51,7 @@ class ModerationRepository:
                 duration_seconds,
                 int(time.time()),
                 expires_at,
+                external_source,
             )
 
         logger.info(
@@ -252,6 +257,11 @@ class ModerationRepository:
 
         stats = {row["action"]: row["count"] for row in rows}
 
+        stats["external"] = await self.pool.fetchval(
+            "SELECT COUNT(*) FROM mod_cases WHERE guild_id = $1 AND created_at >= $2 AND external_source IS NOT NULL",
+            guild_id,
+            cutoff,
+        )
         stats["warnings"] = await self.pool.fetchval(
             "SELECT COUNT(*) FROM warnings WHERE guild_id = $1 AND created_at >= $2",
             guild_id,

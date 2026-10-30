@@ -72,7 +72,7 @@ async def test_case_updates_and_queries(mod_repo: ModerationRepository):
     assert await mod_repo.get_all_expired_timeouts() == []
 
     stats = await mod_repo.get_moderation_stats(GUILD)
-    assert stats == {"timeout": 2, "warnings": 0}
+    assert stats == {"timeout": 2, "external": 0, "warnings": 0}
 
 
 @pytest.mark.asyncio

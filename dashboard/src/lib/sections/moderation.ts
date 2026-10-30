@@ -12,6 +12,8 @@ export type Case = {
 	active: boolean | null;
 	/** The ticket it was made from (a ticket's Mod action). */
 	ticket: number | null;
+	/** Taken outside Serenity: the bot's name, or "Discord". */
+	external: string | null;
 };
 
 /** Case durations (seconds) as the bot's embeds write them: 45s, 10m, 1h 30m, 7d. */

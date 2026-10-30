@@ -1,7 +1,9 @@
 import arc
 import hikari
 
+from serenity.core.modules import ModuleManager, ModuleType
 from serenity.services.logging_service import LoggingService
+from serenity.services.moderation_service import EXTERNAL_TYPES, ModerationService
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -123,6 +125,21 @@ async def on_guild_update(event: hikari.GuildUpdateEvent) -> None:
 async def on_emojis_update(event: hikari.EmojisUpdateEvent) -> None:
     svc: LoggingService = plugin.client.get_type_dependency(LoggingService)
     await svc.log_emoji_update(event)
+
+
+# ---------------------------------------------------------------------------
+# Audit log (needs the bot's View Audit Log permission; Discord sends nothing without it)
+# ---------------------------------------------------------------------------
+
+
+@plugin.listen()
+async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
+    modules: ModuleManager = plugin.client.get_type_dependency(ModuleManager)
+    if event.entry.action_type in EXTERNAL_TYPES and await modules.is_enabled(
+        event.guild_id, ModuleType.MODERATION
+    ):
+        mod: ModerationService = plugin.client.get_type_dependency(ModerationService)
+        await mod.record_external(event.entry, me=plugin.client.app.get_me().id)  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

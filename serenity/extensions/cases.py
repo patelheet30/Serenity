@@ -85,14 +85,17 @@ def _build_case_embed(case: dict, target_tag: str, mod_tag: str) -> hikari.Embed
     action = case["action"]
     title_str, color = ACTION_META.get(action, (f"🛡️ {action.title()}", hikari.Color(0x99AAB5)))
 
+    external = " · External" if case.get("external_source") else ""
     embed = hikari.Embed(
-        title=f"{title_str} | Case #{case['case_number']}",
+        title=f"{title_str} | Case #{case['case_number']}{external}",
         color=color,
         timestamp=datetime.fromtimestamp(case["created_at"], tz=timezone.utc),
     )
 
     embed.add_field("Target", f"<@{case['target_user_id']}> (`{target_tag}`)", inline=True)
     embed.add_field("Moderator", f"<@{case['moderator_id']}> (`{mod_tag}`)", inline=True)
+    if case.get("external_source"):
+        embed.add_field("Via", case["external_source"], inline=True)
     now = int(time.time())
     action = case["action"]
 
@@ -103,8 +106,6 @@ def _build_case_embed(case: dict, target_tag: str, mod_tag: str) -> hikari.Embed
         status = "🟢 Active" if case["is_active"] else "🔴 Cleared"
     else:
         status = "✅ Applied"
-
-    embed.add_field("Status", status, inline=True)
 
     embed.add_field("Status", status, inline=True)
     embed.add_field("Reason", case["reason"] or "No reason provided", inline=False)
@@ -211,7 +212,8 @@ async def view_cases(
         if len(reason) > 40:
             reason = reason[:37] + "..."
         status = "" if case["is_active"] else " ~~inactive~~"
-        lines.append(f"`#{case['case_number']}` {emoji} **{action_label}**{status} • {created}\n　　{reason}")
+        external = f" · external via {case['external_source']}" if case.get("external_source") else ""
+        lines.append(f"`#{case['case_number']}` {emoji} **{action_label}**{status}{external} • {created}\n　　{reason}")
 
     embed.description = "\n\n".join(lines)
 
@@ -405,6 +407,7 @@ async def modstats(
 
     # Separate warnings count (from warnings table) from case-based actions
     warnings_count = stats.pop("warnings", 0)
+    external_count = stats.pop("external", 0)
 
     total_cases = sum(stats.values())
     total_actions = total_cases + warnings_count
@@ -432,6 +435,11 @@ async def modstats(
 
     if total_actions == 0:
         embed.description = f"No moderation actions in the last **{days}** day{'s' if days != 1 else ''}."
+
+    if external_count:
+        embed.add_field(
+            "🌐 External", f"{external_count} taken outside Serenity (Discord or other bots)", inline=False
+        )
 
     embed.set_footer(text=f"Requested by {ctx.user}")
     await ctx.respond(embed=embed)

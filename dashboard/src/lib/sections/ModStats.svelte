@@ -44,7 +44,7 @@
 {#if !stats}
 	<section class="pane"><EmptyState>Loading…</EmptyState></section>
 {:else}
-	{@const { warnings: warningsIssued = 0, ...byAction } = stats.totals}
+	{@const { warnings: warningsIssued = 0, external = 0, ...byAction } = stats.totals}
 	{@const cases = sum(byAction)}
 	{@const perDay = stats.daily.map((d) => GROUPS.map((g) => g.a.reduce((n, a) => n + (d.counts[a] ?? 0), 0)))}
 	{@const peak = Math.max(1, ...perDay.map((v) => v.reduce((a, b) => a + b, 0)))}
@@ -53,7 +53,7 @@
 	{@const busiest = Math.max(1, ...stats.moderators.map((m) => sum(m.counts)))}
 	<div class="tiles" style="margin-bottom:14px">
 		<div class="tile"><b>{cases + warningsIssued}</b><span>Actions (cases + warnings, as /modstats)</span></div>
-		<div class="tile"><b>{cases}</b><span>Cases</span></div>
+		<div class="tile"><b>{cases}</b><span>Cases{external ? ` · ${external} external` : ''}</span></div>
 		<div class="tile"><b>{stats.active.timeouts}</b><span>Active timeouts now</span></div>
 		<div class="tile"><b>{stats.active.warnings}</b><span>Active warnings now</span></div>
 	</div>
