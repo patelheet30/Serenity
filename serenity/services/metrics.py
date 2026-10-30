@@ -85,7 +85,8 @@ LOG_EVENTS_SENT = Counter(
     ["guild_id", "event"],
 )
 
-# Every log_event LoggingService can send (mod_* comes from ModerationService actions)
+# Every log_event LoggingService can send (mod_* comes from ModerationService actions,
+# external_* from the ones Serenity didn't take)
 LOG_EVENTS = (
     "message_delete", "message_edit", "bulk_message_delete",
     "member_join", "member_leave", "member_update", "voice_state_update",
@@ -93,6 +94,7 @@ LOG_EVENTS = (
     "role_create", "role_delete", "role_update", "guild_update", "emoji_update",
     "dashboard_change", "ticket_raid_brake",
     "mod_ban", "mod_softban", "mod_unban", "mod_kick", "mod_timeout", "mod_untimeout", "mod_warn",
+    "external_ban", "external_unban", "external_kick", "external_timeout", "external_untimeout",
 )
 
 COMMANDS_USED = Counter(

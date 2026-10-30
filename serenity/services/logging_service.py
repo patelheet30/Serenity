@@ -666,6 +666,7 @@ class LoggingService:
         reason: Optional[str],
         case_number: int,
         duration: Optional[int] = None,
+        external_source: Optional[str] = None,
     ) -> None:
         """
         Send a moderation action to the mod-log channel.
@@ -676,6 +677,8 @@ class LoggingService:
             One of: "ban", "unban", "kick", "timeout", "untimeout", "warn", "softban"
         duration:
             Duration in seconds, only relevant for timeouts.
+        external_source:
+            Set for actions Serenity didn't take (a bot's name, or "Discord").
         """
         action_meta: dict[str, tuple[str, hikari.Color]] = {
             "ban": ("🔨 Ban", _RED),
@@ -687,14 +690,17 @@ class LoggingService:
             "warn": ("⚠️ Warning", _RED),
         }
         title_str, color = action_meta.get(action.lower(), (f"🛡️ {action.title()}", _GREY))
+        external = " · External" if external_source else ""
         embed = hikari.Embed(
-            title=f"{title_str} | Case #{case_number}",
+            title=f"{title_str} | Case #{case_number}{external}",
             color=color,
             timestamp=_now(),
         )
         embed.set_thumbnail(target.display_avatar_url)
         embed.add_field("User", f"{target.mention} (`{target}`)", inline=True)
         embed.add_field("Moderator", f"{moderator.mention} (`{moderator}`)", inline=True)
+        if external_source:
+            embed.add_field("Via", external_source, inline=True)
 
         if duration is not None:
             embed.add_field("Duration", _format_duration(duration), inline=True)
@@ -705,7 +711,7 @@ class LoggingService:
         embed.set_footer(text=f"User ID: {target.id} | Case #{case_number}")
 
         await self._send(
-            log_event=f"mod_{action.lower()}",
+            log_event=f"{'external' if external_source else 'mod'}_{action.lower()}",
             guild_id=guild_id, log_type="mod", embed=embed, user_id=target.id
         )
 

@@ -22,7 +22,8 @@ DISCORD_API = "https://discord.com/api/v10"
 SESSION_IDLE_SECONDS = 7 * 24 * 3600
 ACCESS_CACHE_SECONDS = 60
 
-# What the bot itself needs in a guild (slowmode, logging, moderation).
+# What the bot itself needs in a guild (slowmode, logging, moderation; View Audit Log for
+# actions Serenity didn't take).
 BOT_PERMISSIONS = (
     hikari.Permissions.VIEW_CHANNEL
     | hikari.Permissions.SEND_MESSAGES
@@ -33,6 +34,7 @@ BOT_PERMISSIONS = (
     | hikari.Permissions.KICK_MEMBERS
     | hikari.Permissions.BAN_MEMBERS
     | hikari.Permissions.MODERATE_MEMBERS
+    | hikari.Permissions.VIEW_AUDIT_LOG
 )
 
 

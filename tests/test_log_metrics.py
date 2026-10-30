@@ -47,7 +47,8 @@ def test_log_events_cover_every_sent_event():
     moderation_src = Path("serenity/services/moderation_service.py").read_text()
     sent = set(re.findall(r'log_event="(\w+)"', logging_src))
     actions = re.findall(r'action="(\w+)"', moderation_src)
-    assert sent | {f"mod_{a}" for a in actions} == set(LOG_EVENTS)
+    external = re.findall(r'MEMBER_\w+: "(\w+)"', moderation_src) + ["timeout", "untimeout"]
+    assert sent | {f"mod_{a}" for a in actions} | {f"external_{a}" for a in external} == set(LOG_EVENTS)
 
 
 def test_init_guild_log_events_starts_at_zero():

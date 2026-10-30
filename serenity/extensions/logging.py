@@ -110,6 +110,17 @@ async def on_error(ctx: arc.GatewayContext, exc: Exception) -> None:
         return
     raise exc
 
+AUDIT_LOG_HINT = (
+    "Grant me **View Audit Log** to also log bans, kicks and timeouts made outside Serenity "
+    "(the Discord app or other bots) as external cases."
+)
+
+
+def _missing_audit_log(ctx: arc.GatewayContext) -> bool:
+    perms = ctx.interaction.app_permissions
+    return perms is not None and not perms & hikari.Permissions.VIEW_AUDIT_LOG
+
+
 async def _set_channel(
     ctx: arc.GatewayContext,
     repo: LoggingRepository,
@@ -132,6 +143,8 @@ async def _set_channel(
         description=f"{channel.mention} will now receive **{label.lower()}** events.",
         color=hikari.Color(0x57F287),
     )
+    if log_type == "mod" and _missing_audit_log(ctx):
+        embed.add_field("Tip", AUDIT_LOG_HINT)
     await ctx.respond(embed=embed)
     logger.info(
         f"Set {log_type} log channel to {channel.id} in guild {ctx.guild_id} "
@@ -272,6 +285,9 @@ async def view(
             value = f"{status} → {channel_mention}{ignore_str}"
 
         embed.add_field(label, value, inline=True)
+
+    if _missing_audit_log(ctx):
+        embed.add_field("⚠️ View Audit Log", AUDIT_LOG_HINT, inline=False)
 
     embed.set_footer(
         text="Use /logging <type>-log <channel> to configure • /logging enable/disable to toggle"
