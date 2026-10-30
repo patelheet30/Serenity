@@ -184,3 +184,11 @@ async def test_gaining_a_vanity_url_is_not_a_warning():
     assert await warned(service(), gained) is None
     removed = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VANITY_URL_CODE, "cool", None)], target=GUILD)
     assert "Vanity URL" in await warned(service(), removed)
+
+
+def test_stored_thresholds_are_clamped():
+    from serenity.services.security_service import settings_of
+
+    t = settings_of({"thresholds": {"channels": 0, "roles": 999, "webhooks": "x", "bogus": 1}})["thresholds"]
+    assert (t["channels"], t["roles"], t["webhooks"], t["removals"]) == (2, 50, 3, 5)
+    assert "bogus" not in t

@@ -79,3 +79,11 @@ async def test_options_without_known_fields_store_as_empty_json(pg_repo):
     repo = AuditRepository(pg_repo.pool)
     await repo.add(entry(snowflake_at(1), options=object()))
     assert (await repo.search(GUILD))[0]["options"] == {}
+
+
+@pytest.mark.asyncio
+async def test_changes_defaults_to_an_empty_list(pg_repo):
+    await pg_repo.pool.execute(
+        "INSERT INTO audit_log_entries (guild_id, entry_id, action_type, created_at) VALUES ($1, 1, 1, 0)", GUILD
+    )
+    assert await pg_repo.pool.fetchval("SELECT changes FROM audit_log_entries WHERE guild_id = $1", GUILD) == "[]"
