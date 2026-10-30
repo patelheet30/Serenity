@@ -177,17 +177,27 @@ async def pause_for_manual_slowmode(
 async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     me = plugin.client.app.get_me().id  # type: ignore[union-attr]
     get = plugin.client.get_type_dependency
-    get(AuditActors).feed(event.entry)
-    await get(LoggingService).log_audit_entry(event.entry)
-    await get(SecurityService).on_entry(event.entry, me=me)
-    await get(SecurityService).check_dangerous(event.entry, me=me)
-    await pause_for_manual_slowmode(
-        event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
-    )
-    if event.entry.action_type in EXTERNAL_TYPES and await get(ModuleManager).is_enabled(
-        event.guild_id, ModuleType.MODERATION
+    entry = event.entry
+    get(AuditActors).feed(entry)
+
+    async def record_external() -> None:
+        if entry.action_type in EXTERNAL_TYPES and await get(ModuleManager).is_enabled(
+            event.guild_id, ModuleType.MODERATION
+        ):
+            await get(ModerationService).record_external(entry, me=me)
+
+    # Each feature runs even if an earlier one fails on this entry.
+    for step in (
+        get(LoggingService).log_audit_entry(entry),
+        get(SecurityService).on_entry(entry, me=me),
+        get(SecurityService).check_dangerous(entry, me=me),
+        pause_for_manual_slowmode(entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)),
+        record_external(),
     ):
-        await get(ModerationService).record_external(event.entry, me=me)
+        try:
+            await step
+        except Exception:
+            logger.exception(f"Audit log entry {entry.id} failed in {step.__qualname__}")
 
 
 # ---------------------------------------------------------------------------
