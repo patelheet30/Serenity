@@ -73,6 +73,10 @@ async def test_timeout_added_and_removed(svc):
     await svc.record_external(e, me=ME)
     assert svc._mod_repo.create_case.call_args.kwargs["action"] == "untimeout"
 
+    e.changes = [hikari.AuditLogChange(new_value=hikari.UNDEFINED, old_value=until, key=Change.COMMUNICATION_DISABLED_UNTIL)]
+    await svc.record_external(e, me=ME)
+    assert svc._mod_repo.create_case.call_args.kwargs["action"] == "untimeout"
+
 
 @pytest.mark.asyncio
 async def test_other_entries_are_ignored(svc):
