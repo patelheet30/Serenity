@@ -2,6 +2,7 @@ import time
 
 import arc
 import hikari
+from hikari.events.auto_mod_events import AutoModActionExecutionEvent
 
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.repository import Repository
@@ -136,6 +137,12 @@ async def on_emojis_update(event: hikari.EmojisUpdateEvent) -> None:
 # ---------------------------------------------------------------------------
 
 
+@plugin.listen()
+async def on_automod_action(event: AutoModActionExecutionEvent) -> None:
+    svc: LoggingService = plugin.client.get_type_dependency(LoggingService)
+    await svc.log_automod_action(event)
+
+
 MANUAL_SLOWMODE_PAUSE = 3600  # seconds auto-slowmode leaves a hand-set slowmode alone (#150)
 
 
@@ -170,6 +177,7 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     me = plugin.client.app.get_me().id  # type: ignore[union-attr]
     get = plugin.client.get_type_dependency
     get(AuditActors).feed(event.entry)
+    await get(LoggingService).log_audit_entry(event.entry)
     await pause_for_manual_slowmode(
         event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
     )

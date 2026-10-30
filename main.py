@@ -53,6 +53,7 @@ bot = hikari.GatewayBot(
     | hikari.Intents.GUILD_EMOJIS           # Emoji logging
     | hikari.Intents.MESSAGE_CONTENT        # Message content for edit/delete logs (privileged)
     | hikari.Intents.GUILD_MODERATION       # Bans and audit log entries (external cases)
+    | hikari.Intents.AUTO_MODERATION_EXECUTION  # AutoMod action logs
 )
 
 client = arc.GatewayClient(bot)
