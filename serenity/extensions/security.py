@@ -59,6 +59,7 @@ async def status(ctx: arc.GatewayContext, svc: SecurityService = arc.inject()) -
         + "\n".join(f"{KINDS[k][2].capitalize()}: **{n}**/min" for k, n in settings["thresholds"].items()),
         inline=True,
     )
+    embed.add_field("Dangerous-change warnings", "✅ On" if settings["warnings"] else "❌ Off", inline=True)
     trusted = [f"<@{u}>" for u in settings["trusted_users"]] + [f"<@&{r}>" for r in settings["trusted_roles"]]
     embed.add_field("Trusted (never counted)", " ".join(trusted) or "*Only the owner*", inline=False)
     perms = ctx.interaction.app_permissions
@@ -77,6 +78,18 @@ async def antinuke(
 ) -> None:
     await _update(ctx, svc, antinuke=enabled)
     await ctx.respond(f"✅ Anti-nuke alerts are now **{'on' if enabled else 'off'}**.")
+
+
+@security.include
+@arc.with_hook(require_module(ModuleType.SECURITY))
+@arc.slash_subcommand("warnings", "Turn dangerous-change warnings on or off.")
+async def warnings(
+    ctx: arc.GatewayContext,
+    enabled: arc.Option[bool, arc.BoolParams("Warn about admin roles, new bots, webhooks, lowered security")],
+    svc: SecurityService = arc.inject(),
+) -> None:
+    await _update(ctx, svc, warnings=enabled)
+    await ctx.respond(f"✅ Dangerous-change warnings are now **{'on' if enabled else 'off'}**.")
 
 
 @security.include

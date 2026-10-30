@@ -6,7 +6,7 @@ import hikari
 import pytest
 
 from serenity.core.modules import ModuleConfig, ModuleType
-from serenity.services.security_service import SecurityService
+from serenity.services.security_service import DEFAULTS, SecurityService
 
 GUILD, ME, OWNER, MOD, ROLE = 1, 10, 11, 20, 70
 
@@ -80,6 +80,79 @@ async def test_no_alert(svc, actor):
     svc._logging.log_security_alert.assert_not_called()
 
 
+# --- Dangerous-change warnings (#153) ----------------------------------------------------------
+
+P = hikari.Permissions
+K = hikari.AuditLogChangeKey
+
+
+def change_entry(action, changes, target=99, actor=MOD) -> hikari.AuditLogEntry:
+    e = entry(action=action, actor=actor, target=target)
+    e.changes = [hikari.AuditLogChange(key=k, old_value=o, new_value=n) for k, o, n in changes]
+    return e
+
+
+async def warned(svc, e) -> str | None:
+    await svc.check_dangerous(e, me=ME)
+    call = svc._logging.log_security_alert.call_args
+    return call and call.kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_role_gaining_admin_warns():
+    e = change_entry(hikari.AuditLogEventType.ROLE_UPDATE, [(K.PERMISSIONS, P.SEND_MESSAGES, P.SEND_MESSAGES | P.ADMINISTRATOR)])
+    assert "gained **Administrator**" in await warned(service(), e)
+
+
+@pytest.mark.asyncio
+async def test_everyone_role_is_named():
+    e = change_entry(hikari.AuditLogEventType.ROLE_UPDATE, [(K.PERMISSIONS, P.NONE, P.MENTION_ROLES)], target=GUILD)
+    assert (await warned(service(), e)).startswith("@everyone gained")
+
+
+@pytest.mark.asyncio
+async def test_powerful_role_given():
+    svc = service()
+    svc._cache.get_role.return_value = MagicMock(permissions=P.BAN_MEMBERS)
+    role = MagicMock(id=hikari.Snowflake(ROLE))
+    e = change_entry(hikari.AuditLogEventType.MEMBER_ROLE_UPDATE, [(K.ADD_ROLE_TO_MEMBER, None, {ROLE: role})], target=40)
+    assert f"<@40> was given <@&{ROLE}>" in await warned(svc, e)
+
+
+@pytest.mark.asyncio
+async def test_lowered_and_raised_security():
+    lower = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VERIFICATION_LEVEL, hikari.GuildVerificationLevel.HIGH, hikari.GuildVerificationLevel.LOW)], target=GUILD)
+    assert "Verification level" in await warned(service(), lower)
+
+    raise_ = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.MFA_LEVEL, hikari.GuildMFALevel.NONE, hikari.GuildMFALevel.ELEVATED)], target=GUILD)
+    assert await warned(service(), raise_) is None
+
+
+@pytest.mark.asyncio
+async def test_bot_and_webhook():
+    assert "was added" in await warned(service(), entry(action=hikari.AuditLogEventType.BOT_ADD))
+    hook = change_entry(hikari.AuditLogEventType.WEBHOOK_CREATE, [(K.NAME, None, "Spidey"), (K.CHANNEL_ID, None, 5)])
+    assert "**Spidey**" in await warned(service(), hook)
+
+
+@pytest.mark.asyncio
+async def test_no_warning_when_off_harmless_or_serenity():
+    admin = [(K.PERMISSIONS, P.NONE, P.ADMINISTRATOR)]
+    assert await warned(service(settings={"warnings": False}), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin)) is None
+    assert await warned(service(enabled=False), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin)) is None
+    assert await warned(service(), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin, actor=ME)) is None
+    harmless = [(K.PERMISSIONS, P.NONE, P.SEND_MESSAGES)]
+    assert await warned(service(), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, harmless)) is None
+
+
+@pytest.mark.asyncio
+async def test_owner_changes_log_without_a_dm():
+    svc = service()
+    await svc.check_dangerous(entry(action=hikari.AuditLogEventType.BOT_ADD, actor=OWNER), me=ME)
+    svc._logging.log_security_alert.assert_called_once()
+    svc._rest.create_dm_channel.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_old_actions_drop_out_of_the_count(monkeypatch):
     import serenity.services.security_service as sec
@@ -93,6 +166,24 @@ async def test_old_actions_drop_out_of_the_count(monkeypatch):
     description = svc._logging.log_security_alert.call_args.kwargs["embed"].description
     assert "roles deleted" not in description
     assert set(svc._seen) == {(GUILD, MOD, "channels")}  # the stale actor/kind was forgotten
+
+
+@pytest.mark.asyncio
+async def test_warnings_default_on_and_dm_once_a_minute():
+    assert DEFAULTS["warnings"] is True
+    svc = service()
+    for _ in range(3):
+        await svc.check_dangerous(entry(action=hikari.AuditLogEventType.BOT_ADD), me=ME)
+    assert svc._logging.log_security_alert.call_count == 3
+    svc._rest.create_dm_channel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gaining_a_vanity_url_is_not_a_warning():
+    gained = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VANITY_URL_CODE, None, "cool")], target=GUILD)
+    assert await warned(service(), gained) is None
+    removed = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VANITY_URL_CODE, "cool", None)], target=GUILD)
+    assert "Vanity URL" in await warned(service(), removed)
 
 
 def test_stored_thresholds_are_clamped():

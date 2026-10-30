@@ -10,6 +10,7 @@ import pytest
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.logging_service import _AUDIT_LOGS, LoggingService
 from serenity.services.metrics import LOG_EVENTS, LOG_EVENTS_SENT, init_guild_log_events
+from serenity.services.security_service import WARNING_EVENTS
 
 
 def _sent(guild_id: int) -> float:
@@ -46,7 +47,7 @@ def test_log_events_cover_every_sent_event():
     logging_src = Path("serenity/services/logging_service.py").read_text()
     logging_src += Path("serenity/services/security_service.py").read_text()
     moderation_src = Path("serenity/services/moderation_service.py").read_text()
-    sent = set(re.findall(r'log_event="(\w+)"', logging_src)) | {e for _, _, e in _AUDIT_LOGS.values()}
+    sent = set(re.findall(r'log_event="(\w+)"', logging_src)) | {e for _, _, e in _AUDIT_LOGS.values()} | set(WARNING_EVENTS)
     actions = re.findall(r'action="(\w+)"', moderation_src)
     external = re.findall(r'MEMBER_\w+: "(\w+)"', moderation_src) + ["timeout", "untimeout"]
     assert sent | {f"mod_{a}" for a in actions} | {f"external_{a}" for a in external} == set(LOG_EVENTS)
