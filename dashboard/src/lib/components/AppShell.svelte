@@ -9,7 +9,8 @@
 	import Mark from './Mark.svelte';
 	import UserMenu from './UserMenu.svelte';
 
-	// Top command bar: brand, server switcher, section tabs (second row below 1500px), ⌘K, account.
+	// Top command bar: brand, server switcher, section tabs (second row below 1240px), ⌘K, account.
+	// Sections with a parent share its tab and get a sub-nav above the page.
 	let {
 		me,
 		guild,
@@ -28,6 +29,10 @@
 		children: Snippet;
 	} = $props();
 
+	const parentOf = (k: string) => sections.find((s) => s.k === k)?.parent ?? k;
+	const top = $derived(sections.filter((s) => !s.parent));
+	const group = $derived(sections.filter((s) => parentOf(s.k) === parentOf(section)));
+
 	$effect(() => registerCommands([...sectionCommands(guild.id, sections), ...serverCommands(guilds)]));
 </script>
 
@@ -40,12 +45,12 @@
 			<Icon name="chev" />
 		</button>
 		<nav class="tabs" aria-label="Sections">
-			{#each sections as s (s.k)}
+			{#each top as s (s.k)}
 				<a
 					class="tab"
 					title="g then {s.key}"
 					href="/dashboard/{guild.id}/{s.k}"
-					aria-current={s.k === section ? 'page' : undefined}><Icon name={s.k} />{s.name}</a
+					aria-current={s.k === section ? 'page' : s.k === parentOf(section) ? 'true' : undefined}><Icon name={s.k} />{s.name}</a
 				>
 			{/each}
 		</nav>
@@ -58,4 +63,13 @@
 		</div>
 	</div>
 </header>
-<main class="dash" id="main">{@render children()}</main>
+<main class="dash" id="main">
+	{#if group.length > 1}
+		<nav class="seg subnav" aria-label="{group[0].name} pages">
+			{#each group as s (s.k)}
+				<a href="/dashboard/{guild.id}/{s.k}" title="g then {s.key}" aria-current={s.k === section ? 'page' : undefined}>{s.name}</a>
+			{/each}
+		</nav>
+	{/if}
+	{@render children()}
+</main>
