@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import hikari
+from hikari.events.auto_mod_events import AutoModActionExecutionEvent
 
 from serenity.database.logging_repository import LoggingRepository
 from serenity.services.audit_actors import AuditActors
@@ -20,6 +22,45 @@ _ORANGE = hikari.Color(0xE67E22)
 _GREY = hikari.Color(0x99AAB5)
 
 _A = hikari.AuditLogEventType
+
+# Server-log entries posted straight from the audit log (#100): title, colour, log_event.
+_AUDIT_LOGS: dict[object, tuple[str, hikari.Color, str]] = {
+    _A.INVITE_CREATE: ("🔗 Invite Created", _GREEN, "invite_create"),
+    _A.INVITE_DELETE: ("🔗 Invite Deleted", _RED, "invite_delete"),
+    _A.THREAD_CREATE: ("🧵 Thread Created", _GREEN, "thread_create"),
+    _A.THREAD_UPDATE: ("🧵 Thread Updated", _YELLOW, "thread_update"),
+    _A.THREAD_DELETE: ("🧵 Thread Deleted", _RED, "thread_delete"),
+    _A.STICKER_CREATE: ("🏷️ Sticker Added", _GREEN, "sticker_create"),
+    _A.STICKER_UPDATE: ("🏷️ Sticker Updated", _YELLOW, "sticker_update"),
+    _A.STICKER_DELETE: ("🏷️ Sticker Removed", _RED, "sticker_delete"),
+    _A.AUTO_MODERATION_RULE_CREATE: ("🛡️ AutoMod Rule Created", _GREEN, "automod_rule_create"),
+    _A.AUTO_MODERATION_RULE_UPDATE: ("🛡️ AutoMod Rule Updated", _YELLOW, "automod_rule_update"),
+    _A.AUTO_MODERATION_RULE_DELETE: ("🛡️ AutoMod Rule Deleted", _RED, "automod_rule_delete"),
+}
+# Thread changes Discord makes on its own all the time; an update with only these isn't logged.
+_THREAD_NOISE = {"archived", "auto_archive_duration", "archive_timestamp"}
+_AUTOMOD_ACTIONS = {
+    hikari.AutoModActionType.BLOCK_MESSAGE: "Blocked the message",
+    hikari.AutoModActionType.SEND_ALERT_MESSAGE: "Sent an alert",
+    hikari.AutoModActionType.TIMEOUT: "Timed out the member",
+}
+
+
+def _audit_value(key: str, value: Any) -> str:
+    """One audit log change value, readable in an embed."""
+    if value is None or value == "":
+        return "*None*"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, timedelta):
+        return _format_duration(int(value.total_seconds())) if value else "off"
+    if key.endswith("channel_id") or key == "parent_id":
+        return f"<#{value}>"
+    if key.endswith("_id"):
+        return f"<@{value}>"
+    if isinstance(value, (list, tuple, dict)):
+        return _truncate(f"`{value}`", 200)
+    return _truncate(str(getattr(value, "name", value)), 200)
 
 LOG_TYPES = ["member", "message", "voice", "server", "mod", "ticket"]
 CHANNEL_NAMES: dict[str, str] = {t: f"{t}-log" for t in LOG_TYPES}
@@ -146,6 +187,7 @@ class LoggingService:
         self._repo = repo
         self._rest = rest
         self._audit = audit
+        self._automod_pending: dict[tuple[Any, ...], list[hikari.PartialAutoModAction]] = {}
 
     async def _add_by(
         self,
@@ -696,6 +738,92 @@ class LoggingService:
             guild_id=event.guild_id,
             log_type="server",
             embed=embed,
+        )
+
+    async def log_audit_entry(self, entry: hikari.AuditLogEntry) -> None:
+        """Invites, threads, stickers and AutoMod rules, straight from the audit log (#100)."""
+        meta = _AUDIT_LOGS.get(entry.action_type)
+        if meta is None:
+            return
+        changes = [(str(c.key), c.old_value, c.new_value) for c in entry.changes]
+        if entry.action_type == _A.THREAD_UPDATE and {k for k, _, _ in changes} <= _THREAD_NOISE:
+            return
+        title, color, log_event = meta
+
+        embed = hikari.Embed(title=title, color=color, timestamp=_now())
+        channel_id: Optional[int] = None
+        lines = []
+        for key, old, new in changes:
+            if key == "channel_id":
+                channel_id = int(old or new)
+            label = key.removesuffix("_id").replace("_", " ").capitalize()
+            if entry.action_type in (_A.THREAD_UPDATE, _A.STICKER_UPDATE, _A.AUTO_MODERATION_RULE_UPDATE):
+                lines.append(f"**{label}:** {_audit_value(key, old)} → {_audit_value(key, new)}")
+            else:
+                lines.append(f"**{label}:** {_audit_value(key, new if new is not None else old)}")
+        if entry.action_type in (_A.THREAD_CREATE, _A.THREAD_UPDATE, _A.THREAD_DELETE) and entry.target_id:
+            channel_id = int(entry.target_id)
+            if entry.action_type != _A.THREAD_DELETE:
+                embed.add_field("Thread", f"<#{entry.target_id}>", inline=True)
+        if lines:
+            embed.add_field("Details", _truncate("\n".join(lines)), inline=False)
+        if entry.user_id:
+            by = f"<@{entry.user_id}>" + (f"\n*{_truncate(entry.reason, 256)}*" if entry.reason else "")
+            embed.add_field("By", by, inline=True)
+        if entry.target_id:
+            embed.set_footer(text=f"ID: {entry.target_id}")
+
+        await self._send(
+            log_event=log_event,
+            guild_id=entry.guild_id,
+            log_type="server",
+            embed=embed,
+            channel_id=channel_id,
+            user_id=entry.user_id,
+        )
+
+    async def log_automod_action(self, event: AutoModActionExecutionEvent) -> None:
+        """An AutoMod rule acted on a member, posted to the mod log (#100).
+
+        One trigger fires an event per action of the rule (block, alert, timeout), a moment
+        apart; they're collected into one embed.
+        """
+        key = (event.guild_id, event.rule_id, event.user_id, event.channel_id, event.content)
+        if key in self._automod_pending:
+            self._automod_pending[key].append(event.action)
+            return
+        self._automod_pending[key] = [event.action]
+        try:
+            await asyncio.sleep(1)
+        finally:
+            actions = self._automod_pending.pop(key)
+
+        embed = hikari.Embed(title="🛡️ AutoMod Action", color=_ORANGE, timestamp=_now())
+        embed.add_field("User", f"<@{event.user_id}>", inline=True)
+        if event.channel_id:
+            embed.add_field("Channel", f"<#{event.channel_id}>", inline=True)
+        trigger = getattr(event.rule_trigger_type, "name", None) or "unknown"
+        embed.add_field("Rule", f"{trigger.replace('_', ' ').title()} rule (`{event.rule_id}`)", inline=True)
+        done = []
+        for action in actions:
+            text = _AUTOMOD_ACTIONS.get(action.type, str(action.type))
+            if isinstance(action, hikari.AutoModTimeout):
+                text += f" for {_format_duration(int(action.duration.total_seconds()))}"
+            done.append(text)
+        embed.add_field("Action", "\n".join(done), inline=False)
+        if event.matched_keyword:
+            embed.add_field("Matched", f"`{_truncate(event.matched_keyword, 200)}`", inline=True)
+        if event.content:
+            embed.add_field("Message", _truncate(event.content, 1024), inline=False)
+        embed.set_footer(text=f"User ID: {event.user_id}")
+
+        await self._send(
+            log_event="automod_action",
+            guild_id=event.guild_id,
+            log_type="mod",
+            embed=embed,
+            channel_id=event.channel_id,
+            user_id=event.user_id,
         )
 
     async def log_mod_action(

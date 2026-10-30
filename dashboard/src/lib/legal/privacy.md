@@ -35,7 +35,7 @@ Serenity ("the bot", "we", "our") is an open-source Discord bot that provides au
 
 ### Data We Do Not Store
 
-- **Message content outside tickets** — We never store the text of messages anywhere except ticket channels (see [Tickets](#tickets)). For logging, message content may be read from Discord's temporary cache at the moment a delete or edit event fires in order to send a log embed to your server's configured log channel, but it is never written to our database.
+- **Message content outside tickets** — We never store the text of messages anywhere except ticket channels (see [Tickets](#tickets)). For logging, message content may be read from Discord's temporary cache at the moment a delete or edit event fires, and the content of a message Discord's AutoMod acts on is read when that action happens, in order to send a log embed to your server's configured log channel, but it is never written to our database.
 - **Usernames, display names, or avatars outside ticket transcripts** — Everywhere else we store user IDs only.
 - **Voice audio** — We only track voice state events (join/leave/move), never audio.
 - **Direct messages** — The bot doesn't read DMs. Its only DMs are the close notice it sends a ticket's opener, with the transcript and a request to rate the ticket (see [Tickets](#tickets)).
