@@ -22,6 +22,7 @@ from serenity.services.logging_service import LoggingService
 from serenity.services.metrics import BOT_INFO, COMMANDS_USED
 from serenity.services.metrics_server import MetricsServer
 from serenity.services.moderation_service import ModerationService
+from serenity.services.security_service import SecurityService
 from serenity.services.slowmode_engine import SlowmodeEngine
 from serenity.services.ticket_service import TicketService
 
@@ -109,6 +110,9 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(LoggingRepository, logging_repo)
     client.set_type_dependency(LoggingService, logging_svc)
     client.set_type_dependency(AuditActors, audit)
+    client.set_type_dependency(
+        SecurityService, SecurityService(module_manager, bot.rest, bot.cache, logging_svc)
+    )
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
     client.set_type_dependency(TicketRepository, ticket_repo)

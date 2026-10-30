@@ -986,6 +986,15 @@ class LoggingService:
             role_mentions=role_ids,
         )
 
+    async def log_security_alert(
+        self, *, guild_id: int, embed: hikari.Embed, log_event: str, user_id: int
+    ) -> None:
+        """A Security module alert (#152, #153), posted to the Server log."""
+        embed.timestamp = _now()
+        await self._send(
+            log_event=log_event, guild_id=guild_id, log_type="server", embed=embed, user_id=user_id
+        )
+
     async def log_slowmode_paused(
         self, *, guild_id: int, channel_id: int, moderator_id: int, old: int, new: int, until: int
     ) -> None:

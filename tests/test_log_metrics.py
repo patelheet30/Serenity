@@ -44,6 +44,7 @@ async def test_counts_only_posted_logs(should_log, send_error, expected):
 def test_log_events_cover_every_sent_event():
     """init_guild_log_events only zero-inits what's in LOG_EVENTS, so it must not drift."""
     logging_src = Path("serenity/services/logging_service.py").read_text()
+    logging_src += Path("serenity/services/security_service.py").read_text()
     moderation_src = Path("serenity/services/moderation_service.py").read_text()
     sent = set(re.findall(r'log_event="(\w+)"', logging_src)) | {e for _, _, e in _AUDIT_LOGS.values()}
     actions = re.findall(r'action="(\w+)"', moderation_src)
