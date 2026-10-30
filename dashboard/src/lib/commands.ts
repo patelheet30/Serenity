@@ -3,17 +3,18 @@ import { inviteUrl, type Access, type Guild } from './api';
 import type { IconName } from './icons';
 import type { Command } from './palette.svelte';
 
-export type Section = { k: IconName; name: string; key: string };
+/** `parent`: the top tab this section sits under (it gets a sub-nav there instead of a tab). */
+export type Section = { k: IconName; name: string; key: string; parent?: IconName };
 
 export const SECTIONS: Section[] = [
 	{ k: 'overview', name: 'Overview', key: 'o' },
+	{ k: 'modules', name: 'Modules', key: 'm', parent: 'overview' },
 	{ k: 'slowmode', name: 'Slowmode', key: 's' },
 	{ k: 'logging', name: 'Logging', key: 'l' },
-	{ k: 'cases', name: 'Cases', key: 'c' },
-	{ k: 'stats', name: 'Mod stats', key: 't' },
-	{ k: 'audit', name: 'Audit log', key: 'a' },
-	{ k: 'tickets', name: 'Tickets', key: 'k' },
-	{ k: 'modules', name: 'Modules', key: 'm' }
+	{ k: 'audit', name: 'Audit log', key: 'a', parent: 'logging' },
+	{ k: 'cases', name: 'Cases', key: 'c', parent: 'logging' },
+	{ k: 'stats', name: 'Mod stats', key: 't', parent: 'logging' },
+	{ k: 'tickets', name: 'Tickets', key: 'k' }
 ];
 
 /** The sections a user can open: ticket staff get only Tickets. */
