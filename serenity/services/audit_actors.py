@@ -12,9 +12,10 @@ from typing import Callable, Iterable, Optional
 import hikari
 
 WAIT = 2.0  # seconds a log waits for its audit log entry
-# Seconds an unclaimed entry stays matchable. Short, so an entry no log claimed isn't handed to
-# a later change of the same target.
-KEEP = 3.0
+# Seconds an entry that arrived before its change stays matchable. Kept well under the time a
+# later change of the same target takes (e.g. auto-slowmode reacting), so an entry no log
+# claimed isn't handed to it. Entries arriving after the change go through WAIT instead.
+KEEP = 1.0
 
 Key = tuple[int, int, int]  # guild, action type, target
 
