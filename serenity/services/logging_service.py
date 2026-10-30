@@ -788,13 +788,15 @@ class LoggingService:
         One trigger fires an event per action of the rule (block, alert, timeout), a moment
         apart; they're collected into one embed.
         """
-        key = (event.guild_id, event.rule_id, event.user_id, event.content)
+        key = (event.guild_id, event.rule_id, event.user_id, event.channel_id, event.content)
         if key in self._automod_pending:
             self._automod_pending[key].append(event.action)
             return
         self._automod_pending[key] = [event.action]
-        await asyncio.sleep(1)
-        actions = self._automod_pending.pop(key)
+        try:
+            await asyncio.sleep(1)
+        finally:
+            actions = self._automod_pending.pop(key)
 
         embed = hikari.Embed(title="🛡️ AutoMod Action", color=_ORANGE, timestamp=_now())
         embed.add_field("User", f"<@{event.user_id}>", inline=True)
