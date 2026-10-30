@@ -97,8 +97,8 @@ class ModerationService:
             )
             if change is None:
                 return None
-            until: Optional[datetime] = change.new_value
-            if until is None:
+            until = change.new_value
+            if not isinstance(until, datetime):  # None (or UNDEFINED) means the timeout was removed
                 action = "untimeout"
             else:
                 action = "timeout"
