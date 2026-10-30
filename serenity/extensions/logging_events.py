@@ -5,6 +5,7 @@ import hikari
 
 from serenity.core.modules import ModuleManager, ModuleType
 from serenity.database.repository import Repository
+from serenity.services.audit_actors import AuditActors
 from serenity.services.logging_service import LoggingService
 from serenity.services.moderation_service import ModerationService
 from serenity.utils.logging import get_logger
@@ -168,6 +169,7 @@ async def pause_for_manual_slowmode(
 async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     me = plugin.client.app.get_me().id  # type: ignore[union-attr]
     get = plugin.client.get_type_dependency
+    get(AuditActors).feed(event.entry)
     await pause_for_manual_slowmode(
         event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
     )

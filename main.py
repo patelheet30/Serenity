@@ -7,6 +7,7 @@ os.environ["PROMETHEUS_DISABLE_CREATED_SERIES"] = "true"
 
 import arc
 import hikari
+import toolbox
 from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
@@ -16,6 +17,7 @@ from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.database.ticket_repository import TicketRepository
+from serenity.services.audit_actors import AuditActors
 from serenity.services.logging_service import LoggingService
 from serenity.services.metrics import BOT_INFO, COMMANDS_USED
 from serenity.services.metrics_server import MetricsServer
@@ -69,13 +71,21 @@ module_manager = ModuleManager(repo)
 metrics_server = MetricsServer(port=int(os.getenv("METRICS_PORT", "8080")))
 
 
+def can_view_audit_log(guild_id: int) -> bool:
+    """Whether Discord will send this guild's audit log entries (needs View Audit Log)."""
+    me = bot.get_me()
+    member = me and bot.cache.get_member(guild_id, me.id)
+    return bool(member and toolbox.calculate_permissions(member) & hikari.Permissions.VIEW_AUDIT_LOG)
+
+
 @client.add_startup_hook
 async def on_startup(_: arc.GatewayClient) -> None:
     """Called when the bot starts up."""
     await repo.init()
 
     logging_repo = LoggingRepository(repo.pool)
-    logging_svc = LoggingService(repo=logging_repo, rest=bot.rest)
+    audit = AuditActors(can_view_audit_log)
+    logging_svc = LoggingService(repo=logging_repo, rest=bot.rest, audit=audit)
     mod_repo = ModerationRepository(repo.pool)
     mod_svc = ModerationService(
         mod_repo=mod_repo,
@@ -97,6 +107,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(ModuleManager, module_manager)
     client.set_type_dependency(LoggingRepository, logging_repo)
     client.set_type_dependency(LoggingService, logging_svc)
+    client.set_type_dependency(AuditActors, audit)
     client.set_type_dependency(ModerationRepository, mod_repo)
     client.set_type_dependency(ModerationService, mod_svc)
     client.set_type_dependency(TicketRepository, ticket_repo)
