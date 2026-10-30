@@ -39,11 +39,23 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+THRESHOLD_MIN, THRESHOLD_MAX = 2, 50
+
+
+def _threshold(value: Any, default: int) -> int:
+    """A stored threshold, clamped; anything that isn't a number falls back to the default."""
+    try:
+        return min(THRESHOLD_MAX, max(THRESHOLD_MIN, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def settings_of(raw: dict[str, Any]) -> dict[str, Any]:
+    stored = raw.get("thresholds") or {}
     return {
         **DEFAULTS,
         **raw,
-        "thresholds": {**DEFAULTS["thresholds"], **raw.get("thresholds", {})},
+        "thresholds": {k: _threshold(stored.get(k, n), n) for k, n in DEFAULTS["thresholds"].items()},
     }
 
 

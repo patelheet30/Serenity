@@ -7,7 +7,13 @@ import hikari
 
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleNotEnabledError, ModuleType
-from serenity.services.security_service import KINDS, SecurityService, settings_of
+from serenity.services.security_service import (
+    KINDS,
+    THRESHOLD_MAX,
+    THRESHOLD_MIN,
+    SecurityService,
+    settings_of,
+)
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +87,7 @@ async def threshold(
     action: arc.Option[
         str, arc.StrParams("The action", choices={KINDS[k][2].capitalize(): k for k in KINDS})
     ],
-    count: arc.Option[int, arc.IntParams("Alert at this many per minute", min=2, max=50)],
+    count: arc.Option[int, arc.IntParams("Alert at this many per minute", min=THRESHOLD_MIN, max=THRESHOLD_MAX)],
     svc: SecurityService = arc.inject(),
 ) -> None:
     current = settings_of(

@@ -93,3 +93,11 @@ async def test_old_actions_drop_out_of_the_count(monkeypatch):
     description = svc._logging.log_security_alert.call_args.kwargs["embed"].description
     assert "roles deleted" not in description
     assert set(svc._seen) == {(GUILD, MOD, "channels")}  # the stale actor/kind was forgotten
+
+
+def test_stored_thresholds_are_clamped():
+    from serenity.services.security_service import settings_of
+
+    t = settings_of({"thresholds": {"channels": 0, "roles": 999, "webhooks": "x", "bogus": 1}})["thresholds"]
+    assert (t["channels"], t["roles"], t["webhooks"], t["removals"]) == (2, 50, 3, 5)
+    assert "bogus" not in t
