@@ -50,7 +50,7 @@
 					class="tab"
 					title="g then {s.key}"
 					href="/dashboard/{guild.id}/{s.k}"
-					aria-current={s.k === parentOf(section) ? 'page' : undefined}><Icon name={s.k} />{s.name}</a
+					aria-current={s.k === section ? 'page' : s.k === parentOf(section) ? 'true' : undefined}><Icon name={s.k} />{s.name}</a
 				>
 			{/each}
 		</nav>

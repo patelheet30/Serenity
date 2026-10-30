@@ -183,8 +183,8 @@ details.noperm[open] summary svg{transform:rotate(180deg)}
 .tabs::-webkit-scrollbar{display:none}
 .tab{position:relative;display:flex;align-items:center;gap:7px;height:52px;padding:0 11px;color:var(--fg3);text-decoration:none;font-size:13px;font-weight:500;white-space:nowrap;transition:color .15s}
 .tab:hover{color:var(--fg)}
-.tab[aria-current="page"]{color:var(--fg)}
-.tab[aria-current="page"]::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:1.5px;background:var(--acc);border-radius:2px;animation:grow .2s var(--spring)}
+.tab[aria-current]{color:var(--fg)}
+.tab[aria-current]::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:1.5px;background:var(--acc);border-radius:2px;animation:grow .2s var(--spring)}
 @keyframes grow{from{transform:scaleX(.3);opacity:0}}
 .gmode .tab{color:var(--fg2)}
 .cmdk{grid-area:cmd;display:flex;align-items:center;gap:10px;height:32px;width:230px;padding:0 6px 0 10px;border-radius:var(--r);border:1px solid var(--line2);background:var(--ink2);color:var(--fg3);font-size:13px;transition:border-color .15s}
