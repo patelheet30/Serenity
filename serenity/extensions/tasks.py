@@ -9,6 +9,7 @@ import arc
 import hikari
 
 from serenity.core.constants import SLOWMODE_CONFIG
+from serenity.database.audit_repository import AuditRepository
 from serenity.database.moderation_repository import ModerationRepository
 from serenity.database.repository import Repository
 from serenity.services.metrics import (
@@ -347,7 +348,8 @@ async def cleanup_old_data(repo: Repository) -> None:
             hours=SLOWMODE_CONFIG.MESSAGE_ACTIVITY_RETENTION_HOURS
         )
         await repo.cleanup_old_analytics(days=SLOWMODE_CONFIG.ANALYTICS_RETENTION_DAYS)
-        logger.info("Old message activity and analytics data cleaned up.")
+        await AuditRepository(repo.pool).cleanup()  # type: ignore[arg-type]
+        logger.info("Old message activity, analytics and audit history cleaned up.")
     except Exception as e:
         logger.error(f"Error cleaning up old data: {e}", exc_info=True)
         TASK_ERRORS.labels(task_name="cleanup_old_data").inc()

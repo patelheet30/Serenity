@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from serenity.core.modules import ModuleManager
 from serenity.dashboard.api import build_api
+from serenity.database.audit_repository import AuditRepository
 from serenity.database.import_sqlite import cutover_if_needed
 from serenity.database.logging_repository import LoggingRepository
 from serenity.database.moderation_repository import ModerationRepository
@@ -113,6 +114,7 @@ async def on_startup(_: arc.GatewayClient) -> None:
     client.set_type_dependency(LoggingRepository, logging_repo)
     client.set_type_dependency(LoggingService, logging_svc)
     client.set_type_dependency(AuditActors, audit)
+    client.set_type_dependency(AuditRepository, AuditRepository(repo.pool))
     client.set_type_dependency(
         SecurityService, SecurityService(module_manager, bot.rest, bot.cache, logging_svc)
     )

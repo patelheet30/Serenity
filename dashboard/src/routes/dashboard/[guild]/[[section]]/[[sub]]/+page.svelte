@@ -8,6 +8,7 @@
 	import AutosaveIndicator from '#lib/components/AutosaveIndicator.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import AuditLog from '#lib/sections/AuditLog.svelte';
 	import Cases from '#lib/sections/Cases.svelte';
 	import Logging from '#lib/sections/Logging.svelte';
 	import ModStats from '#lib/sections/ModStats.svelte';
@@ -124,6 +125,8 @@
 			<Overview {guildId} guildName={guild.name} {channels} onerror={fail} />
 		{:else if section.k === 'cases'}
 			<Cases {guildId} onerror={fail} />
+		{:else if section.k === 'audit'}
+			<AuditLog {guildId} onerror={fail} />
 		{:else if section.k === 'stats'}
 			<ModStats {guildId} onerror={fail} />
 		{:else if section.k === 'slowmode'}

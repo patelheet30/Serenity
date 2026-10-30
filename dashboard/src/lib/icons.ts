@@ -5,6 +5,7 @@ export const ICONS = {
 	logging: 'M3 4h10M3 8h10M3 12h6',
 	cases: 'M8 2l5 2v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4z',
 	stats: 'M3 13V8M8 13V3M13 13V6',
+	audit: 'M4 2h6l2 2v10H4zM6 7h4M6 10h4M6 4h2',
 	modules: 'M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z',
 	search: 'M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10zM14 14l-3.5-3.5',
 	plus: 'M8 3v10M3 8h10',

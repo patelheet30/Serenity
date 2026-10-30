@@ -11,6 +11,7 @@ export const SECTIONS: Section[] = [
 	{ k: 'logging', name: 'Logging', key: 'l' },
 	{ k: 'cases', name: 'Cases', key: 'c' },
 	{ k: 'stats', name: 'Mod stats', key: 't' },
+	{ k: 'audit', name: 'Audit log', key: 'a' },
 	{ k: 'tickets', name: 'Tickets', key: 'k' },
 	{ k: 'modules', name: 'Modules', key: 'm' }
 ];
