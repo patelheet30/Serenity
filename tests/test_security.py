@@ -6,7 +6,7 @@ import hikari
 import pytest
 
 from serenity.core.modules import ModuleConfig, ModuleType
-from serenity.services.security_service import SecurityService
+from serenity.services.security_service import DEFAULTS, SecurityService
 
 GUILD, ME, OWNER, MOD, ROLE = 1, 10, 11, 20, 70
 
@@ -151,3 +151,36 @@ async def test_owner_changes_log_without_a_dm():
     await svc.check_dangerous(entry(action=hikari.AuditLogEventType.BOT_ADD, actor=OWNER), me=ME)
     svc._logging.log_security_alert.assert_called_once()
     svc._rest.create_dm_channel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_old_actions_drop_out_of_the_count(monkeypatch):
+    import serenity.services.security_service as sec
+
+    clock = [1000.0]
+    monkeypatch.setattr(sec.time, "monotonic", lambda: clock[0])
+    svc = service()
+    await burst(svc, 2, action=hikari.AuditLogEventType.ROLE_DELETE)
+    clock[0] += sec.WINDOW + 1
+    await burst(svc, 3)  # channel deletes cross the threshold; the old role deletes don't count
+    description = svc._logging.log_security_alert.call_args.kwargs["embed"].description
+    assert "roles deleted" not in description
+    assert set(svc._seen) == {(GUILD, MOD, "channels")}  # the stale actor/kind was forgotten
+
+
+@pytest.mark.asyncio
+async def test_warnings_default_on_and_dm_once_a_minute():
+    assert DEFAULTS["warnings"] is True
+    svc = service()
+    for _ in range(3):
+        await svc.check_dangerous(entry(action=hikari.AuditLogEventType.BOT_ADD), me=ME)
+    assert svc._logging.log_security_alert.call_count == 3
+    svc._rest.create_dm_channel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gaining_a_vanity_url_is_not_a_warning():
+    gained = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VANITY_URL_CODE, None, "cool")], target=GUILD)
+    assert await warned(service(), gained) is None
+    removed = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VANITY_URL_CODE, "cool", None)], target=GUILD)
+    assert "Vanity URL" in await warned(service(), removed)

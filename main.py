@@ -78,7 +78,10 @@ def can_view_audit_log(guild_id: int) -> bool:
     """Whether Discord will send this guild's audit log entries (needs View Audit Log)."""
     me = bot.get_me()
     member = me and bot.cache.get_member(guild_id, me.id)
-    return bool(member and toolbox.calculate_permissions(member) & hikari.Permissions.VIEW_AUDIT_LOG)
+    try:
+        return bool(member and toolbox.calculate_permissions(member) & hikari.Permissions.VIEW_AUDIT_LOG)
+    except Exception:  # the guild's roles aren't cached yet
+        return False
 
 
 @client.add_startup_hook

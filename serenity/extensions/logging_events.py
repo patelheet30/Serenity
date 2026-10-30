@@ -9,7 +9,7 @@ from serenity.database.audit_repository import AuditRepository
 from serenity.database.repository import Repository
 from serenity.services.audit_actors import AuditActors
 from serenity.services.logging_service import LoggingService
-from serenity.services.moderation_service import ModerationService
+from serenity.services.moderation_service import EXTERNAL_TYPES, ModerationService
 from serenity.services.security_service import SecurityService
 from serenity.utils.logging import get_logger
 
@@ -160,7 +160,7 @@ async def pause_for_manual_slowmode(
     change = next(
         (c for c in entry.changes if c.key == hikari.AuditLogChangeKey.RATE_LIMIT_PER_USER), None
     )
-    if change is None:
+    if change is None or not (await repo.get_guild_config(entry.guild_id)).is_enabled:
         return
     until = int(time.time()) + MANUAL_SLOWMODE_PAUSE
     if await repo.pause_channel(entry.target_id, until):
@@ -187,7 +187,9 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     )
     if await get(ModuleManager).is_enabled(event.guild_id, ModuleType.AUDIT_HISTORY):
         await get(AuditRepository).add(event.entry)
-    if await get(ModuleManager).is_enabled(event.guild_id, ModuleType.MODERATION):
+    if event.entry.action_type in EXTERNAL_TYPES and await get(ModuleManager).is_enabled(
+        event.guild_id, ModuleType.MODERATION
+    ):
         await get(ModerationService).record_external(event.entry, me=me)
 
 

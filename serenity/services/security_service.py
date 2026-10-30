@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 _A = hikari.AuditLogEventType
 WINDOW = 60  # seconds
 ALERT_COOLDOWN = 600  # one alert per actor per 10 minutes
+WARNING_DM_COOLDOWN = 60  # warnings are always logged; the owner gets one DM per actor per minute
 
 # kind: (audit log types, default threshold per WINDOW, how the alert describes one)
 KINDS: dict[str, tuple[tuple[_A, ...], int, str]] = {
@@ -88,11 +89,22 @@ class SecurityService:
         self._logging = logging_svc
         self._seen: defaultdict[tuple[int, int, str], deque[float]] = defaultdict(deque)
         self._alerted: dict[tuple[int, int], float] = {}
+        self._warned: dict[tuple[int, int], float] = {}
 
     async def settings(self, guild_id: int) -> Optional[dict[str, Any]]:
         """The guild's security settings, or None when the module is off."""
         config = await self.modules.get_module_config(guild_id, ModuleType.SECURITY)
         return settings_of(config.settings) if config.is_enabled else None
+
+    def _prune(self, now: float) -> None:
+        """Forget actions older than the window, and actors with none left."""
+        for key in list(self._seen):
+            seen = self._seen[key]
+            while seen and now - seen[0] > WINDOW:
+                seen.popleft()
+            if not seen:
+                del self._seen[key]
+        self._alerted = {k: t for k, t in self._alerted.items() if now - t < ALERT_COOLDOWN}
 
     def _trusted(self, guild_id: int, actor: int, settings: dict[str, Any]) -> bool:
         guild = self._cache.get_guild(guild_id)
@@ -116,8 +128,7 @@ class SecurityService:
         now = time.monotonic()
         seen = self._seen[(guild_id, actor, kind)]
         seen.append(now)
-        while seen and now - seen[0] > WINDOW:
-            seen.popleft()
+        self._prune(now)
         if len(seen) < settings["thresholds"][kind]:
             return
         if now - self._alerted.get((guild_id, actor), -ALERT_COOLDOWN) < ALERT_COOLDOWN:
@@ -201,8 +212,7 @@ class SecurityService:
                 for key, label in _LEVELS.items()
                 if (c := changes.get(str(key))) and int(c.new_value or 0) < int(c.old_value or 0)
             ]
-            if "vanity_url_code" in changes:
-                c = changes["vanity_url_code"]
+            if (c := changes.get("vanity_url_code")) and c.old_value:  # removed or replaced, not gained
                 lowered.append(f"**Vanity URL:** {c.old_value or 'none'} → {c.new_value or 'none'}")
             if lowered:
                 return "⚠️ Server security lowered", "\n".join(lowered), "security_lowered"
@@ -219,16 +229,21 @@ class SecurityService:
         if settings is None or not settings["warnings"]:
             return
         title, description, log_event = found
+        guild_id, actor, now = int(entry.guild_id), int(entry.user_id), time.monotonic()
+        self._warned = {k: t for k, t in self._warned.items() if now - t < WARNING_DM_COOLDOWN}
+        dm = (guild_id, actor) not in self._warned
+        self._warned[(guild_id, actor)] = now
         await self.alert(
-            int(entry.guild_id),
+            guild_id,
             title=title,
             description=description + (f"\n*Reason: {entry.reason}*" if entry.reason else ""),
-            actor=int(entry.user_id),
+            actor=actor,
             log_event=log_event,
+            dm=dm,
         )
 
     async def alert(
-        self, guild_id: int, *, title: str, description: str, actor: int, log_event: str
+        self, guild_id: int, *, title: str, description: str, actor: int, log_event: str, dm: bool = True
     ) -> None:
         """Post a security alert to the Server log and DM the server owner (#152, #153)."""
         def embed(text: str) -> hikari.Embed:
@@ -238,11 +253,11 @@ class SecurityService:
             return e
 
         await self._logging.log_security_alert(
-            guild_id=guild_id, embed=embed(description), log_event=log_event, user_id=actor
+            guild_id=guild_id, embed=embed(description), log_event=log_event
         )
 
         guild = self._cache.get_guild(guild_id)
-        if guild is None or guild.owner_id == actor:
+        if not dm or guild is None or guild.owner_id == actor:
             return
         try:
             channel = await self._rest.create_dm_channel(guild.owner_id)

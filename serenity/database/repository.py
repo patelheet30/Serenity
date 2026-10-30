@@ -178,6 +178,7 @@ class Repository:
                 guild_id=row["guild_id"],
                 is_enabled=row["is_enabled"],
                 threshold=row["threshold"],
+                paused_until=row["paused_until"],
             )
 
         await self.pool.execute(
@@ -192,15 +193,16 @@ class Repository:
             channel_id=channel_id, guild_id=guild_id, is_enabled=True, threshold=None
         )
 
-    async def get_enabled_channels(self, guild_id: int) -> List[int]:
-        """Get all enabled channels for a guild"""
+    async def get_enabled_channels(self, guild_id: int, include_paused: bool = False) -> List[int]:
+        """Get all enabled channels for a guild (by default not the ones paused by #150)"""
         if not self.pool:
             raise DatabaseError("Database connection is not initialised.")
 
         rows = await self.pool.fetch(
             "SELECT channel_id FROM channel_config WHERE guild_id = $1 AND is_enabled "
-            "AND (paused_until IS NULL OR paused_until <= $2)",
+            "AND ($2 OR paused_until IS NULL OR paused_until <= $3)",
             guild_id,
+            include_paused,
             int(time.time()),
         )
 

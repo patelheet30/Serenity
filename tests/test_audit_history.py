@@ -13,7 +13,7 @@ GUILD, OTHER, MOD, USER = 1, 2, 20, 40
 DAY = 86400
 
 
-def entry(entry_id: int, action=hikari.AuditLogEventType.MEMBER_BAN_ADD, guild=GUILD, reason=None, changes=()):
+def entry(entry_id: int, action=hikari.AuditLogEventType.MEMBER_BAN_ADD, guild=GUILD, reason=None, changes=(), options=None):
     return hikari.AuditLogEntry(
         app=MagicMock(),
         id=hikari.Snowflake(entry_id),
@@ -22,7 +22,7 @@ def entry(entry_id: int, action=hikari.AuditLogEventType.MEMBER_BAN_ADD, guild=G
         changes=[hikari.AuditLogChange(key=k, old_value=o, new_value=n) for k, o, n in changes],
         user_id=hikari.Snowflake(MOD),
         action_type=action,
-        options=None,
+        options=options,
         reason=reason,
     )
 
@@ -43,17 +43,20 @@ async def test_add_search_and_clear(pg_repo):
     await repo.add(entry(old, reason="raid"))
     await repo.add(entry(new, action=hikari.AuditLogEventType.CHANNEL_UPDATE, changes=slow))
     await repo.add(entry(new, action=hikari.AuditLogEventType.CHANNEL_UPDATE, changes=slow))  # duplicate
-    await repo.add(entry(new + 1, guild=OTHER))
+    await repo.add(entry(new, guild=OTHER))  # the key is (guild, entry), so this one is kept
+    await repo.add(entry(new + 1, reason="50%_off", guild=OTHER))
 
     assert [r["entry_id"] for r in await repo.search(GUILD)] == [new, old]  # newest first
     assert [r["entry_id"] for r in await repo.search(GUILD, actions=[11])] == [new]
     assert [r["reason"] for r in await repo.search(GUILD, q="rai")] == ["raid"]
+    assert [r["reason"] for r in await repo.search(OTHER, q="0%_")] == ["50%_off"]  # % and _ are literal
+    assert await repo.search(OTHER, q="5_%") == []
     channel = (await repo.search(GUILD, actions=[11]))[0]
     assert channel["changes"] == [{"key": "rate_limit_per_user", "old": 0, "new": 30}]
     assert [r["entry_id"] for r in await repo.search(GUILD, before=new)] == [old]
 
     assert await repo.clear(GUILD) == 2
-    assert len(await repo.search(OTHER)) == 1
+    assert len(await repo.search(OTHER)) == 2
 
 
 @pytest.mark.asyncio
@@ -69,3 +72,10 @@ async def test_cleanup_uses_each_servers_retention(pg_repo):
 
     assert len(await repo.search(GUILD)) == 1  # default 90 days keeps the 30-day-old one
     assert await repo.search(OTHER) == []  # 7 days drops both
+
+
+@pytest.mark.asyncio
+async def test_options_without_known_fields_store_as_empty_json(pg_repo):
+    repo = AuditRepository(pg_repo.pool)
+    await repo.add(entry(snowflake_at(1), options=object()))
+    assert (await repo.search(GUILD))[0]["options"] == {}

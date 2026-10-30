@@ -7,7 +7,12 @@ import hikari
 
 from serenity.core.hooks import require_module
 from serenity.core.modules import ModuleManager, ModuleNotEnabledError, ModuleType
-from serenity.database.audit_repository import RETENTION_DEFAULT, RETENTION_MAX, AuditRepository
+from serenity.database.audit_repository import (
+    RETENTION_DEFAULT,
+    RETENTION_KEY,
+    RETENTION_MAX,
+    AuditRepository,
+)
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -39,7 +44,7 @@ async def retention(
 ) -> None:
     config = await modules.get_module_config(ctx.guild_id, ModuleType.AUDIT_HISTORY)  # type: ignore[arg-type]
     await modules.update_module_settings(
-        ctx.guild_id, ModuleType.AUDIT_HISTORY, {**config.settings, "retention_days": days}  # type: ignore[arg-type]
+        ctx.guild_id, ModuleType.AUDIT_HISTORY, {**config.settings, RETENTION_KEY: days}  # type: ignore[arg-type]
     )
     await ctx.respond(f"✅ Audit history is now kept for **{days}** days.")
 

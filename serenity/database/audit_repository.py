@@ -10,6 +10,9 @@ from typing import Any, Optional
 import asyncpg
 import hikari
 
+from serenity.core.modules import ModuleType
+
+RETENTION_KEY = "retention_days"  # in the Audit history module's settings
 RETENTION_DEFAULT = 90  # days
 RETENTION_MAX = 365
 
@@ -65,7 +68,7 @@ class AuditRepository:
             entry.target_id,
             entry.reason,
             json.dumps(changes),
-            options and json.dumps(options),
+            None if options is None else json.dumps(options),
             int(entry.id.created_at.timestamp()),
         )
 
@@ -95,7 +98,8 @@ class AuditRepository:
         if actions:
             add("action_type = ANY({})", actions)
         if q:
-            add("(reason ILIKE {0} OR changes::text ILIKE {0})", f"%{q}%")
+            like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            add("(reason ILIKE {0} OR changes::text ILIKE {0})", f"%{like}%")
         if since:
             add("created_at >= {}", since)
         if before:
@@ -117,12 +121,17 @@ class AuditRepository:
 
     async def cleanup(self, now: Optional[int] = None) -> None:
         """Drop entries older than each server's retention (default 90 days)."""
+        # One retention lookup per server with history, then an index range delete per server.
         await self.pool.execute(
-            """DELETE FROM audit_log_entries a
-            WHERE a.created_at < $1 - 86400 * COALESCE((
-                SELECT (m.settings::jsonb ->> 'retention_days')::int FROM module_config m
-                WHERE m.guild_id = a.guild_id AND m.module_type = 'audit_history'
-            ), $2)""",
+            """WITH cutoff AS (
+                SELECT g.guild_id, $1 - 86400 * COALESCE((m.settings::jsonb ->> $3)::int, $2) AS before
+                FROM (SELECT DISTINCT guild_id FROM audit_log_entries) g
+                LEFT JOIN module_config m ON m.guild_id = g.guild_id AND m.module_type = $4
+            )
+            DELETE FROM audit_log_entries a USING cutoff c
+            WHERE a.guild_id = c.guild_id AND a.created_at < c.before""",
             now or int(time.time()),
             RETENTION_DEFAULT,
+            RETENTION_KEY,
+            ModuleType.AUDIT_HISTORY.value,
         )

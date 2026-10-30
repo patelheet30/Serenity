@@ -24,7 +24,7 @@ from serenity.dashboard.common import (
     guild_id,
     read_json,
 )
-from serenity.database.audit_repository import RETENTION_DEFAULT, AuditRepository
+from serenity.database.audit_repository import RETENTION_DEFAULT, RETENTION_KEY, AuditRepository
 
 routes = web.RouteTableDef()
 GUILD = r"/guilds/{guild_id:\d+}"
@@ -248,7 +248,7 @@ async def audit_history(request: web.Request) -> web.Response:
     )
     return web.json_response({
         "enabled": config.is_enabled,
-        "retention_days": config.settings.get("retention_days", RETENTION_DEFAULT),
+        "retention_days": config.settings.get(RETENTION_KEY, RETENTION_DEFAULT),
         "entries": [
             {
                 "id": str(e["entry_id"]),
