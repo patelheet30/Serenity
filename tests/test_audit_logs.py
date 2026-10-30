@@ -85,3 +85,14 @@ async def test_automod_actions_collapse_into_one_log(svc):
     f = fields(svc)
     assert f["Action"] == "Blocked the message\nTimed out the member for 5m"
     assert f["Matched"] == "`bad`"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_automod_collection_is_cleaned_up(svc):
+    e = MagicMock(guild_id=GUILD, rule_id=7, user_id=USER, channel_id=CHANNEL, content="x", action=None)
+    task = asyncio.create_task(svc.log_automod_action(e))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert svc._automod_pending == {}
