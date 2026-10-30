@@ -5,6 +5,7 @@ import hikari
 from hikari.events.auto_mod_events import AutoModActionExecutionEvent
 
 from serenity.core.modules import ModuleManager, ModuleType
+from serenity.database.audit_repository import AuditRepository
 from serenity.database.repository import Repository
 from serenity.services.audit_actors import AuditActors
 from serenity.services.logging_service import LoggingService
@@ -184,6 +185,8 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     await pause_for_manual_slowmode(
         event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
     )
+    if await get(ModuleManager).is_enabled(event.guild_id, ModuleType.AUDIT_HISTORY):
+        await get(AuditRepository).add(event.entry)
     if await get(ModuleManager).is_enabled(event.guild_id, ModuleType.MODERATION):
         await get(ModerationService).record_external(event.entry, me=me)
 

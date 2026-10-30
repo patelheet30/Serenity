@@ -177,6 +177,15 @@ async def enable_module(
                 value="Use `/logging setup` to configure log channels.",
                 inline=False,
             )
+        elif module_type == ModuleType.AUDIT_HISTORY:
+            embed.add_field(
+                name="Next Steps",
+                value=(
+                    "From now on every audit log entry is kept for 90 days (`/audit-history retention` "
+                    "changes it) and searchable on the dashboard's Audit log page. Needs **View Audit Log**."
+                ),
+                inline=False,
+            )
         elif module_type == ModuleType.SECURITY:
             embed.add_field(
                 name="Next Steps",

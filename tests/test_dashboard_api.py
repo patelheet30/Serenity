@@ -457,7 +457,7 @@ async def test_modules_follow_the_dependency_rules(settings):
     await settings("PUT", "/modules/logging", {"enabled": True})
     status, body = await settings("PUT", "/modules/moderation", {"enabled": True})
     assert status == 200
-    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False, "security": False}
+    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False, "security": False, "audit_history": False}
     assert body["requires"]["moderation"] == ["logging"]
 
     status, body = await settings("PUT", "/modules/logging", {"enabled": False})
@@ -956,3 +956,26 @@ async def test_picker_marks_ticket_staff_guilds(client_for, pg_repo, ticket_guil
         ("Elsewhere", False, False),
         ("Main", False, True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_audit_history_page(settings, pg_repo):
+    from unittest.mock import MagicMock as _Mock
+
+    from serenity.database.audit_repository import AuditRepository
+
+    status, body = await settings("GET", "/audit")
+    assert (status, body["enabled"], body["retention_days"], body["entries"]) == (200, False, 90, [])
+
+    repo = AuditRepository(pg_repo.pool)
+    for i, action in enumerate((hikari.AuditLogEventType.MEMBER_KICK, hikari.AuditLogEventType.ROLE_DELETE)):
+        await repo.add(hikari.AuditLogEntry(
+            app=_Mock(), id=hikari.Snowflake((1 << 40) + i), guild_id=hikari.Snowflake(GUILD),
+            target_id=hikari.Snowflake(USER), changes=[], user_id=hikari.Snowflake(MOD_A),
+            action_type=action, options=None, reason="spam" if i == 0 else None,
+        ))
+    status, body = await settings("GET", "/audit")
+    assert [e["action_name"] for e in body["entries"]] == ["role delete", "member kick"]
+    assert body["entries"][0]["actor"]["id"] == str(MOD_A)
+    status, body = await settings("GET", "/audit", action="20", q="spa")
+    assert [e["reason"] for e in body["entries"]] == ["spam"]

@@ -1,4 +1,4 @@
-"""Dashboard routes for moderation cases (#47) and stats (#48).
+"""Dashboard routes for moderation cases (#47), stats (#48) and audit history (#154).
 
 Reason edits and clearing warnings make the same database writes as /reason and /clearwarns.
 """
@@ -11,16 +11,20 @@ from typing import Any, Optional
 import hikari
 from aiohttp import web
 
+from serenity.core.modules import ModuleType
 from serenity.dashboard.common import (
     BOT,
     CHANGES,
     MOD_REPO,
+    MODULES,
     PERMISSIONS,
+    REPO,
     SESSION,
     ApiError,
     guild_id,
     read_json,
 )
+from serenity.database.audit_repository import RETENTION_DEFAULT, AuditRepository
 
 routes = web.RouteTableDef()
 GUILD = r"/guilds/{guild_id:\d+}"
@@ -221,3 +225,48 @@ async def modstats(request: web.Request) -> web.Response:
             ),
         }
     )
+
+
+@routes.get(f"{GUILD}/audit")
+async def audit_history(request: web.Request) -> web.Response:
+    """Stored audit log entries (#154), newest first.
+
+    Query: actor, target (ids), action (comma list of audit log type numbers), q (search reasons
+    and changes), before (entry id cursor). Manage Server only, like every route here.
+    """
+    q = request.query
+    gid = guild_id(request)
+    config = await request.app[MODULES].get_module_config(gid, ModuleType.AUDIT_HISTORY)
+    entries = await AuditRepository(request.app[REPO].pool).search(  # type: ignore[arg-type]
+        gid,
+        actor=parse_int(q.get("actor", ""), BIGINT_MAX),
+        target=parse_int(q.get("target", ""), BIGINT_MAX),
+        actions=[int(a) for a in q.get("action", "").split(",") if a.isdigit()],
+        q=q.get("q", "").strip()[:100],
+        before=parse_int(q.get("before", ""), BIGINT_MAX),
+        limit=PAGE_SIZE,
+    )
+    return web.json_response({
+        "enabled": config.is_enabled,
+        "retention_days": config.settings.get("retention_days", RETENTION_DEFAULT),
+        "entries": [
+            {
+                "id": str(e["entry_id"]),
+                "action": e["action_type"],
+                "action_name": _action_name(e["action_type"]),
+                "actor": e["actor_id"] and _user(request, e["actor_id"]),
+                "target": e["target_id"] and str(e["target_id"]),
+                "reason": e["reason"],
+                "changes": e["changes"],
+                "options": e["options"],
+                "created_at": e["created_at"],
+            }
+            for e in entries
+        ],
+        "next": str(entries[-1]["entry_id"]) if len(entries) == PAGE_SIZE else None,
+    })
+
+
+def _action_name(action_type: int) -> str:
+    name = getattr(hikari.AuditLogEventType(action_type), "name", None)  # unknown types stay ints
+    return name.replace("_", " ").lower() if name else f"action {action_type}"

@@ -13,7 +13,8 @@
 		{ k: 'slowmode', icon: 'slowmode', title: 'Slowmode', desc: 'Scores each configured channel every interval and adjusts slowmode up or down.' },
 		{ k: 'logging', icon: 'logging', title: 'Logging', desc: 'Posts member, message, voice, server and mod events to your log channels.' },
 		{ k: 'moderation', icon: 'cases', title: 'Moderation', desc: 'Numbered cases for bans, kicks, timeouts and warnings, with per-user history.' },
-		{ k: 'security', icon: 'lock', title: 'Security', desc: 'Alerts the server owner about bursts of bans or deletes, and about admin roles, new bots, webhooks and lowered security. Set up with /security.' }
+		{ k: 'security', icon: 'lock', title: 'Security', desc: 'Alerts the server owner about bursts of bans or deletes, and about admin roles, new bots, webhooks and lowered security. Set up with /security.' },
+		{ k: 'audit_history', icon: 'audit', title: 'Audit history', desc: 'Keeps the server’s audit log past Discord’s 45 days, searchable on the Audit log page. Off until you turn it on.' }
 	];
 	const title = (k: string) => MODULES.find((m) => m.k === k)?.title ?? k;
 
