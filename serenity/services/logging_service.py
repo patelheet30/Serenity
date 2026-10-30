@@ -788,13 +788,15 @@ class LoggingService:
         One trigger fires an event per action of the rule (block, alert, timeout), a moment
         apart; they're collected into one embed.
         """
-        key = (event.guild_id, event.rule_id, event.user_id, event.content)
+        key = (event.guild_id, event.rule_id, event.user_id, event.channel_id, event.content)
         if key in self._automod_pending:
             self._automod_pending[key].append(event.action)
             return
         self._automod_pending[key] = [event.action]
-        await asyncio.sleep(1)
-        actions = self._automod_pending.pop(key)
+        try:
+            await asyncio.sleep(1)
+        finally:
+            actions = self._automod_pending.pop(key)
 
         embed = hikari.Embed(title="🛡️ AutoMod Action", color=_ORANGE, timestamp=_now())
         embed.add_field("User", f"<@{event.user_id}>", inline=True)
@@ -986,14 +988,13 @@ class LoggingService:
             role_mentions=role_ids,
         )
 
-    async def log_security_alert(
-        self, *, guild_id: int, embed: hikari.Embed, log_event: str, user_id: int
-    ) -> None:
-        """A Security module alert (#152, #153), posted to the Server log."""
+    async def log_security_alert(self, *, guild_id: int, embed: hikari.Embed, log_event: str) -> None:
+        """A Security module alert (#152, #153), posted to the Server log.
+
+        No user_id: an ignored user mustn't be able to hide their own alert.
+        """
         embed.timestamp = _now()
-        await self._send(
-            log_event=log_event, guild_id=guild_id, log_type="server", embed=embed, user_id=user_id
-        )
+        await self._send(log_event=log_event, guild_id=guild_id, log_type="server", embed=embed)
 
     async def log_slowmode_paused(
         self, *, guild_id: int, channel_id: int, moderator_id: int, old: int, new: int, until: int

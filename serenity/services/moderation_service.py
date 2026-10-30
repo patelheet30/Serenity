@@ -26,6 +26,8 @@ _EXTERNAL_ACTIONS: dict[object, str] = {
     hikari.AuditLogEventType.MEMBER_BAN_REMOVE: "unban",
     hikari.AuditLogEventType.MEMBER_KICK: "kick",
 }
+# Audit log types record_external can turn into a case (MEMBER_UPDATE only for timeouts).
+EXTERNAL_TYPES = frozenset({*_EXTERNAL_ACTIONS, hikari.AuditLogEventType.MEMBER_UPDATE})
 
 
 class ModerationService:
@@ -105,9 +107,13 @@ class ModerationService:
         if action is None:
             return None
 
+        async def user(user_id: hikari.Snowflake) -> hikari.User:
+            cache = getattr(entry.app, "cache", None)
+            return (cache and cache.get_user(user_id)) or await self._rest.fetch_user(user_id)
+
         try:
-            target = await self._rest.fetch_user(entry.target_id)
-            moderator = await self._rest.fetch_user(entry.user_id)
+            target = await user(entry.target_id)
+            moderator = await user(entry.user_id)
         except hikari.HTTPError:
             logger.warning(f"Couldn't fetch users for audit log entry {entry.id}", exc_info=True)
             return None
