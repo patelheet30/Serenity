@@ -180,6 +180,7 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     get(AuditActors).feed(event.entry)
     await get(LoggingService).log_audit_entry(event.entry)
     await get(SecurityService).on_entry(event.entry, me=me)
+    await get(SecurityService).check_dangerous(event.entry, me=me)
     await pause_for_manual_slowmode(
         event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
     )

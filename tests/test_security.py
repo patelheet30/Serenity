@@ -78,3 +78,76 @@ async def test_kinds_are_counted_separately():
 async def test_no_alert(svc, actor):
     await burst(svc, 5, actor=actor)
     svc._logging.log_security_alert.assert_not_called()
+
+
+# --- Dangerous-change warnings (#153) ----------------------------------------------------------
+
+P = hikari.Permissions
+K = hikari.AuditLogChangeKey
+
+
+def change_entry(action, changes, target=99, actor=MOD) -> hikari.AuditLogEntry:
+    e = entry(action=action, actor=actor, target=target)
+    e.changes = [hikari.AuditLogChange(key=k, old_value=o, new_value=n) for k, o, n in changes]
+    return e
+
+
+async def warned(svc, e) -> str | None:
+    await svc.check_dangerous(e, me=ME)
+    call = svc._logging.log_security_alert.call_args
+    return call and call.kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_role_gaining_admin_warns():
+    e = change_entry(hikari.AuditLogEventType.ROLE_UPDATE, [(K.PERMISSIONS, P.SEND_MESSAGES, P.SEND_MESSAGES | P.ADMINISTRATOR)])
+    assert "gained **Administrator**" in await warned(service(), e)
+
+
+@pytest.mark.asyncio
+async def test_everyone_role_is_named():
+    e = change_entry(hikari.AuditLogEventType.ROLE_UPDATE, [(K.PERMISSIONS, P.NONE, P.MENTION_ROLES)], target=GUILD)
+    assert (await warned(service(), e)).startswith("@everyone gained")
+
+
+@pytest.mark.asyncio
+async def test_powerful_role_given():
+    svc = service()
+    svc._cache.get_role.return_value = MagicMock(permissions=P.BAN_MEMBERS)
+    role = MagicMock(id=hikari.Snowflake(ROLE))
+    e = change_entry(hikari.AuditLogEventType.MEMBER_ROLE_UPDATE, [(K.ADD_ROLE_TO_MEMBER, None, {ROLE: role})], target=40)
+    assert f"<@40> was given <@&{ROLE}>" in await warned(svc, e)
+
+
+@pytest.mark.asyncio
+async def test_lowered_and_raised_security():
+    lower = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.VERIFICATION_LEVEL, hikari.GuildVerificationLevel.HIGH, hikari.GuildVerificationLevel.LOW)], target=GUILD)
+    assert "Verification level" in await warned(service(), lower)
+
+    raise_ = change_entry(hikari.AuditLogEventType.GUILD_UPDATE, [(K.MFA_LEVEL, hikari.GuildMFALevel.NONE, hikari.GuildMFALevel.ELEVATED)], target=GUILD)
+    assert await warned(service(), raise_) is None
+
+
+@pytest.mark.asyncio
+async def test_bot_and_webhook():
+    assert "was added" in await warned(service(), entry(action=hikari.AuditLogEventType.BOT_ADD))
+    hook = change_entry(hikari.AuditLogEventType.WEBHOOK_CREATE, [(K.NAME, None, "Spidey"), (K.CHANNEL_ID, None, 5)])
+    assert "**Spidey**" in await warned(service(), hook)
+
+
+@pytest.mark.asyncio
+async def test_no_warning_when_off_harmless_or_serenity():
+    admin = [(K.PERMISSIONS, P.NONE, P.ADMINISTRATOR)]
+    assert await warned(service(settings={"warnings": False}), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin)) is None
+    assert await warned(service(enabled=False), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin)) is None
+    assert await warned(service(), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, admin, actor=ME)) is None
+    harmless = [(K.PERMISSIONS, P.NONE, P.SEND_MESSAGES)]
+    assert await warned(service(), change_entry(hikari.AuditLogEventType.ROLE_UPDATE, harmless)) is None
+
+
+@pytest.mark.asyncio
+async def test_owner_changes_log_without_a_dm():
+    svc = service()
+    await svc.check_dangerous(entry(action=hikari.AuditLogEventType.BOT_ADD, actor=OWNER), me=ME)
+    svc._logging.log_security_alert.assert_called_once()
+    svc._rest.create_dm_channel.assert_not_called()

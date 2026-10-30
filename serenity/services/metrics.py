@@ -96,6 +96,8 @@ LOG_EVENTS = (
     "invite_create", "invite_delete", "thread_create", "thread_update", "thread_delete",
     "sticker_create", "sticker_update", "sticker_delete",
     "automod_rule_create", "automod_rule_update", "automod_rule_delete", "automod_action", "antinuke_alert",
+    "dangerous_permissions", "dangerous_role_given", "bot_added", "webhook_created",
+    "security_lowered",
     "mod_ban", "mod_softban", "mod_unban", "mod_kick", "mod_timeout", "mod_untimeout", "mod_warn",
     "external_ban", "external_unban", "external_kick", "external_timeout", "external_untimeout",
 )

@@ -13,7 +13,7 @@
 		{ k: 'slowmode', icon: 'slowmode', title: 'Slowmode', desc: 'Scores each configured channel every interval and adjusts slowmode up or down.' },
 		{ k: 'logging', icon: 'logging', title: 'Logging', desc: 'Posts member, message, voice, server and mod events to your log channels.' },
 		{ k: 'moderation', icon: 'cases', title: 'Moderation', desc: 'Numbered cases for bans, kicks, timeouts and warnings, with per-user history.' },
-		{ k: 'security', icon: 'lock', title: 'Security', desc: 'Alerts the server owner when someone deletes or bans in a burst. Set up with /security.' }
+		{ k: 'security', icon: 'lock', title: 'Security', desc: 'Alerts the server owner about bursts of bans or deletes, and about admin roles, new bots, webhooks and lowered security. Set up with /security.' }
 	];
 	const title = (k: string) => MODULES.find((m) => m.k === k)?.title ?? k;
 
