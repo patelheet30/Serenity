@@ -9,6 +9,7 @@ from serenity.database.repository import Repository
 from serenity.services.audit_actors import AuditActors
 from serenity.services.logging_service import LoggingService
 from serenity.services.moderation_service import EXTERNAL_TYPES, ModerationService
+from serenity.services.security_service import SecurityService
 from serenity.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -178,6 +179,7 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
     get = plugin.client.get_type_dependency
     get(AuditActors).feed(event.entry)
     await get(LoggingService).log_audit_entry(event.entry)
+    await get(SecurityService).on_entry(event.entry, me=me)
     await pause_for_manual_slowmode(
         event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
     )

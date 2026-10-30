@@ -12,7 +12,8 @@
 	const MODULES: { k: string; icon: IconName; title: string; desc: string }[] = [
 		{ k: 'slowmode', icon: 'slowmode', title: 'Slowmode', desc: 'Scores each configured channel every interval and adjusts slowmode up or down.' },
 		{ k: 'logging', icon: 'logging', title: 'Logging', desc: 'Posts member, message, voice, server and mod events to your log channels.' },
-		{ k: 'moderation', icon: 'cases', title: 'Moderation', desc: 'Numbered cases for bans, kicks, timeouts and warnings, with per-user history.' }
+		{ k: 'moderation', icon: 'cases', title: 'Moderation', desc: 'Numbered cases for bans, kicks, timeouts and warnings, with per-user history.' },
+		{ k: 'security', icon: 'lock', title: 'Security', desc: 'Alerts the server owner when someone deletes or bans in a burst. Set up with /security.' }
 	];
 	const title = (k: string) => MODULES.find((m) => m.k === k)?.title ?? k;
 

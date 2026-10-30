@@ -177,6 +177,15 @@ async def enable_module(
                 value="Use `/logging setup` to configure log channels.",
                 inline=False,
             )
+        elif module_type == ModuleType.SECURITY:
+            embed.add_field(
+                name="Next Steps",
+                value=(
+                    "Anti-nuke alerts are on. Trust staff with `/security trust`, tune limits with "
+                    "`/security threshold`, and grant me **View Audit Log** if I don't have it."
+                ),
+                inline=False,
+            )
         elif module_type == ModuleType.TICKETS:
             embed.add_field(
                 name="Next Steps",

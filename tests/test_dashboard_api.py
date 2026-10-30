@@ -457,7 +457,7 @@ async def test_modules_follow_the_dependency_rules(settings):
     await settings("PUT", "/modules/logging", {"enabled": True})
     status, body = await settings("PUT", "/modules/moderation", {"enabled": True})
     assert status == 200
-    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False}
+    assert body["enabled"] == {"slowmode": False, "moderation": True, "logging": True, "tickets": False, "security": False}
     assert body["requires"]["moderation"] == ["logging"]
 
     status, body = await settings("PUT", "/modules/logging", {"enabled": False})
