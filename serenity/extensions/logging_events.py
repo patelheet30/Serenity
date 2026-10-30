@@ -186,18 +186,21 @@ async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
         ):
             await get(ModerationService).record_external(entry, me=me)
 
-    # Each feature runs even if an earlier one fails on this entry.
-    for step in (
-        get(LoggingService).log_audit_entry(entry),
-        get(SecurityService).on_entry(entry, me=me),
-        get(SecurityService).check_dangerous(entry, me=me),
-        pause_for_manual_slowmode(entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)),
-        record_external(),
+    # Each feature runs even if an earlier one fails on this entry; each step is only built when
+    # its turn comes, so a failure can't leave the others un-awaited.
+    for name, step in (
+        ("logs", lambda: get(LoggingService).log_audit_entry(entry)),
+        ("anti-nuke", lambda: get(SecurityService).on_entry(entry, me=me)),
+        ("warnings", lambda: get(SecurityService).check_dangerous(entry, me=me)),
+        ("slowmode pause", lambda: pause_for_manual_slowmode(
+            entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
+        )),
+        ("external cases", record_external),
     ):
         try:
-            await step
+            await step()
         except Exception:
-            logger.exception(f"Audit log entry {entry.id} failed in {step.__qualname__}")
+            logger.exception(f"Audit log entry {entry.id} failed in {name}")
 
 
 # ---------------------------------------------------------------------------
