@@ -516,7 +516,7 @@ async def test_slowmode_channels(settings, pg_repo):
     path = f"/slowmode/channels/{TEXT_CHANNEL}"
     status, body = await settings("PUT", path, {"enabled": False, "threshold": 15})
     assert body["channels"] == [
-        {"id": str(TEXT_CHANNEL), "enabled": False, "threshold": 15, "slowmode": 5}
+        {"id": str(TEXT_CHANNEL), "enabled": False, "threshold": 15, "slowmode": 5, "paused_until": None}
     ]
     status, body = await settings("PUT", path, {"threshold": None})
     assert body["channels"][0]["threshold"] is None

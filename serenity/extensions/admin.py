@@ -1,3 +1,5 @@
+import time
+
 import arc
 import hikari
 
@@ -460,6 +462,16 @@ async def channel_config(
             ),
             inline=False,
         )
+
+        if channel_config.paused_until and channel_config.paused_until > time.time():
+            embed.add_field(
+                name="⏸️ Paused",
+                value=(
+                    f"Slowmode was set by hand, so auto-slowmode resumes "
+                    f"<t:{channel_config.paused_until}:R>. Run `/serenity channel enable` to resume now."
+                ),
+                inline=False,
+            )
 
         embed.set_footer(text="Use /serenity channel to configure settings")
         await ctx.respond(embed=embed)

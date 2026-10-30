@@ -238,6 +238,7 @@ main.dash{max-width:1440px;margin:0 auto;padding:22px 20px 80px}
 .chname svg{color:var(--fg3);width:13px;height:13px}
 .sm-val{font-family:var(--mono);font-size:12.5px}
 .sm-val.on{color:var(--acc)}
+.paused{margin-left:6px;font-family:var(--mono);font-size:10.5px;color:var(--warn);background:none;border:1px solid currentColor;border-radius:4px;padding:0 4px;cursor:pointer}
 .sub td{background:var(--ink)!important;padding:0}
 .subin{padding:8px 12px 12px 34px;font-size:12px}
 .subin table{width:100%;border-collapse:collapse}

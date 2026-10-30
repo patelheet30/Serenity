@@ -1,7 +1,10 @@
+import time
+
 import arc
 import hikari
 
 from serenity.core.modules import ModuleManager, ModuleType
+from serenity.database.repository import Repository
 from serenity.services.logging_service import LoggingService
 from serenity.services.moderation_service import ModerationService
 from serenity.utils.logging import get_logger
@@ -132,12 +135,44 @@ async def on_emojis_update(event: hikari.EmojisUpdateEvent) -> None:
 # ---------------------------------------------------------------------------
 
 
+MANUAL_SLOWMODE_PAUSE = 3600  # seconds auto-slowmode leaves a hand-set slowmode alone (#150)
+
+
+async def pause_for_manual_slowmode(
+    entry: hikari.AuditLogEntry, *, me: int, repo: Repository, logging_svc: LoggingService
+) -> None:
+    """Someone other than Serenity changed a channel's slowmode: stop adjusting it for an hour."""
+    if entry.user_id in (None, me) or entry.target_id is None or entry.action_type not in (
+        hikari.AuditLogEventType.CHANNEL_UPDATE,
+        hikari.AuditLogEventType.THREAD_UPDATE,
+    ):
+        return
+    change = next(
+        (c for c in entry.changes if c.key == hikari.AuditLogChangeKey.RATE_LIMIT_PER_USER), None
+    )
+    if change is None:
+        return
+    until = int(time.time()) + MANUAL_SLOWMODE_PAUSE
+    if await repo.pause_channel(entry.target_id, until):
+        await logging_svc.log_slowmode_paused(
+            guild_id=entry.guild_id,
+            channel_id=entry.target_id,
+            moderator_id=entry.user_id,  # type: ignore[arg-type]
+            old=int(change.old_value.total_seconds()) if change.old_value else 0,
+            new=int(change.new_value.total_seconds()) if change.new_value else 0,
+            until=until,
+        )
+
+
 @plugin.listen()
 async def on_audit_log_entry(event: hikari.AuditLogEntryCreateEvent) -> None:
-    modules: ModuleManager = plugin.client.get_type_dependency(ModuleManager)
-    if await modules.is_enabled(event.guild_id, ModuleType.MODERATION):
-        mod: ModerationService = plugin.client.get_type_dependency(ModerationService)
-        await mod.record_external(event.entry, me=plugin.client.app.get_me().id)  # type: ignore[union-attr]
+    me = plugin.client.app.get_me().id  # type: ignore[union-attr]
+    get = plugin.client.get_type_dependency
+    await pause_for_manual_slowmode(
+        event.entry, me=me, repo=get(Repository), logging_svc=get(LoggingService)
+    )
+    if await get(ModuleManager).is_enabled(event.guild_id, ModuleType.MODERATION):
+        await get(ModerationService).record_external(event.entry, me=me)
 
 
 # ---------------------------------------------------------------------------
