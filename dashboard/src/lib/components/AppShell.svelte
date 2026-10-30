@@ -9,7 +9,7 @@
 	import Mark from './Mark.svelte';
 	import UserMenu from './UserMenu.svelte';
 
-	// Top command bar: brand, server switcher, section tabs (second row below 1500px), ⌘K, account.
+	// Top command bar: brand, server switcher, ⌘K and account; section tabs on a second row.
 	let {
 		me,
 		guild,
