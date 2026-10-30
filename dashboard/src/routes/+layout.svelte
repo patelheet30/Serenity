@@ -1,7 +1,9 @@
 <script lang="ts">
 	import '#lib/styles.css';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { LOGIN_URL } from '#lib/api.ts';
+	import CookieNotice from '#lib/components/CookieNotice.svelte';
 	import Palette from '#lib/components/Palette.svelte';
 	import ShortcutSheet from '#lib/components/ShortcutSheet.svelte';
 	import Toasts from '#lib/components/Toasts.svelte';
@@ -11,6 +13,8 @@
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
+
+	const PUBLIC = new Set(['/', '/privacy', '/terms', '/cookies']);
 
 	$effect(() =>
 		registerCommands([
@@ -57,8 +61,14 @@
 
 <svelte:window {onkeydown} />
 
+<svelte:head>
+	<!-- Also the colour of the bar on Discord's link embeds: amber for the public pages, the app's ink elsewhere. -->
+	<meta name="theme-color" content={PUBLIC.has(page.url.pathname) ? '#ffb547' : '#0f1019'} />
+</svelte:head>
+
 <a class="skip" href="#main">Skip to content</a>
 {@render children()}
 <Palette />
 <ShortcutSheet />
 <Toasts />
+<CookieNotice />

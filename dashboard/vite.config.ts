@@ -10,10 +10,10 @@ export default defineConfig(({ mode }) => ({
 				runes: ({ filename }) =>
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
-			// SPA: the landing page is prerendered, everything else falls back to 200.html (see Caddyfile).
+			// SPA: the landing and legal pages are prerendered, everything else falls back to 200.html (see Caddyfile).
 			adapter: adapter({ fallback: '200.html' }),
-			// Only the landing page is prerendered; don't crawl into the API it links to.
-			prerender: { entries: ['/'], crawl: false }
+			// Only the landing and legal pages are prerendered; don't crawl into the API they link to.
+			prerender: { entries: ['/', '/privacy', '/terms', '/cookies'], crawl: false }
 		})
 	],
 	server: {
